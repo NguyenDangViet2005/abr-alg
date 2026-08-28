@@ -1,15 +1,24 @@
 #ifndef ABRCONFIGS_H
 #define ABRCONFIGS_H
 
-// Standalone configs khi XBFIRM == false (không phụ thuộc xbfirm/settings)
-// Migrated từ GeneralConfigs.h + defaults từ GeneralSetting.cpp
+// Standalone configs used when XBFIRM == false (no dependency on xbfirm/settings).
+// Migrated from GeneralConfigs.h + defaults from GeneralSetting.cpp.
 
 // ── GeneralConfigs subset ──
 #define SERVER_UDP_WEBAPP 3010
 #define ID_MODEM_DATA_ABR_CPA "49"
 
-// ── ABR defaults (fallback khi không có GeneralSetting/Settings) ──
-// Lấy từ GeneralSetting.cpp _setting->value(..., default)
+// ── SRT QoS UDP listener (app mode, XBFIRM == false) ──
+// UDP port for receiving QoS connection stats from an external XBSRTFactory.
+#define SRT_ABR_QOS_UDP_PORT 12345
+
+// ── CameraControl (camera adapt-bitrate API) ──
+#define CAMERA_ADAPT_BITRATE_HOST "127.0.0.1"
+#define CAMERA_ADAPT_BITRATE_PORT 4002
+#define CAMERA_ADAPT_BITRATE_PATH "/api/camera/adapt-bitrate"
+
+// ── ABR defaults (fallback when GeneralSetting/Settings is unavailable) ──
+// Sourced from GeneralSetting.cpp _setting->value(..., default).
 #define ABR_DEFAULT_JITTER_STABLE_THRESHOLD   15.0f
 #define ABR_DEFAULT_STABLE_THRESHOLD          50.0f
 #define ABR_DEFAULT_STABLE_AFTER_DECREASE     20.0f

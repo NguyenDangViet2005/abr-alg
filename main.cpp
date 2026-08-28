@@ -1,9 +1,15 @@
 #include <QCoreApplication>
+#include "ABRFactory.h"
+#include "dev/NetworkHandler.h"
+#include "dev/CameraControl.h"
 
 int main(int argc, char *argv[])
 {
     QCoreApplication a(argc, argv);
 
+    ABRFactory abrFactory;
+    NetworkHandler networkHandler;
+    CameraControl cameraControl;
     // Set up code that uses the Qt event loop here.
     // Call QCoreApplication::quit() or QCoreApplication::exit() to quit the application.
     // A not very useful example would be including
