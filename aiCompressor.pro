@@ -57,8 +57,6 @@ HEADERS += \
     SRTAdaptiveBitrateStreaming.h \
     XBAdaptiveBitrateStreaming.h \
     XBDualCellAdaptiveBitrateStreaming.h \
-    dev/CameraControl.h \
-    dev/NetworkHandler.h \
     lib/fuzzyData.h
 
 SOURCES += \
@@ -68,9 +66,17 @@ SOURCES += \
     IAdaptiveBitrateStreaming.cpp \
     SRTAdaptiveBitrateStreaming.cpp \
     XBAdaptiveBitrateStreaming.cpp \
-    XBDualCellAdaptiveBitrateStreaming.cpp \
-    dev/CameraControl.cpp \
-    dev/NetworkHandler.cpp
+    XBDualCellAdaptiveBitrateStreaming.cpp
+
+# CameraControl / NetworkHandler chỉ build khi XBFIRM (lib mode).
+equals(XBFIRM, true) {
+    HEADERS += \
+        dev/CameraControl.h \
+        dev/NetworkHandler.h
+    SOURCES += \
+        dev/CameraControl.cpp \
+        dev/NetworkHandler.cpp
+}
 
 !equals(XBFIRM, true) {
     SOURCES += main.cpp

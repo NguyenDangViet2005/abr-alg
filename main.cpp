@@ -1,15 +1,19 @@
 #include <QCoreApplication>
 #include "ABRFactory.h"
+#ifdef XBFIRM
 #include "dev/NetworkHandler.h"
 #include "dev/CameraControl.h"
+#endif
 
 int main(int argc, char *argv[])
 {
     QCoreApplication a(argc, argv);
 
     ABRFactory abrFactory;
+#ifdef XBFIRM
     NetworkHandler networkHandler;
     CameraControl cameraControl;
+#endif
     // Set up code that uses the Qt event loop here.
     // Call QCoreApplication::quit() or QCoreApplication::exit() to quit the application.
     // A not very useful example would be including
