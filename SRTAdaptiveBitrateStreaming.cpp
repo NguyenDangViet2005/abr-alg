@@ -1,4 +1,5 @@
 #include "SRTAdaptiveBitrateStreaming.h"
+#include <algorithm>
 
 SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     : IAdaptiveBitrateStreaming(parent)
@@ -10,50 +11,77 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_srtLatencyMs(DEFAULT_SRT_LATENCY_MS)
     , m_rttAvg(0.0)
     , m_rttAvgDelta(0.0)
-    , m_prevRtt(200.0)
-    , m_rttMin(200.0)
+    , m_prevRtt(25.0)
+    , m_rttMin(25.0)
     , m_rttJitter(0.0)
     , m_bsAvg(0.0)
     , m_bsJitter(0.0)
     , m_prevBs(0)
     , m_throughput(0.0)
-    , m_nextBitrateIncr(0)
-    , m_nextBitrateDecr(0)
+    , m_lastBitrateChangeTime(0)
+    , m_lastBitrateIncrTime(0)
+    , m_cooldownUntilMs(0)
+    , m_consecutiveClearCount(0)
+    , m_heartbeatTimer(nullptr)
+    , m_latestSmoothedRtt(0.0)
+    , m_latestSmoothedBw(0.0)
+    , m_latestDeltaLoss(0)
+    , m_latestStatusReason("IDLE (Cho QoS tu Server...)")
+    , m_lastQosPacketTime(0)
     , m_lastLossTotal(0)
     , m_hasLastLoss(false)
     , m_lastCongestionState(CongestionState::Clear)
 {
-    qInfo() << "[BelaCoder-SRT] Initialized. Initial Bitrate:" << m_currentBitrateKbps
+    m_heartbeatTimer = new QTimer(this);
+    connect(m_heartbeatTimer, &QTimer::timeout, this, &SRTAdaptiveBitrateStreaming::onHeartbeatTimeout);
+
+    qInfo() << "[BelaCoder-SRT] Initialized Anti-Oscillation ABR. Initial Bitrate:" << m_currentBitrateKbps
             << "kbps (Min:" << m_minBitrateKbps << ", Max:" << m_maxBitrateKbps
-            << ", Rounding:" << BITRATE_ROUNDING_STEP_KBPS << "kbps, Latency:" << m_srtLatencyMs << "ms)";
+            << ", Rounding:" << BITRATE_ROUNDING_STEP_KBPS << "kbps, Clear Required:" << CONSECUTIVE_CLEAR_REQUIRED << ")";
 }
 
 void SRTAdaptiveBitrateStreaming::start()
 {
     m_isRunning = true;
+    m_rttHistory.clear();
+    m_bwHistory.clear();
+    m_lossHistory.clear();
+
     m_rttAvg = 0.0;
     m_rttAvgDelta = 0.0;
-    m_prevRtt = 200.0;
-    m_rttMin = 200.0;
+    m_prevRtt = 25.0;
+    m_rttMin = 25.0;
     m_rttJitter = 0.0;
     m_bsAvg = 0.0;
     m_bsJitter = 0.0;
     m_prevBs = 0;
     m_throughput = 0.0;
-    m_nextBitrateIncr = 0;
-    m_nextBitrateDecr = 0;
+
+    m_lastBitrateChangeTime = QDateTime::currentMSecsSinceEpoch();
+    m_lastBitrateIncrTime = m_lastBitrateChangeTime;
+    m_cooldownUntilMs = 0;
+    m_consecutiveClearCount = 0;
     m_hasLastLoss = false;
     m_lastLossTotal = 0;
+    m_isBootstrapped = false;
     m_lastCongestionState = CongestionState::Clear;
+    m_latestStatusReason = "IDLE (Cho QoS tu Server...)";
+    m_lastQosPacketTime = 0;
 
-    qInfo() << "[BelaCoder-SRT] Started ABR service for SRT/RF link. Current Bitrate:" << m_currentBitrateKbps << "kbps";
-    emit bitrateChanged(m_currentBitrateKbps);
+    if (m_heartbeatTimer) {
+        m_heartbeatTimer->start(1000); // Bắt đầu in log Heartbeat mỗi giây ngay khi app khởi động
+    }
+
+    qInfo() << "[BelaCoder-SRT] Started ABR service for SRT/RF link. Waiting for live network stats to compute initial bitrate...";
     emit onStatus(1);
 }
 
 void SRTAdaptiveBitrateStreaming::stop()
 {
     m_isRunning = false;
+    if (m_heartbeatTimer && m_heartbeatTimer->isActive()) {
+        m_heartbeatTimer->stop();
+    }
     qInfo() << "[BelaCoder-SRT] Stopped ABR service.";
     emit onStatus(0);
 }
@@ -62,13 +90,19 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
 {
     unsigned int target = (bitrateKbps > 0) ? static_cast<unsigned int>(bitrateKbps) : DEFAULT_INITIAL_BITRATE_KBPS;
     m_currentBitrateKbps = qBound(m_minBitrateKbps, target, m_maxBitrateKbps);
+    m_rttHistory.clear();
+    m_bwHistory.clear();
+    m_lossHistory.clear();
+
     m_rttAvg = 0.0;
     m_rttAvgDelta = 0.0;
-    m_prevRtt = 200.0;
-    m_rttMin = 200.0;
+    m_prevRtt = 25.0;
+    m_rttMin = 25.0;
     m_rttJitter = 0.0;
-    m_nextBitrateIncr = 0;
-    m_nextBitrateDecr = 0;
+    m_lastBitrateChangeTime = QDateTime::currentMSecsSinceEpoch();
+    m_lastBitrateIncrTime = m_lastBitrateChangeTime;
+    m_cooldownUntilMs = 0;
+    m_consecutiveClearCount = 0;
     m_hasLastLoss = false;
     m_lastLossTotal = 0;
     m_lastCongestionState = CongestionState::Clear;
@@ -108,6 +142,47 @@ void SRTAdaptiveBitrateStreaming::handleSerialStatus(bool isConnected)
 {
     m_isConnected = isConnected;
     qInfo() << "[BelaCoder-SRT] RF Datalink status changed:" << (isConnected ? "CONNECTED" : "DISCONNECTED");
+}
+
+double SRTAdaptiveBitrateStreaming::calculateMedian(QVector<double> list)
+{
+    if (list.isEmpty()) return 0.0;
+    std::sort(list.begin(), list.end());
+    int mid = list.size() / 2;
+    if (list.size() % 2 != 0) {
+        return list.at(mid);
+    }
+    return (list.at(mid - 1) + list.at(mid)) / 2.0;
+}
+
+double SRTAdaptiveBitrateStreaming::calculateAverage(const QVector<double> &list)
+{
+    if (list.isEmpty()) return 0.0;
+    double sum = 0.0;
+    for (double v : list) sum += v;
+    return sum / static_cast<double>(list.size());
+}
+
+void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
+{
+    if (!m_isRunning) return;
+
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    bool hasRecentQos = (m_lastQosPacketTime > 0 && (now - m_lastQosPacketTime) < 3000);
+
+    if (!hasRecentQos) {
+        qInfo().noquote() << QString("[BelaCoder-SRT Status] RTT: --ms | BW: 0.00 Mbps | Loss: 0 | Bitrate: %1 kbps | IDLE (Chua co QoS tu Server...)")
+                    .arg(m_currentBitrateKbps);
+        return;
+    }
+
+    qInfo().noquote() << QString("[BelaCoder-SRT Status] RTT: %1ms (min %2ms) | BW: %3 Mbps | Loss: %4 | Bitrate: %5 kbps | %6")
+                .arg(m_latestSmoothedRtt, 0, 'f', 1)
+                .arg(m_rttMin, 0, 'f', 1)
+                .arg(m_latestSmoothedBw, 0, 'f', 2)
+                .arg(m_latestDeltaLoss)
+                .arg(m_currentBitrateKbps)
+                .arg(m_latestStatusReason);
 }
 
 void SRTAdaptiveBitrateStreaming::handleQosCameraConnection(const QVariantList &clients)
@@ -152,16 +227,66 @@ void SRTAdaptiveBitrateStreaming::handleQosControllingConnection(const QVariantL
     Q_UNUSED(clients);
 }
 
-void SRTAdaptiveBitrateStreaming::processSrtQos(double rtt, double bandwidthMbps, double sendRateMbps, int lossTotal, int bufferSize)
+void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps, int rawLossTotal, int rawBufferSize)
 {
-    Q_UNUSED(sendRateMbps);
+    Q_UNUSED(rawSendRateMbps);
     qint64 ctime = QDateTime::currentMSecsSinceEpoch();
 
-    // ── 1. Update Send Buffer Statistics (belacoder.c lines 190-203) ──
-    int bs = bufferSize;
+    // ── 1. Sliding Window Smoothing (🟡 Mục 7) ──
+    if (rawRtt > 0.0) {
+        m_rttHistory.append(rawRtt);
+        if (m_rttHistory.size() > SLIDING_WINDOW_SIZE) m_rttHistory.removeFirst();
+    }
+    if (rawBandwidthMbps > 0.0) {
+        m_bwHistory.append(rawBandwidthMbps);
+        if (m_bwHistory.size() > SLIDING_WINDOW_SIZE) m_bwHistory.removeFirst();
+    }
+
+    double smoothedRtt = (m_rttHistory.isEmpty()) ? rawRtt : calculateMedian(m_rttHistory);
+    double smoothedBw = (m_bwHistory.isEmpty()) ? rawBandwidthMbps : calculateAverage(m_bwHistory);
+
+    // Sanity check RTT (🟡 Mục 8: loại bỏ giá trị bất thường < 5ms trên Wi-Fi/RF)
+    if (smoothedRtt < MIN_VALID_RTT_MS) {
+        smoothedRtt = MIN_VALID_RTT_MS;
+    }
+
+    // ── 2. Live Bootstrapping: Tự động tính toán Bitrate ban đầu theo thông số mạng thực tế ──
+    if (!m_isBootstrapped) {
+        unsigned int calculatedInitialBitrate = m_minBitrateKbps;
+        if (smoothedBw > 0.0) {
+            // Khởi tạo ngay ở mức 75% băng thông mạng đo được ban đầu
+            calculatedInitialBitrate = static_cast<unsigned int>(smoothedBw * 1000.0 * 0.75);
+        } else {
+            if (smoothedRtt < 30.0 && rawLossTotal == 0) {
+                calculatedInitialBitrate = 1000;
+            } else if (smoothedRtt < 100.0) {
+                calculatedInitialBitrate = 600;
+            } else {
+                calculatedInitialBitrate = m_minBitrateKbps;
+            }
+        }
+
+        calculatedInitialBitrate = (calculatedInitialBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+        calculatedInitialBitrate = qBound(m_minBitrateKbps, calculatedInitialBitrate, m_maxBitrateKbps);
+
+        m_currentBitrateKbps = calculatedInitialBitrate;
+        m_isBootstrapped = true;
+
+        qInfo().noquote() << QString("[BelaCoder-SRT] LIVE BOOTSTRAP: Initial Bitrate calculated directly from live network: %1 kbps (BW: %2 Mbps, RTT: %3ms, Loss: %4)")
+                    .arg(m_currentBitrateKbps)
+                    .arg(smoothedBw, 0, 'f', 2)
+                    .arg(smoothedRtt, 0, 'f', 1)
+                    .arg(rawLossTotal);
+
+        emit bitrateChanged(m_currentBitrateKbps);
+        return;
+    }
+
+    // ── 3. Update Send Buffer Statistics ──
+    int bs = rawBufferSize;
     if (bs >= 0) {
-        m_bsAvg = m_bsAvg * 0.99 + static_cast<double>(bs) * 0.01;
-        m_bsJitter *= 0.99;
+        m_bsAvg = m_bsAvg * 0.95 + static_cast<double>(bs) * 0.05;
+        m_bsJitter *= 0.95;
         int delta_bs = bs - m_prevBs;
         if (delta_bs > m_bsJitter) {
             m_bsJitter = static_cast<double>(delta_bs);
@@ -169,83 +294,193 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rtt, double bandwidthMbps
         m_prevBs = bs;
     }
 
-    // ── 2. Update RTT Statistics (belacoder.c lines 208-238) ──
+    // ── 4. Update RTT Statistics & Thresholds ──
     if (m_rttAvg == 0.0) {
-        m_rttAvg = rtt;
+        m_rttAvg = smoothedRtt;
     } else {
-        m_rttAvg = m_rttAvg * 0.99 + 0.01 * rtt;
+        m_rttAvg = m_rttAvg * 0.95 + 0.05 * smoothedRtt;
     }
 
-    double delta_rtt = rtt - m_prevRtt;
+    double delta_rtt = smoothedRtt - m_prevRtt;
     m_rttAvgDelta = m_rttAvgDelta * 0.8 + delta_rtt * 0.2;
-    m_prevRtt = rtt;
+    m_prevRtt = smoothedRtt;
 
-    m_rttMin *= 1.001; // slow drift upwards
-    if (rtt > 0.0 && rtt != 100.0 && rtt < m_rttMin && m_rttAvgDelta < 1.0) {
-        m_rttMin = rtt;
+    // Slow upwards drift for min RTT floor
+    m_rttMin *= 1.0005;
+    if (smoothedRtt >= MIN_VALID_RTT_MS && smoothedRtt < m_rttMin && m_rttAvgDelta < 0.5) {
+        m_rttMin = smoothedRtt;
+    }
+    if (m_rttMin < MIN_VALID_RTT_MS) {
+        m_rttMin = MIN_VALID_RTT_MS;
     }
 
-    m_rttJitter *= 0.99;
+    m_rttJitter *= 0.95;
     if (delta_rtt > m_rttJitter) {
         m_rttJitter = delta_rtt;
     }
 
-    // ── 3. Update Throughput Rolling Average (belacoder.c lines 243-246) ──
-    m_throughput *= 0.97;
-    m_throughput += (bandwidthMbps * 1000.0) * 0.03;
-
-    // ── 4. Packet Loss Delta Calculation ──
+    // ── 5. Packet Loss Delta ──
     int deltaLoss = 0;
     if (m_hasLastLoss) {
-        deltaLoss = qMax(0, lossTotal - m_lastLossTotal);
+        deltaLoss = qMax(0, rawLossTotal - m_lastLossTotal);
     }
-    m_lastLossTotal = lossTotal;
+    m_lastLossTotal = rawLossTotal;
     m_hasLastLoss = true;
 
-    // ── 5. Calculate Dynamic Thresholds (belacoder.c lines 256-262) ──
+    // ── 6. Calculate Dynamic Metrics ──
+    double rttInflation = (smoothedRtt > m_rttMin) ? (smoothedRtt - m_rttMin) : 0.0;
+    double rtt_th_max = m_rttAvg + qMax(m_rttJitter * 3.0, m_rttAvg * 0.15);
+    double rtt_th_min = m_rttMin + qMax(2.0, m_rttJitter * 1.5);
+    double estBwKbps = smoothedBw * 1000.0;
+
     int bs_th3 = static_cast<int>((m_bsAvg + m_bsJitter) * 4.0);
     int bs_th2 = static_cast<int>(qMax(50.0, m_bsAvg + qMax(m_bsJitter * 3.0, m_bsAvg)));
     int bs_th1 = static_cast<int>(qMax(50.0, m_bsAvg + m_bsJitter * 2.5));
 
-    double rtt_th_max = m_rttAvg + qMax(m_rttJitter * 4.0, m_rttAvg * 0.15);
-    double rtt_th_min = m_rttMin + qMax(1.0, m_rttJitter * 2.0);
+    // ── 7. Phân cấp mức độ nghẽn (Phân biệt Nhiễu RF ngẫu nhiên vs Nghẽn mạng thật) ──
+    CongestionState state = CongestionState::Clear;
 
-    int bitrate = static_cast<int>(m_currentBitrateKbps);
-
-    // ── 6. Exact 4-Zone BelaCoder Adaptation Logic (belacoder.c lines 264-282) ──
-
-    // VÙNG 1: SẬP MẠNG KHẨN CẤP (Panic / Emergency Drop)
-    if (bitrate > static_cast<int>(m_minBitrateKbps) && (rtt >= (m_srtLatencyMs / 3.0) || (bs > 0 && bs > bs_th3) || deltaLoss > 10)) {
-        bitrate = m_minBitrateKbps;
-        m_nextBitrateDecr = ctime + BITRATE_DECR_INT_MS;
-        m_lastCongestionState = CongestionState::Panic;
+    // VÙNG SẬP / KHẨN CẤP (Panic): Mạng nghẽn nghiêm trọng hoặc sập sóng
+    if (smoothedRtt >= (m_srtLatencyMs / 3.0) || rttInflation > 250.0 || (deltaLoss >= 12 && rttInflation > 40.0) || (bs > 0 && bs > bs_th3)) {
+        state = CongestionState::Panic;
     }
-    // VÙNG 2: NGHẼN NẶNG (Heavy Congestion / Fast Decrease)
-    else if (ctime >= m_nextBitrateDecr && (rtt > (m_srtLatencyMs / 5.0) || (bs > 0 && bs > bs_th2) || deltaLoss > 0)) {
-        bitrate -= static_cast<int>(BITRATE_DECR_MIN_KBPS + (bitrate / BITRATE_DECR_SCALE));
-        m_nextBitrateDecr = ctime + BITRATE_DECR_FAST_INT_MS;
-        m_lastCongestionState = CongestionState::Heavy;
+    // VÙNG NGHẼN NẶNG (Heavy Moderate - 20-25%): Nghẽn thật sự (Loss đi kèm trễ dồn RTT > 35ms)
+    else if (rttInflation > 120.0 || (deltaLoss >= 4 && rttInflation > 35.0) || (bs > 0 && bs > bs_th2) || smoothedRtt > (m_srtLatencyMs / 5.0)) {
+        state = CongestionState::HeavyModerate;
     }
-    // VÙNG 3: NGHẼN NHẸ (Light Congestion / Step Decrease)
-    else if (ctime >= m_nextBitrateDecr && (rtt > rtt_th_max || (bs > 0 && bs > bs_th1))) {
-        bitrate -= static_cast<int>(BITRATE_DECR_MIN_KBPS);
-        m_nextBitrateDecr = ctime + BITRATE_DECR_INT_MS;
-        m_lastCongestionState = CongestionState::Light;
+    // VÙNG NGHẼN NHẸ (Heavy Light - 10-15%): Chớm nghẽn (RTT tăng nhẹ > 60ms) hoặc Loss dồn dập (>= 8 gói)
+    else if (rttInflation > 60.0 || (deltaLoss >= 2 && rttInflation > 20.0) || deltaLoss >= 8) {
+        state = CongestionState::HeavyLight;
     }
-    // VÙNG 4: MẠNG THÔNG THOÁNG & ỔN ĐỊNH (Clear / Stable Increase)
-    else if (ctime >= m_nextBitrateIncr && rtt < rtt_th_min && m_rttAvgDelta < 0.01) {
-        bitrate += static_cast<int>(BITRATE_INCR_MIN_KBPS + (bitrate / BITRATE_INCR_SCALE));
-        m_nextBitrateIncr = ctime + BITRATE_INCR_INT_MS;
-        m_lastCongestionState = CongestionState::Clear;
+    // VÙNG NHIỄU SÓNG RF HOẶC GIỮ NHỊP (Hold / Light Congestion)
+    // 1. Nhiễu RF ngẫu nhiên: rớt 1-4 gói nhưng RTT vẫn rất thấp (rttInflation <= 20ms) -> SRT ARQ tự sửa, KHÔNG hạ bitrate!
+    // 2. RTT dao động nhẹ trên mức min
+    else if (deltaLoss > 0 || smoothedRtt > rtt_th_max || (bs > 0 && bs > bs_th1)) {
+        state = CongestionState::Light;
+    }
+    // VÙNG THÔNG THOÁNG (Clear): Sạch loss (deltaLoss == 0) và RTT sát sàn min
+    else if (deltaLoss == 0 && smoothedRtt <= rtt_th_min && m_rttAvgDelta < 0.05) {
+        state = CongestionState::Clear;
+    }
+    else {
+        state = CongestionState::Light; // Default safe hold
     }
 
-    // ── 7. Clamp and Quantize to 50 kbps Step (Requested by user) ──
-    bitrate = qBound(static_cast<int>(m_minBitrateKbps), bitrate, static_cast<int>(m_maxBitrateKbps));
+    m_lastCongestionState = state;
+    m_latestSmoothedRtt = smoothedRtt;
+    m_latestSmoothedBw = smoothedBw;
+    m_latestDeltaLoss = deltaLoss;
+    m_lastQosPacketTime = ctime;
 
-    int rounded_br = (bitrate / static_cast<int>(BITRATE_ROUNDING_STEP_KBPS)) * static_cast<int>(BITRATE_ROUNDING_STEP_KBPS);
-    rounded_br = qBound(static_cast<int>(m_minBitrateKbps), rounded_br, static_cast<int>(m_maxBitrateKbps));
+    // Cập nhật nguyên nhân trạng thái cho Heartbeat Timer
+    if (ctime < m_cooldownUntilMs) {
+        double remSec = (m_cooldownUntilMs - ctime) / 1000.0;
+        m_latestStatusReason = QString("COOLDOWN (Con %1s)").arg(remSec, 0, 'f', 1);
+    } else if (state == CongestionState::Clear) {
+        m_latestStatusReason = QString("CLEAR (Dem %1/%2 sample de tang)").arg(m_consecutiveClearCount).arg(CONSECUTIVE_CLEAR_REQUIRED);
+    } else if (state == CongestionState::Light) {
+        if (deltaLoss > 0 && rttInflation <= 20.0) {
+            m_latestStatusReason = QString("HOLD (Nhieu RF - Rot %1 goi, RTT tot -> Giu nguyen bitrate)").arg(deltaLoss);
+        } else {
+            m_latestStatusReason = "HOLD (Mang on dinh / Giu nguyen bitrate)";
+        }
+    } else if (state == CongestionState::HeavyLight) {
+        m_latestStatusReason = "HEAVY_LIGHT (Giam nhe 10-15%)";
+    } else if (state == CongestionState::HeavyModerate) {
+        m_latestStatusReason = "HEAVY_MODERATE (Giam vua 20-25%)";
+    } else {
+        m_latestStatusReason = "PANIC (Sap mang / Giam manh 40%)";
+    }
 
-    applyNewBitrate(static_cast<unsigned int>(rounded_br), rtt, bandwidthMbps, deltaLoss);
+    // ── 8. Decision Logic & Anti-Oscillation (🔴 Mục 1, 2, 3 & 🟢 Mục 9) ──
+    qint64 timeSinceLastChange = ctime - m_lastBitrateChangeTime;
+
+    if (state == CongestionState::Panic) {
+        // Reset bộ đếm CLEAR & kích hoạt Cooldown 2.0s
+        m_consecutiveClearCount = 0;
+        m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+
+        if (timeSinceLastChange >= BITRATE_DECR_FAST_INTERVAL_MS) {
+            unsigned int dropAmount = qMax(400u, static_cast<unsigned int>(m_currentBitrateKbps * 0.40));
+            unsigned int targetBitrate = (m_currentBitrateKbps > dropAmount) ? (m_currentBitrateKbps - dropAmount) : m_minBitrateKbps;
+
+            targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+            targetBitrate = qBound(m_minBitrateKbps, targetBitrate, m_maxBitrateKbps);
+
+            m_lastBitrateChangeTime = ctime;
+            applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+        }
+    }
+    else if (state == CongestionState::HeavyModerate) {
+        m_consecutiveClearCount = 0;
+        m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+
+        if (timeSinceLastChange >= BITRATE_DECR_FAST_INTERVAL_MS) {
+            unsigned int dropAmount = qMax(200u, static_cast<unsigned int>(m_currentBitrateKbps * 0.22));
+            unsigned int targetBitrate = (m_currentBitrateKbps > dropAmount) ? (m_currentBitrateKbps - dropAmount) : m_minBitrateKbps;
+
+            targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+            targetBitrate = qBound(m_minBitrateKbps, targetBitrate, m_maxBitrateKbps);
+
+            m_lastBitrateChangeTime = ctime;
+            applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+        }
+    }
+    else if (state == CongestionState::HeavyLight) {
+        m_consecutiveClearCount = 0;
+        m_cooldownUntilMs = ctime + 1500; // 1.5s cooldown
+
+        if (timeSinceLastChange >= BITRATE_DECR_NORMAL_INTERVAL_MS) {
+            unsigned int dropAmount = qMax(100u, static_cast<unsigned int>(m_currentBitrateKbps * 0.12));
+            unsigned int targetBitrate = (m_currentBitrateKbps > dropAmount) ? (m_currentBitrateKbps - dropAmount) : m_minBitrateKbps;
+
+            targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+            targetBitrate = qBound(m_minBitrateKbps, targetBitrate, m_maxBitrateKbps);
+
+            m_lastBitrateChangeTime = ctime;
+            applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+        }
+    }
+    else if (state == CongestionState::Light) {
+        // Reset bộ đếm CLEAR khi có bất kỳ dấu hiệu chớm nghẽn nào
+        m_consecutiveClearCount = 0;
+    }
+    else if (state == CongestionState::Clear) {
+        // Tăng biến đếm số sample CLEAR liên tiếp (🔴 Mục 1)
+        m_consecutiveClearCount++;
+
+        bool cooldownExpired = (ctime >= m_cooldownUntilMs);
+        bool decisionIntervalExpired = (ctime - m_lastBitrateIncrTime >= BITRATE_INCR_DECISION_INTERVAL_MS);
+        bool consecutiveClearMet = (m_consecutiveClearCount >= CONSECUTIVE_CLEAR_REQUIRED);
+
+        if (cooldownExpired && decisionIntervalExpired && consecutiveClearMet) {
+            // Giới hạn bitrate tăng theo chất lượng đường truyền (🟠 Mục 5)
+            unsigned int stepKbps = 50;
+            if (rttInflation < 5.0) {
+                stepKbps = 150; // Mạng cực kỳ thông thoáng và RTT sát đáy
+            } else if (rttInflation < 15.0) {
+                stepKbps = 100; // Mạng tốt
+            } else {
+                stepKbps = 50;  // Thăm dò cẩn trọng
+            }
+
+            unsigned int targetBitrate = m_currentBitrateKbps + stepKbps;
+
+            // Chỉ giới hạn trần khi có dấu hiệu trễ / nghẽn mạng thực sự
+            if (estBwKbps > 0.0 && rttInflation > 60.0 && targetBitrate > estBwKbps * 0.90) {
+                targetBitrate = static_cast<unsigned int>(estBwKbps * 0.90);
+            }
+
+            targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+            targetBitrate = qBound(m_minBitrateKbps, targetBitrate, m_maxBitrateKbps);
+
+            m_lastBitrateIncrTime = ctime;
+            m_lastBitrateChangeTime = ctime;
+            m_consecutiveClearCount = 0; // Reset để đợi tiếp chu kỳ CLEAR mới
+
+            applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+        }
+    }
 }
 
 void SRTAdaptiveBitrateStreaming::applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss)
@@ -255,7 +490,9 @@ void SRTAdaptiveBitrateStreaming::applyNewBitrate(unsigned int targetBitrateKbps
     }
 
     const char *stateStr = (m_lastCongestionState == CongestionState::Panic) ? "PANIC"
-                         : (m_lastCongestionState == CongestionState::Heavy) ? "HEAVY"
+                         : (m_lastCongestionState == CongestionState::HeavySevere) ? "HEAVY_SEVERE"
+                         : (m_lastCongestionState == CongestionState::HeavyModerate) ? "HEAVY_MODERATE"
+                         : (m_lastCongestionState == CongestionState::HeavyLight) ? "HEAVY_LIGHT"
                          : (m_lastCongestionState == CongestionState::Light) ? "LIGHT" : "CLEAR";
 
     int diff = static_cast<int>(targetBitrateKbps) - static_cast<int>(m_currentBitrateKbps);

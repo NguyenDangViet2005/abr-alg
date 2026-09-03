@@ -5,6 +5,8 @@
 #include <QDebug>
 #include <QVariantList>
 #include <QDateTime>
+#include <QTimer>
+#include <QVector>
 #include <QtMath>
 #include "IAdaptiveBitrateStreaming.h"
 
@@ -17,16 +19,21 @@ public:
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 2000;
 
-    // Bitrate adjustment step scales (belacoder.c)
-    static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 30;   // the minimum bitrate increment step (30 kbps)
-    static constexpr unsigned int BITRATE_INCR_SCALE                = 30;   // bitrate += BITRATE_INCR_MIN + bitrate/BITRATE_INCR_SCALE
-    static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;  // the minimum value to decrease bitrate by (100 kbps)
-    static constexpr unsigned int BITRATE_DECR_SCALE                = 10;   // bitrate -= BITRATE_DECR_MIN + bitrate/BITRATE_DECR_SCALE
+    // Bitrate adjustment step scales
+    static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;   // Additive increase floor (50 kbps)
+    static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 200;  // Maximum increase in a single decision step
+    static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;  // Minimum decrease amount (100 kbps)
 
-    // Cooldown intervals (ms) from belacoder.c
-    static constexpr qint64 BITRATE_INCR_INT_MS                     = 500;  // (clear) min interval for increasing bitrate
-    static constexpr qint64 BITRATE_DECR_INT_MS                     = 200;  // (light congestion) min interval for decreasing bitrate
-    static constexpr qint64 BITRATE_DECR_FAST_INT_MS                = 250;  // (heavy congestion) min interval for decreasing bitrate
+    // Decision intervals & Cooldowns
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 1000; // Decision interval for increasing bitrate (1.0s)
+    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250;  // Fast interval for reacting to severe congestion
+    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  // Normal interval for moderate congestion
+    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 2000; // Cooldown after decrease before any increase allowed (2.0s)
+
+    // Anti-oscillation requirements
+    static constexpr int CONSECUTIVE_CLEAR_REQUIRED                 = 4;    // Need 4 consecutive CLEAR samples (~1s) to increase
+    static constexpr int SLIDING_WINDOW_SIZE                        = 5;    // Moving average/median window size
+    static constexpr double MIN_VALID_RTT_MS                        = 5.0;  // Physical lower bound for valid wireless RTT
 
     // Latency and Rounding
     static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000; // Standard negotiated SRT buffer latency (ms)
@@ -35,7 +42,9 @@ public:
     enum class CongestionState {
         Clear = 0,
         Light,
-        Heavy,
+        HeavyLight,
+        HeavyModerate,
+        HeavySevere,
         Panic
     };
 
@@ -56,10 +65,15 @@ public slots:
     void handleSetMaxAbrBitrate(int maxBitrate) override;
     void handleQosCameraConnection(const QVariantList &clients);
     void handleQosControllingConnection(const QVariantList &clients);
+    void onHeartbeatTimeout();
 
 private:
-    void processSrtQos(double rtt, double bandwidthMbps, double sendRateMbps, int lossTotal, int bufferSize);
+    void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps, int rawLossTotal, int rawBufferSize);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
+
+    // Smoothing helpers
+    double calculateMedian(QVector<double> list);
+    double calculateAverage(const QVector<double> &list);
 
     bool m_isRunning;
     bool m_isConnected;
@@ -68,6 +82,11 @@ private:
     unsigned int m_minBitrateKbps;
     unsigned int m_maxBitrateKbps;
     int m_srtLatencyMs;
+
+    // Sliding window sample histories
+    QVector<double> m_rttHistory;
+    QVector<double> m_bwHistory;
+    QVector<int> m_lossHistory;
 
     // BelaCoder EMA & dynamic threshold metrics
     double m_rttAvg;
@@ -81,11 +100,22 @@ private:
     int m_prevBs;
 
     double m_throughput;
-    qint64 m_nextBitrateIncr;
-    qint64 m_nextBitrateDecr;
+    qint64 m_lastBitrateChangeTime;
+    qint64 m_lastBitrateIncrTime;
+    qint64 m_cooldownUntilMs;
+    int m_consecutiveClearCount;
+
+    // Heartbeat reporting timer
+    QTimer *m_heartbeatTimer;
+    double m_latestSmoothedRtt;
+    double m_latestSmoothedBw;
+    int m_latestDeltaLoss;
+    QString m_latestStatusReason;
+    qint64 m_lastQosPacketTime;
 
     int m_lastLossTotal;
     bool m_hasLastLoss;
+    bool m_isBootstrapped;
     CongestionState m_lastCongestionState;
 };
 
