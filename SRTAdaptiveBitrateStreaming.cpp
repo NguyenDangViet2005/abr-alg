@@ -250,39 +250,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         smoothedRtt = MIN_VALID_RTT_MS;
     }
 
-    // ── 2. Live Bootstrapping: Tự động tính toán Bitrate ban đầu theo thông số mạng thực tế ──
-    if (!m_isBootstrapped) {
-        unsigned int calculatedInitialBitrate = m_minBitrateKbps;
-        if (smoothedBw > 0.0) {
-            // Khởi tạo ngay ở mức 75% băng thông mạng đo được ban đầu
-            calculatedInitialBitrate = static_cast<unsigned int>(smoothedBw * 1000.0 * 0.75);
-        } else {
-            if (smoothedRtt < 30.0 && rawLossTotal == 0) {
-                calculatedInitialBitrate = 1000;
-            } else if (smoothedRtt < 100.0) {
-                calculatedInitialBitrate = 600;
-            } else {
-                calculatedInitialBitrate = m_minBitrateKbps;
-            }
-        }
-
-        calculatedInitialBitrate = (calculatedInitialBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
-        calculatedInitialBitrate = qBound(m_minBitrateKbps, calculatedInitialBitrate, m_maxBitrateKbps);
-
-        m_currentBitrateKbps = calculatedInitialBitrate;
-        m_isBootstrapped = true;
-
-        qInfo().noquote() << QString("[BelaCoder-SRT] LIVE BOOTSTRAP: Initial Bitrate calculated directly from live network: %1 kbps (BW: %2 Mbps, RTT: %3ms, Loss: %4)")
-                    .arg(m_currentBitrateKbps)
-                    .arg(smoothedBw, 0, 'f', 2)
-                    .arg(smoothedRtt, 0, 'f', 1)
-                    .arg(rawLossTotal);
-
-        emit bitrateChanged(m_currentBitrateKbps);
-        return;
-    }
-
-    // ── 3. Update Send Buffer Statistics ──
+    // ── 2. Update Send Buffer Statistics ──
     int bs = rawBufferSize;
     if (bs >= 0) {
         m_bsAvg = m_bsAvg * 0.95 + static_cast<double>(bs) * 0.05;
@@ -371,6 +339,67 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     m_latestSmoothedBw = smoothedBw;
     m_latestDeltaLoss = deltaLoss;
     m_lastQosPacketTime = ctime;
+
+    // ── 7.5. Live Bootstrapping: Định vị Bitrate ban đầu theo đúng phân vùng mạng chuẩn ──
+    if (!m_isBootstrapped) {
+        unsigned int calculatedInitialBitrate = m_minBitrateKbps;
+        double linkCapacityKbps = (smoothedBw > 0.0) ? (smoothedBw * 1000.0) : 2000.0;
+        QString stateName;
+
+        switch (state) {
+        case CongestionState::Panic:
+            // Sập sóng ngay từ đầu -> Khởi tạo ở mức sàn an toàn nhất
+            calculatedInitialBitrate = m_minBitrateKbps;
+            m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+            stateName = "PANIC";
+            break;
+
+        case CongestionState::HeavyModerate:
+            // Nghẽn nặng ngay từ đầu -> Khởi tạo ở 40% băng thông
+            calculatedInitialBitrate = static_cast<unsigned int>(linkCapacityKbps * 0.40);
+            m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+            stateName = "HEAVY_MODERATE";
+            break;
+
+        case CongestionState::HeavyLight:
+            // Chớm nghẽn -> Khởi tạo ở 60% băng thông
+            calculatedInitialBitrate = static_cast<unsigned int>(linkCapacityKbps * 0.60);
+            m_cooldownUntilMs = ctime + 1500;
+            stateName = "HEAVY_LIGHT";
+            break;
+
+        case CongestionState::Light:
+            // Nhiễu RF ngẫu nhiên hoặc RTT cao nhẹ -> Khởi tạo ở 70% băng thông
+            calculatedInitialBitrate = static_cast<unsigned int>(linkCapacityKbps * 0.70);
+            stateName = "LIGHT/HOLD";
+            break;
+
+        case CongestionState::Clear:
+        default:
+            // Sóng thông thoáng tuyệt đối -> Khởi tạo ở 80% băng thông tối ưu
+            calculatedInitialBitrate = static_cast<unsigned int>(linkCapacityKbps * 0.80);
+            stateName = "CLEAR";
+            break;
+        }
+
+        calculatedInitialBitrate = (calculatedInitialBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+        calculatedInitialBitrate = qBound(m_minBitrateKbps, calculatedInitialBitrate, m_maxBitrateKbps);
+
+        m_currentBitrateKbps = calculatedInitialBitrate;
+        m_isBootstrapped = true;
+        m_lastBitrateChangeTime = ctime;
+        m_lastBitrateIncrTime = ctime;
+
+        qInfo().noquote() << QString("[BelaCoder-SRT] LIVE BOOTSTRAP: Initial Bitrate calculated via Partition State [%1]: %2 kbps (BW: %3 Mbps, RTT: %4ms, Loss: %5)")
+                    .arg(stateName)
+                    .arg(m_currentBitrateKbps)
+                    .arg(smoothedBw, 0, 'f', 2)
+                    .arg(smoothedRtt, 0, 'f', 1)
+                    .arg(rawLossTotal);
+
+        emit bitrateChanged(m_currentBitrateKbps);
+        return;
+    }
 
     // Cập nhật nguyên nhân trạng thái cho Heartbeat Timer
     if (ctime < m_cooldownUntilMs) {

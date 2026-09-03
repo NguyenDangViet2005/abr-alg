@@ -58,6 +58,7 @@ HEADERS += \
     SRTAdaptiveBitrateStreaming.h \
     XBAdaptiveBitrateStreaming.h \
     XBDualCellAdaptiveBitrateStreaming.h \
+    XBQoSService.h \
     dev/NetworkHandler.h \
     lib/fuzzyData.h
 
@@ -69,6 +70,7 @@ SOURCES += \
     SRTAdaptiveBitrateStreaming.cpp \
     XBAdaptiveBitrateStreaming.cpp \
     XBDualCellAdaptiveBitrateStreaming.cpp \
+    XBQoSService.cpp \
     dev/NetworkHandler.cpp
 
 !equals(XBFIRM, true) {
