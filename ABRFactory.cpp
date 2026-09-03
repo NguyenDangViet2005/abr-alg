@@ -101,13 +101,24 @@ void ABRFactory::startCameraSocketAbr()
 
         this->connect(_srtAdaptiveBitrateStreaming, SIGNAL(bitrateChanged(uint)), this, SLOT(handleSrtBitrateChanged(uint)));
         this->connect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
+        this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, &ABRFactory::onVideoStreamEnableChanged);
+        this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::c2PriorityChanged, this, &ABRFactory::onC2PriorityChanged);
         this->connect(this, SIGNAL(onSrtCameraConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVariantList)));
         this->connect(this, SIGNAL(onSrtControllingConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVariantList)));
+        this->connect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
 
         _srtAdaptiveBitrateStreaming->handleSerialStatus(_havingSerial);
         _srtAdaptiveBitrateStreaming->start();
     }
     // Connect srt abr
+}
+
+void ABRFactory::handleC2Data(const QVariantMap &c2Stats)
+{
+    if (_srtAdaptiveBitrateStreaming) {
+        _srtAdaptiveBitrateStreaming->handleC2ConnectionStats(c2Stats);
+    }
+    emit onC2TelemetryData(c2Stats);
 }
 
 void ABRFactory::stopCameraSocketAbr()

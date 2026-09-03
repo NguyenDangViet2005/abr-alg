@@ -9,6 +9,15 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_minBitrateKbps(DEFAULT_MIN_BITRATE_KBPS)
     , m_maxBitrateKbps(DEFAULT_MAX_BITRATE_KBPS)
     , m_srtLatencyMs(DEFAULT_SRT_LATENCY_MS)
+    , m_c2Quality(C2Quality::Good)
+    , m_c2Priority(C2PriorityLevel::Normal)
+    , m_isVideoEnabled(true)
+    , m_c2Rtt(0.0)
+    , m_c2RttVar(0.0)
+    , m_c2Retransmits(0)
+    , m_c2Unacked(0)
+    , m_c2Loss(0)
+    , m_lastC2PacketTime(0)
     , m_rttAvg(0.0)
     , m_rttAvgDelta(0.0)
     , m_prevRtt(25.0)
@@ -30,12 +39,13 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_lastQosPacketTime(0)
     , m_lastLossTotal(0)
     , m_hasLastLoss(false)
+    , m_isBootstrapped(false)
     , m_lastCongestionState(CongestionState::Clear)
 {
     m_heartbeatTimer = new QTimer(this);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &SRTAdaptiveBitrateStreaming::onHeartbeatTimeout);
 
-    qInfo() << "[BelaCoder-SRT] Initialized Anti-Oscillation ABR. Initial Bitrate:" << m_currentBitrateKbps
+    qInfo() << "[BelaCoder-SRT] Initialized Anti-Oscillation ABR with C2 Priority. Initial Bitrate:" << m_currentBitrateKbps
             << "kbps (Min:" << m_minBitrateKbps << ", Max:" << m_maxBitrateKbps
             << ", Rounding:" << BITRATE_ROUNDING_STEP_KBPS << "kbps, Clear Required:" << CONSECUTIVE_CLEAR_REQUIRED << ")";
 }
@@ -163,6 +173,107 @@ double SRTAdaptiveBitrateStreaming::calculateAverage(const QVector<double> &list
     return sum / static_cast<double>(list.size());
 }
 
+QString SRTAdaptiveBitrateStreaming::c2QualityToString(C2Quality q) const
+{
+    switch (q) {
+    case C2Quality::Offline:   return "OFFLINE";
+    case C2Quality::Critical:  return "CRITICAL";
+    case C2Quality::Poor:      return "POOR";
+    case C2Quality::Fair:      return "FAIR";
+    case C2Quality::Good:      return "GOOD";
+    case C2Quality::Excellent: return "EXCELLENT";
+    default:                   return "UNKNOWN";
+    }
+}
+
+QString SRTAdaptiveBitrateStreaming::c2PriorityToString(C2PriorityLevel p) const
+{
+    switch (p) {
+    case C2PriorityLevel::Normal:   return "NORMAL";
+    case C2PriorityLevel::High:     return "HIGH";
+    case C2PriorityLevel::Critical: return "CRITICAL";
+    case C2PriorityLevel::C2_Only:  return "C2_ONLY";
+    default:                        return "UNKNOWN";
+    }
+}
+
+void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
+{
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    C2Quality prevQuality = m_c2Quality;
+    C2PriorityLevel prevPriority = m_c2Priority;
+    bool prevVideoEnabled = m_isVideoEnabled;
+
+    // 1. Kiểm tra Liveness (nếu quá 3.5s không có C2 telemetry -> Mất sóng C2)
+    if (m_lastC2PacketTime > 0 && (now - m_lastC2PacketTime) > 3500) {
+        m_c2Quality = C2Quality::Offline;
+        m_c2Priority = C2PriorityLevel::C2_Only;
+        m_isVideoEnabled = false; // TẮT VIDEO HOÀN TOÀN để bảo vệ an toàn bay
+    }
+    // 2. Vùng Nguy hiểm (Critical: Unacked lớn > 10, Retransmit >= 3, hoặc RTT > 250ms)
+    else if (m_c2Unacked > 10 || m_c2Retransmits >= 3 || m_c2Rtt > 250.0) {
+        m_c2Quality = C2Quality::Critical;
+        m_c2Priority = C2PriorityLevel::C2_Only;
+        m_isVideoEnabled = false; // TẮT VIDEO để nhường 100% tài nguyên cho C2
+    }
+    // 3. Vùng Xấu (Poor: Unacked >= 3, Retransmit >= 1, hoặc RTT > 120ms)
+    else if (m_c2Unacked >= 3 || m_c2Retransmits >= 1 || m_c2Rtt > 120.0) {
+        m_c2Quality = C2Quality::Poor;
+        m_c2Priority = C2PriorityLevel::Critical;
+        m_isVideoEnabled = true; // Video vẫn bật nhưng bị bóp nghẹt bitrate
+    }
+    // 4. Vùng Chớm chập chờn (Fair: RTT > 60ms hoặc RTT Variance > 30ms)
+    else if (m_c2Rtt > 60.0 || m_c2RttVar > 30.0) {
+        m_c2Quality = C2Quality::Fair;
+        m_c2Priority = C2PriorityLevel::High;
+        m_isVideoEnabled = true;
+    }
+    // 5. Vùng Tốt / Xuất sắc (Good / Excellent)
+    else {
+        m_c2Quality = (m_c2Rtt > 0.0 && m_c2Rtt < 25.0 && m_c2Retransmits == 0) ? C2Quality::Excellent : C2Quality::Good;
+        m_c2Priority = C2PriorityLevel::Normal;
+        m_isVideoEnabled = true;
+    }
+
+    // Phát tín hiệu khi có sự thay đổi về Video State hoặc C2 Priority
+    if (m_isVideoEnabled != prevVideoEnabled) {
+        qWarning().noquote() << QString(">>> [C2 ARBITRATION] Video Stream State Changed: %1 (C2 Quality: %2, C2 Priority: %3) <<<")
+                    .arg(m_isVideoEnabled ? "ENABLED (ON)" : "DISABLED (OFF - C2 ONLY)")
+                    .arg(c2QualityToString(m_c2Quality))
+                    .arg(c2PriorityToString(m_c2Priority));
+        emit videoStreamEnableChanged(m_isVideoEnabled);
+    }
+
+    if (m_c2Priority != prevPriority) {
+        qInfo().noquote() << QString("[C2 Priority Engine] Priority Level Changed: %1 -> %2 (C2 RTT: %3ms, Unacked: %4, Retrans: %5)")
+                    .arg(c2PriorityToString(prevPriority))
+                    .arg(c2PriorityToString(m_c2Priority))
+                    .arg(m_c2Rtt, 0, 'f', 1)
+                    .arg(m_c2Unacked)
+                    .arg(m_c2Retransmits);
+        emit c2PriorityChanged(static_cast<int>(m_c2Priority), c2PriorityToString(m_c2Priority));
+    }
+}
+
+void SRTAdaptiveBitrateStreaming::handleC2ConnectionStats(const QVariantMap &c2Stats)
+{
+    m_c2Rtt = c2Stats.value("rtt_ms", 0.0).toDouble();
+    m_c2RttVar = c2Stats.value("rtt_var_ms", 0.0).toDouble();
+    m_c2Retransmits = c2Stats.value("retransmits", 0).toInt();
+    m_c2Loss = c2Stats.value("tcpi_loss", 0).toInt();
+    m_c2Unacked = c2Stats.value("unacked_pkts", 0).toInt();
+    m_lastC2PacketTime = QDateTime::currentMSecsSinceEpoch();
+
+    evaluateC2Quality();
+}
+
+void SRTAdaptiveBitrateStreaming::handleQosControllingConnection(const QVariantList &clients)
+{
+    if (clients.isEmpty()) return;
+    QVariantMap c = clients.first().toMap();
+    handleC2ConnectionStats(c);
+}
+
 void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
 {
     if (!m_isRunning) return;
@@ -176,12 +287,22 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
         return;
     }
 
-    qInfo().noquote() << QString("[BelaCoder-SRT Status] RTT: %1ms (min %2ms) | BW: %3 Mbps | Loss: %4 | Bitrate: %5 kbps | %6")
+    evaluateC2Quality();
+
+    QString c2Info = QString("C2: %1 (RTT: %2ms, Prio: %3)")
+                         .arg(c2QualityToString(m_c2Quality))
+                         .arg(m_c2Rtt, 0, 'f', 1)
+                         .arg(c2PriorityToString(m_c2Priority));
+
+    QString videoStateStr = m_isVideoEnabled ? QString("%1 kbps").arg(m_currentBitrateKbps) : "OFF (C2_ONLY)";
+
+    qInfo().noquote() << QString("[BelaCoder-SRT Status] SRT RTT: %1ms (min %2ms) | BW: %3 Mbps | Loss: %4 | Video: %5 | %6 | %7")
                 .arg(m_latestSmoothedRtt, 0, 'f', 1)
                 .arg(m_rttMin, 0, 'f', 1)
                 .arg(m_latestSmoothedBw, 0, 'f', 2)
                 .arg(m_latestDeltaLoss)
-                .arg(m_currentBitrateKbps)
+                .arg(videoStateStr)
+                .arg(c2Info)
                 .arg(m_latestStatusReason);
 }
 
@@ -220,11 +341,6 @@ void SRTAdaptiveBitrateStreaming::handleQosCameraConnection(const QVariantList &
     if (minBandwidth >= 99999.0) minBandwidth = 0.0;
 
     processSrtQos(worstRtt, minBandwidth, maxSendRate, maxLoss, maxBuffer);
-}
-
-void SRTAdaptiveBitrateStreaming::handleQosControllingConnection(const QVariantList &clients)
-{
-    Q_UNUSED(clients);
 }
 
 void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps, int rawLossTotal, int rawBufferSize)
@@ -419,6 +535,33 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_latestStatusReason = "HEAVY_MODERATE (Giam vua 20-25%)";
     } else {
         m_latestStatusReason = "PANIC (Sap mang / Giam manh 40%)";
+    }
+
+    // ── 7.8. Cross-Transport C2 Priority Arbitration ──
+    // Kịch bản 4: C2 Offline hoặc Critical -> TẮT VIDEO HOÀN TOÀN để cứu lệnh điều khiển Drone!
+    if (!m_isVideoEnabled) {
+        if (m_currentBitrateKbps > m_minBitrateKbps) {
+            applyNewBitrate(m_minBitrateKbps, smoothedRtt, smoothedBw, deltaLoss);
+        }
+        m_consecutiveClearCount = 0;
+        m_latestStatusReason = QString("C2_EMERGENCY (Video OFF - Uu tien 100% C2, Mode: %1)").arg(c2PriorityToString(m_c2Priority));
+        return;
+    }
+
+    // Kịch bản 3: C2 Poor (MAVLink bị trễ / Retransmit tăng) -> KHÔNG TĂNG VIDEO, bóp bitrate video
+    if (m_c2Priority == C2PriorityLevel::Critical) {
+        m_consecutiveClearCount = 0;
+        unsigned int safeC2Bitrate = qMin(m_currentBitrateKbps, 400u);
+        if (m_currentBitrateKbps > safeC2Bitrate) {
+            applyNewBitrate(safeC2Bitrate, smoothedRtt, smoothedBw, deltaLoss);
+        }
+        m_latestStatusReason = QString("C2_PROTECTION (C2 suy giam -> Bop video 400k, C2 RTT: %1ms)").arg(m_c2Rtt, 0, 'f', 1);
+        return;
+    }
+
+    // Kịch bản C2 Fair (High Priority) -> Khóa cổng tăng bitrate của Video để ưu tiên C2
+    if (m_c2Priority == C2PriorityLevel::High) {
+        m_consecutiveClearCount = 0;
     }
 
     // ── 8. Decision Logic & Anti-Oscillation (🔴 Mục 1, 2, 3 & 🟢 Mục 9) ──

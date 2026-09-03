@@ -29,13 +29,17 @@ public slots:
     void handleCloudBitrateChanged(unsigned int new_bitrate_kbps);
     void handleSrtBitrateChanged(unsigned int new_bitrate_kbps);
     void handleSetMaxBitrate(int maxBitrate);
+    void handleC2Data(const QVariantMap &c2Stats);
 signals:
     void onSrtCameraConnection(const QVariantList &clients);
     void onSrtControllingConnection(const QVariantList &clients);
+    void onC2TelemetryData(const QVariantMap &c2Stats);
 
     void onQosCameraConnection(const QVariantList &clients);
     void onQosControllingConnection(const QVariantList &clients);
     void onAbrRequestChangeBitrateStep(int bitrateStep);
+    void onVideoStreamEnableChanged(bool isEnabled);
+    void onC2PriorityChanged(int priorityLevel, const QString &priorityName);
     void onTelemetrySocketConnectionStats(double rtt,
                                           double deliveryRate,
                                           double retransmits,

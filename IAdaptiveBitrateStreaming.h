@@ -18,6 +18,8 @@ public slots:
 signals:
     void bitrateChanged(unsigned int new_bitrate_kbps);
     void onStatus(int status);  // Emits StreamingQualityStatus for UX
+    void videoStreamEnableChanged(bool isEnabled);
+    void c2PriorityChanged(int priorityLevel, const QString &priorityName);
     void requestStartConnectionStats();
 };
 

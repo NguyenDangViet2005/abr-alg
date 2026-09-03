@@ -28,6 +28,7 @@ public:
 
 signals:
     void onQosDataReceived(const QVariantList &clients);
+    void onC2DataReceived(const QVariantMap &c2Stats);
     void onConnectionStateChanged(bool isConnected);
 
 private slots:

@@ -48,6 +48,22 @@ public:
         Panic
     };
 
+    enum class C2Quality {
+        Offline = 0,
+        Critical,
+        Poor,
+        Fair,
+        Good,
+        Excellent
+    };
+
+    enum class C2PriorityLevel {
+        Normal = 0,
+        High,
+        Critical,
+        C2_Only
+    };
+
     explicit SRTAdaptiveBitrateStreaming(QObject *parent = nullptr);
     void start() override;
     void stop() override;
@@ -58,6 +74,9 @@ public:
     // Getter methods
     unsigned int currentBitrate() const { return m_currentBitrateKbps; }
     CongestionState congestionState() const { return m_lastCongestionState; }
+    C2Quality c2Quality() const { return m_c2Quality; }
+    C2PriorityLevel c2Priority() const { return m_c2Priority; }
+    bool isVideoEnabled() const { return m_isVideoEnabled; }
     bool isRunning() const { return m_isRunning; }
 
 public slots:
@@ -65,11 +84,15 @@ public slots:
     void handleSetMaxAbrBitrate(int maxBitrate) override;
     void handleQosCameraConnection(const QVariantList &clients);
     void handleQosControllingConnection(const QVariantList &clients);
+    void handleC2ConnectionStats(const QVariantMap &c2Stats);
     void onHeartbeatTimeout();
 
 private:
     void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps, int rawLossTotal, int rawBufferSize);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
+    void evaluateC2Quality();
+    QString c2QualityToString(C2Quality q) const;
+    QString c2PriorityToString(C2PriorityLevel p) const;
 
     // Smoothing helpers
     double calculateMedian(QVector<double> list);
@@ -82,6 +105,17 @@ private:
     unsigned int m_minBitrateKbps;
     unsigned int m_maxBitrateKbps;
     int m_srtLatencyMs;
+
+    // C2 Telemetry & Priority State
+    C2Quality m_c2Quality;
+    C2PriorityLevel m_c2Priority;
+    bool m_isVideoEnabled;
+    double m_c2Rtt;
+    double m_c2RttVar;
+    int m_c2Retransmits;
+    int m_c2Unacked;
+    int m_c2Loss;
+    qint64 m_lastC2PacketTime;
 
     // Sliding window sample histories
     QVector<double> m_rttHistory;

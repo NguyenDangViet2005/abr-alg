@@ -145,5 +145,22 @@ void NetworkHandler::handleUdpReadyRead()
 
         // Bắn dữ liệu QoS vào ABR engine
         emit onQosDataReceived(clientList);
+
+        // Đóng gói cấu trúc C2 Telemetry stats (TCP_INFO) nếu có trong JSON
+        if (root.contains("c2_metrics")) {
+            QJsonObject c2Obj = root.value("c2_metrics").toObject();
+            QVariantMap c2Stats;
+            c2Stats["rtt_ms"] = c2Obj.value("rtt_ms").toDouble();
+            c2Stats["rtt_var_ms"] = c2Obj.value("rtt_var_ms").toDouble();
+            c2Stats["delivery_rate_mbps"] = c2Obj.value("delivery_rate_mbps").toDouble();
+            c2Stats["retransmits"] = c2Obj.value("retransmits").toInt();
+            c2Stats["tcpi_loss"] = c2Obj.value("tcpi_loss").toInt();
+            c2Stats["unacked_pkts"] = c2Obj.value("unacked_pkts").toInt();
+            c2Stats["snd_cwnd"] = c2Obj.value("snd_cwnd").toInt();
+            c2Stats["min_rtt_ms"] = c2Obj.value("min_rtt_ms").toDouble();
+            c2Stats["congestion_state"] = c2Obj.value("congestion_state").toString();
+
+            emit onC2DataReceived(c2Stats);
+        }
     }
 }
