@@ -13,7 +13,7 @@ AICompressor* AICompressor::_instance = nullptr;
 bool AICompressor::isNewSession = true;
 
 AICompressor::AICompressor(QObject *parent)
-    : QObject{parent},
+    : QObject(parent),
     cmdIDCounter(1),
     hasCameras(false),
     _bitrate(1000),

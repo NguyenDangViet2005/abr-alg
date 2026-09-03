@@ -1,11 +1,11 @@
 # QT += dbus
 QT += core
 QT += network
-QT += serialport
+# QT += serialport
 QT += websockets
 QT += gui
 QT += xml
-QT += positioning
+# QT += positioning
 QT += multimedia
 QT += concurrent
 QT += widgets
@@ -16,6 +16,7 @@ DEPENDENCY_PROJECT += QXlsx nmeaParse quazip ubxParse settings
 DEPENDENCY_PROJECT += ntp
 
 CONFIG += c++17
+CONFIG += console
 
 # XBFIRM: true = lib (như hiện tại), false = app (có main.cpp)
 XBFIRM = false

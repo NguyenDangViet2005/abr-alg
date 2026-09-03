@@ -4,7 +4,7 @@
 ABRFactory* ABRFactory::_instance = nullptr;
 
 ABRFactory::ABRFactory(QObject *parent)
-    : QObject{parent}
+    : QObject(parent)
     , _cameraSocketABR(nullptr)
     , _cellularPredictive(nullptr)
     , _havingSerial(false)
@@ -39,25 +39,21 @@ void ABRFactory::processBitrateAdaptive()
 void ABRFactory::startCameraSocketAbr()
 {
     qDebug() << "ABRFactory: Start Cam Sock ABR";
+#ifdef XBFIRM
+    int maxBitrate = _generalSettings->maxAbrBitrate();
+    bool enableMultilink = _generalSettings->enableMultilinkConnection();
+#else
+    int maxBitrate = ABR_DEFAULT_MAX_ABR_BITRATE;
+    bool enableMultilink = ABR_DEFAULT_ENABLE_MULTILINK;
+#endif
+
     if (_cameraSocketABR == nullptr) {
         _cameraSocketABR = new XBAdaptiveBitrateStreaming();
-#ifdef XBFIRM
-        _cameraSocketABR->setMaxAbrBitrate(_generalSettings->maxAbrBitrate());
-#else
-        _cameraSocketABR->setMaxAbrBitrate(ABR_DEFAULT_MAX_ABR_BITRATE);
-#endif
+        _cameraSocketABR->setMaxAbrBitrate(maxBitrate);
     }
-#ifdef XBFIRM
-    if (_generalSettings->enableMultilinkConnection() && _srtAdaptiveBitrateStreaming == nullptr) {
-#else
-    if (ABR_DEFAULT_ENABLE_MULTILINK && _srtAdaptiveBitrateStreaming == nullptr) {
-#endif
+    if (enableMultilink && _srtAdaptiveBitrateStreaming == nullptr) {
         _srtAdaptiveBitrateStreaming = new SRTAdaptiveBitrateStreaming();
-#ifdef XBFIRM
-        _srtAdaptiveBitrateStreaming->setMaxAbrBitrate(_generalSettings->maxAbrBitrate());
-#else
-        _srtAdaptiveBitrateStreaming->setMaxAbrBitrate(ABR_DEFAULT_MAX_ABR_BITRATE);
-#endif
+        _srtAdaptiveBitrateStreaming->setMaxAbrBitrate(maxBitrate);
     }
     if (_cellularPredictive == nullptr) {
         _cellularPredictive = new CellularPredictive();
@@ -92,11 +88,7 @@ void ABRFactory::startCameraSocketAbr()
     _cameraSocketABR->handleSerialStatus(_havingSerial);
     _cameraSocketABR->start();
 
-#ifdef XBFIRM
-    if(_generalSettings->enableMultilinkConnection()) {
-#else
-    if(ABR_DEFAULT_ENABLE_MULTILINK) {
-#endif
+    if (enableMultilink) {
         qDebug() << "--> Start Qos srt camera connection";
         this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(bitrateChanged(uint)), this, SLOT(handleSrtBitrateChanged(uint)));
         this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
@@ -177,7 +169,9 @@ void ABRFactory::handleCloudBitrateChanged(unsigned int new_bitrate_kbps)
 
 void ABRFactory::handleSrtBitrateChanged(unsigned int new_bitrate_kbps)
 {
+    qDebug() << "--> ABRFactory::handleSrtBitrateChanged: " << new_bitrate_kbps;
     _currentSrtCamBitrate = new_bitrate_kbps;
+    emit this->onCamSrtBitrateChanged(_currentSrtCamBitrate);
     emit this->onCamSockBitrateChanged(_currentSrtCamBitrate);
 }
 
@@ -187,10 +181,11 @@ void ABRFactory::handleSetMaxBitrate(int maxBitrate)
         _cameraSocketABR->handleSetMaxAbrBitrate(maxBitrate);
     }
 #ifdef XBFIRM
-    if (_generalSettings->enableMultilinkConnection() && _srtAdaptiveBitrateStreaming) {
+    bool enableMultilink = _generalSettings->enableMultilinkConnection();
 #else
-    if (ABR_DEFAULT_ENABLE_MULTILINK && _srtAdaptiveBitrateStreaming) {
+    bool enableMultilink = ABR_DEFAULT_ENABLE_MULTILINK;
 #endif
+    if (enableMultilink && _srtAdaptiveBitrateStreaming) {
         _srtAdaptiveBitrateStreaming->handleSetMaxAbrBitrate(maxBitrate);
     }
 }
