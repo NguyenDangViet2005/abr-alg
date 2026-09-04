@@ -72,7 +72,6 @@ SOURCES += \
     XBDualCellAdaptiveBitrateStreaming.cpp \
     XBQoSService.cpp \
     dev/NetworkHandler.cpp
-    XBDualCellAdaptiveBitrateStreaming.cpp
 
 # CameraControl / NetworkHandler chỉ build khi XBFIRM (lib mode).
 equals(XBFIRM, true) {

@@ -442,8 +442,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     else if (deltaLoss > 0 || smoothedRtt > rtt_th_max || (bs > 0 && bs > bs_th1)) {
         state = CongestionState::Light;
     }
-    // VÙNG THÔNG THOÁNG (Clear): Sạch loss (deltaLoss == 0) và RTT sát sàn min
-    else if (deltaLoss == 0 && smoothedRtt <= rtt_th_min && m_rttAvgDelta < 0.05) {
+    // VÙNG THÔNG THOÁNG (Clear): Sạch loss (deltaLoss == 0) và RTT ổn định
+    else if (deltaLoss == 0 && m_rttAvgDelta < 2.0) {
         state = CongestionState::Clear;
     }
     else {

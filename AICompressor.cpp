@@ -110,7 +110,7 @@ QString AICompressor::getOutputRtspURl()
 
 void AICompressor::handleChangeBitrate(int bitrate)
 {
-    Q_UNUSED(bitrate)
+    this->updateBitrate(bitrate);
 }
 
 void AICompressor::handleChangeFps(int fps)
