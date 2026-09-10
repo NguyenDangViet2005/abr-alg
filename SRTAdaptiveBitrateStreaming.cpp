@@ -12,6 +12,7 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_c2Quality(C2Quality::Good)
     , m_c2Priority(C2PriorityLevel::Normal)
     , m_isVideoEnabled(true)
+    , m_isExplicitC2Only(false)
     , m_c2Rtt(0.0)
     , m_c2RttVar(0.0)
     , m_c2Retransmits(0)
@@ -204,8 +205,14 @@ void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
     C2PriorityLevel prevPriority = m_c2Priority;
     bool prevVideoEnabled = m_isVideoEnabled;
 
+    // 0. Nhận diện rõ ràng lệnh C2_ONLY từ telemetry packet
+    if (m_isExplicitC2Only) {
+        m_c2Quality = C2Quality::Critical;
+        m_c2Priority = C2PriorityLevel::C2_Only;
+        m_isVideoEnabled = false; // TẮT VIDEO HOÀN TOÀN để bảo vệ an toàn bay
+    }
     // 1. Kiểm tra Liveness (nếu quá 3.5s không có C2 telemetry -> Mất sóng C2)
-    if (m_lastC2PacketTime > 0 && (now - m_lastC2PacketTime) > 3500) {
+    else if (m_lastC2PacketTime > 0 && (now - m_lastC2PacketTime) > 3500) {
         m_c2Quality = C2Quality::Offline;
         m_c2Priority = C2PriorityLevel::C2_Only;
         m_isVideoEnabled = false; // TẮT VIDEO HOÀN TOÀN để bảo vệ an toàn bay
@@ -242,6 +249,11 @@ void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
                     .arg(c2QualityToString(m_c2Quality))
                     .arg(c2PriorityToString(m_c2Priority));
         emit videoStreamEnableChanged(m_isVideoEnabled);
+
+        if (!m_isVideoEnabled) {
+            m_currentBitrateKbps = 0;
+            emit bitrateChanged(0);
+        }
     }
 
     if (m_c2Priority != prevPriority) {
@@ -263,6 +275,11 @@ void SRTAdaptiveBitrateStreaming::handleC2ConnectionStats(const QVariantMap &c2S
     m_c2Loss = c2Stats.value("tcpi_loss", 0).toInt();
     m_c2Unacked = c2Stats.value("unacked_pkts", 0).toInt();
     m_lastC2PacketTime = QDateTime::currentMSecsSinceEpoch();
+
+    bool c2OnlyFlag = c2Stats.value("c2_only", false).toBool();
+    QString congState = c2Stats.value("congestion_state", "").toString().toUpper();
+    QString prioState = c2Stats.value("priority", "").toString().toUpper();
+    m_isExplicitC2Only = (c2OnlyFlag || congState == "C2_ONLY" || prioState == "C2_ONLY");
 
     evaluateC2Quality();
 }
@@ -540,11 +557,19 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     // ── 7.8. Cross-Transport C2 Priority Arbitration ──
     // Kịch bản 4: C2 Offline hoặc Critical -> TẮT VIDEO HOÀN TOÀN để cứu lệnh điều khiển Drone!
     if (!m_isVideoEnabled) {
-        if (m_currentBitrateKbps > m_minBitrateKbps) {
-            applyNewBitrate(m_minBitrateKbps, smoothedRtt, smoothedBw, deltaLoss);
+        if (m_currentBitrateKbps > 0) {
+            applyNewBitrate(0, smoothedRtt, smoothedBw, deltaLoss);
         }
         m_consecutiveClearCount = 0;
         m_latestStatusReason = QString("C2_EMERGENCY (Video OFF - Uu tien 100% C2, Mode: %1)").arg(c2PriorityToString(m_c2Priority));
+        return;
+    }
+
+    // Nếu vừa hồi phục từ C2_ONLY (bitrate = 0), khởi động lại ở mức sàn an toàn
+    if (m_currentBitrateKbps == 0) {
+        m_currentBitrateKbps = m_minBitrateKbps;
+        m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+        applyNewBitrate(m_minBitrateKbps, smoothedRtt, smoothedBw, deltaLoss);
         return;
     }
 

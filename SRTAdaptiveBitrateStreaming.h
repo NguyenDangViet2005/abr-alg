@@ -110,6 +110,7 @@ private:
     C2Quality m_c2Quality;
     C2PriorityLevel m_c2Priority;
     bool m_isVideoEnabled;
+    bool m_isExplicitC2Only;
     double m_c2Rtt;
     double m_c2RttVar;
     int m_c2Retransmits;

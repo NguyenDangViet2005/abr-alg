@@ -2,6 +2,7 @@
 #define XB_QOS_SERVICE_H
 
 #include <QObject>
+#include "VideoResolutionAdapter.h"
 
 class ABRFactory;
 class AICompressor;
@@ -28,6 +29,8 @@ private:
     AICompressor *m_aiCompressor;
     NetworkHandler *m_networkHandler;
     QProcess *m_cameraProcess;
+    VideoResolutionAdapter m_resolutionAdapter;
+    bool m_isVideoStreamEnabled;
 };
 
 #endif // XB_QOS_SERVICE_H
