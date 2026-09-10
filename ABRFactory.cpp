@@ -90,7 +90,7 @@ void ABRFactory::startCameraSocketAbr()
 
     if (enableMultilink) {
         qDebug() << "--> Start Qos srt camera connection";
-        this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(bitrateChanged(uint)), this, SLOT(handleSrtBitrateChanged(uint)));
+        this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
         this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
         // Lưu ý: onQosCameraConnection/onQosControllingConnection là SIGNAL của
         // ABRFactory/XBSRTFactory — KHÔNG phải của SRTAdaptiveBitrateStreaming.
@@ -99,7 +99,7 @@ void ABRFactory::startCameraSocketAbr()
         this->disconnect(this, SIGNAL(onSrtCameraConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVariantList)));
         this->disconnect(this, SIGNAL(onSrtControllingConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVariantList)));
 
-        this->connect(_srtAdaptiveBitrateStreaming, SIGNAL(bitrateChanged(uint)), this, SLOT(handleSrtBitrateChanged(uint)));
+        this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
         this->connect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, &ABRFactory::onVideoStreamEnableChanged);
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::c2PriorityChanged, this, &ABRFactory::onC2PriorityChanged);
@@ -141,7 +141,7 @@ void ABRFactory::stopCameraSocketAbr()
     }
 
     if (_srtAdaptiveBitrateStreaming) {
-        this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(bitrateChanged(uint)), this, SLOT(handleSrtBitrateChanged(uint)));
+        this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
         this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
         this->disconnect(this, SIGNAL(onSrtCameraConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVariantList)));
         this->disconnect(this, SIGNAL(onSrtControllingConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVariantList)));
