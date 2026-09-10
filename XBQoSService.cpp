@@ -40,7 +40,7 @@ void XBQoSService::printStartupBanner()
 void XBQoSService::setupConnections()
 {
     // Kết nối signal thay đổi bitrate từ SRT ABR sang AICompressor để điều khiển camera encoder
-    connect(m_abrFactory, &ABRFactory::onCamSrtBitrateChanged, this, [this](unsigned int newBitrate) {
+    auto handleBitrateChange = [this](unsigned int newBitrate) {
         if (!m_isVideoStreamEnabled) {
             qInfo() << "[QoS Engine] Video is currently DISABLED (C2 ONLY Mode). Ignoring bitrate update:" << newBitrate << "kbps";
             return;
@@ -48,7 +48,7 @@ void XBQoSService::setupConnections()
 
         VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
 
-        qInfo() << QString(">>> [Dispatch to Camera Encoder] Bitrate: %1 kbps | Profile: %2 (%3x%4 @ %5fps, Scale: %6%) <<<")
+        qInfo().noquote() << QString(">>> [Dispatch to Camera Encoder] Bitrate: %1 kbps | Profile: %2 (%3x%4 @ %5fps, Scale: %6%) <<<")
                    .arg(newBitrate)
                    .arg(profile.label)
                    .arg(profile.width)
@@ -64,7 +64,10 @@ void XBQoSService::setupConnections()
 
         // Bắn lệnh UDP 5005 sang cam_server.py để điều chỉnh trực tiếp luồng camera HTTP 8888
         sendCameraControlCommand(static_cast<int>(newBitrate), profile, true);
-    });
+    };
+
+    connect(m_abrFactory, &ABRFactory::onCamSrtBitrateChanged, this, handleBitrateChange);
+    connect(m_abrFactory, &ABRFactory::onCamSockBitrateChanged, this, handleBitrateChange);
 
     // Kết nối nhận dữ liệu QoS từ NetworkHandler sang ABRFactory
     connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
@@ -122,7 +125,11 @@ void XBQoSService::sendCameraControlCommand(int bitrate, const VideoProfile &pro
     obj["label"] = profile.label;
 
     QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
-    m_camControlSocket->writeDatagram(data, QHostAddress::LocalHost, 5005);
+    // Gửi tường minh qua IPv4 127.0.0.1 (tránh QHostAddress::LocalHost bị resolve thành IPv6 ::1 trên Linux)
+    qint64 bytesSent = m_camControlSocket->writeDatagram(data, QHostAddress("127.0.0.1"), 5005);
+    qInfo().noquote() << QString("[QoS -> CamServer UDP 5005] Sent (%1 bytes): %2")
+                             .arg(bytesSent)
+                             .arg(QString::fromUtf8(data));
 }
 
 void XBQoSService::startCameraStreamer()
@@ -213,6 +220,9 @@ void XBQoSService::start()
 
     // 6. Khởi chạy tiến trình Camera Stream (nếu có start_camera.sh)
     startCameraStreamer();
+
+    // 7. Gửi cấu hình khởi tạo ban đầu sang cam_server.py (2000 kbps, 720p HD)
+    sendCameraControlCommand(2000, m_resolutionAdapter.currentProfile(), true);
 }
 
 void XBQoSService::stop()

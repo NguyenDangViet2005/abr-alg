@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 XB-QOS-SERVICE : Adaptive MJPEG Camera Streamer
 - Serves HTTP MJPEG stream at http://0.0.0.0:8888
@@ -34,7 +34,7 @@ g_last_update = time.time()
 g_frame_lock = threading.Lock()
 g_latest_jpeg = None
 
-def udp_control_listener(host="127.0.0.1", port=5005):
+def udp_control_listener(host="0.0.0.0", port=5005):
     """Lắng nghe lệnh điều khiển bitrate và resolution từ aiCompressor qua UDP"""
     global g_bitrate, g_width, g_height, g_fps, g_scale, g_enabled, g_label, g_last_update
     
