@@ -2,7 +2,12 @@
 #include <QDebug>
 #include <QProcess>
 #include <QCoreApplication>
-#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QUdpSocket>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QHostAddress>
 #include "ABRFactory.h"
 #include "AICompressor.h"
 #include "dev/NetworkHandler.h"
@@ -14,8 +19,10 @@ XBQoSService::XBQoSService(QObject *parent)
     , m_aiCompressor(nullptr)
     , m_networkHandler(nullptr)
     , m_cameraProcess(nullptr)
+    , m_camControlSocket(nullptr)
     , m_isVideoStreamEnabled(true)
 {
+    m_camControlSocket = new QUdpSocket(this);
 }
 
 XBQoSService::~XBQoSService()
@@ -54,6 +61,9 @@ void XBQoSService::setupConnections()
             m_aiCompressor->handleChangeScale(profile.scalePercent);
             m_aiCompressor->handleChangeFps(profile.fps);
         }
+
+        // Bắn lệnh UDP 5005 sang cam_server.py để điều chỉnh trực tiếp luồng camera HTTP 8888
+        sendCameraControlCommand(static_cast<int>(newBitrate), profile, true);
     });
 
     // Kết nối nhận dữ liệu QoS từ NetworkHandler sang ABRFactory
@@ -66,9 +76,11 @@ void XBQoSService::setupConnections()
         m_isVideoStreamEnabled = isEnabled;
         if (!isEnabled) {
             qCritical() << ">>> [C2 SAFETY PROTOCOL TRIGGERED] Video Stream is DISABLED to protect Drone Control Link (C2 ONLY Mode)! <<<";
-            // 1. Tắt tiến trình phát video camera
+            // 1. Gửi lệnh UDP 5005 báo cam_server.py ngắt luồng video và hiện màn hình đỏ C2
+            sendCameraControlCommand(0, VideoResolutionAdapter::profileOff(), false);
+            // 2. Tắt tiến trình phát video camera
             stopCameraStreamer();
-            // 2. Tắt bộ nén AICompressor / Camera Encoder
+            // 3. Tắt bộ nén AICompressor / Camera Encoder
             if (m_aiCompressor) {
                 m_aiCompressor->handleChangeBitrate(0);
                 m_aiCompressor->handleChangeScale(0);
@@ -80,6 +92,7 @@ void XBQoSService::setupConnections()
             startCameraStreamer();
             // 2. Phục hồi cấu hình video an toàn
             VideoProfile profile = m_resolutionAdapter.currentProfile();
+            sendCameraControlCommand(500, profile, true);
             if (m_aiCompressor) {
                 m_aiCompressor->handleChangeBitrate(500); // Khởi động ở mức sàn an toàn
                 m_aiCompressor->handleChangeScale(profile.scalePercent);
@@ -95,6 +108,23 @@ void XBQoSService::setupConnections()
     });
 }
 
+void XBQoSService::sendCameraControlCommand(int bitrate, const VideoProfile &profile, bool enabled)
+{
+    if (!m_camControlSocket) return;
+
+    QJsonObject obj;
+    obj["bitrate"] = bitrate;
+    obj["width"] = profile.width;
+    obj["height"] = profile.height;
+    obj["fps"] = profile.fps;
+    obj["scale"] = profile.scalePercent;
+    obj["enabled"] = enabled;
+    obj["label"] = profile.label;
+
+    QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
+    m_camControlSocket->writeDatagram(data, QHostAddress::LocalHost, 5005);
+}
+
 void XBQoSService::startCameraStreamer()
 {
     // Không khởi động nếu đang ở chế độ C2_ONLY
@@ -108,15 +138,23 @@ void XBQoSService::startCameraStreamer()
         return;
     }
 
-    // Kiểm tra xem có script start_camera.sh trong thư mục ứng dụng hoặc thư mục làm việc không
+    // Kiểm tra xem có script start_camera.sh trong thư mục ứng dụng, thư mục cha (nếu chạy từ build/), hoặc thư mục làm việc không
     QString appDir = QCoreApplication::applicationDirPath();
     QString scriptPath = appDir + "/start_camera.sh";
     if (!QFile::exists(scriptPath)) {
+        scriptPath = appDir + "/../start_camera.sh";
+    }
+    if (!QFile::exists(scriptPath)) {
         scriptPath = "./start_camera.sh";
+    }
+    if (!QFile::exists(scriptPath)) {
+        scriptPath = "../start_camera.sh";
     }
 
     if (QFile::exists(scriptPath)) {
-        qInfo() << "[XBQoSService] Found custom camera script:" << scriptPath << "- Launching camera stream...";
+        QFileInfo scriptInfo(scriptPath);
+        QString workingDir = scriptInfo.absolutePath();
+        qInfo() << "[XBQoSService] Found custom camera script:" << scriptInfo.absoluteFilePath() << "- Launching camera stream in" << workingDir;
         if (!m_cameraProcess) {
             m_cameraProcess = new QProcess(this);
             connect(m_cameraProcess, &QProcess::readyReadStandardOutput, this, [this]() {
@@ -128,7 +166,8 @@ void XBQoSService::startCameraStreamer()
                 if (!err.isEmpty()) qWarning() << "[CameraStream]" << err;
             });
         }
-        m_cameraProcess->start("/bin/bash", QStringList() << scriptPath);
+        m_cameraProcess->setWorkingDirectory(workingDir);
+        m_cameraProcess->start("/bin/bash", QStringList() << scriptInfo.absoluteFilePath());
     } else if (QFile::exists("/dev/video0")) {
         qInfo() << "[XBQoSService] Detected USB Camera at /dev/video0.";
         qInfo() << "[XBQoSService] Note: Create 'start_camera.sh' to automatically launch your custom camera pipeline.";
