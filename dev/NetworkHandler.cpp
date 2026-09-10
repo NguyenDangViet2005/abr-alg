@@ -1,23 +1,21 @@
 #include "NetworkHandler.h"
 #include <QNetworkDatagram>
-
 #include <QDebug>
 
 NetworkHandler::NetworkHandler(QObject *parent)
     : QObject(parent)
     , m_udpSocket(nullptr)
-    , m_pollTimer(nullptr)
-    , m_serverHost(QOS_SERVER_DEFAULT_HOST)
-    , m_serverPort(QOS_SERVER_DEFAULT_PORT)
+    , m_watchdogTimer(nullptr)
+    , m_listenPort(SRT_ABR_QOS_UDP_PORT)
     , m_isConnected(false)
     , m_lastPacketTime(0)
     , m_packetCount(0)
 {
     m_udpSocket = new QUdpSocket(this);
-    m_pollTimer = new QTimer(this);
+    m_watchdogTimer = new QTimer(this);
 
     connect(m_udpSocket, &QUdpSocket::readyRead, this, &NetworkHandler::handleUdpReadyRead);
-    connect(m_pollTimer, &QTimer::timeout, this, &NetworkHandler::sendQosQuery);
+    connect(m_watchdogTimer, &QTimer::timeout, this, &NetworkHandler::checkTimeoutWatchdog);
 }
 
 NetworkHandler::~NetworkHandler()
@@ -25,68 +23,43 @@ NetworkHandler::~NetworkHandler()
     stop();
 }
 
-void NetworkHandler::start(const QString &host, quint16 port, int intervalMs)
+void NetworkHandler::start(quint16 port)
 {
-    m_serverHost = QHostAddress(host);
-    m_serverPort = port;
+    m_listenPort = port;
 
-    // Bind socket on any free local port to receive UDP responses
     if (m_udpSocket->state() != QAbstractSocket::BoundState) {
-        m_udpSocket->bind(QHostAddress::Any, 0);
+        if (!m_udpSocket->bind(QHostAddress::Any, m_listenPort, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
+            qCritical() << "[NetworkHandler] FAILED to bind UDP Server on port" << m_listenPort << ":" << m_udpSocket->errorString();
+        } else {
+            qInfo() << "[NetworkHandler] UDP QoS Server is LISTENING on port" << m_listenPort
+                    << "(Ready for incoming QoS datagrams from Clients/GCS)";
+        }
     }
 
-    m_pollTimer->setInterval(intervalMs > 0 ? intervalMs : QOS_SERVER_POLL_INTERVAL_MS);
-    m_pollTimer->start();
-
-    qInfo() << "[NetworkHandler] Started polling QoS Server at" << host << ":" << port
-            << "(Interval:" << m_pollTimer->interval() << "ms)";
-
-    // Send immediate first query
-    sendQosQuery();
+    // Chạy watchdog timer kiểm tra timeout định kỳ (mỗi 1000ms)
+    m_watchdogTimer->start(1000);
 }
 
 void NetworkHandler::stop()
 {
-    if (m_pollTimer && m_pollTimer->isActive()) {
-        m_pollTimer->stop();
+    if (m_watchdogTimer && m_watchdogTimer->isActive()) {
+        m_watchdogTimer->stop();
     }
     if (m_udpSocket && m_udpSocket->state() == QAbstractSocket::BoundState) {
         m_udpSocket->close();
     }
     m_isConnected = false;
-    qInfo() << "[NetworkHandler] Stopped QoS Server polling.";
+    qInfo() << "[NetworkHandler] Stopped UDP QoS Server.";
 }
 
-void NetworkHandler::setServerAddress(const QString &host, quint16 port)
+void NetworkHandler::checkTimeoutWatchdog()
 {
-    m_serverHost = QHostAddress(host);
-    m_serverPort = port;
-    qInfo() << "[NetworkHandler] Updated target QoS Server address:" << host << ":" << port;
-}
-
-void NetworkHandler::setPollInterval(int intervalMs)
-{
-    if (m_pollTimer && intervalMs > 0) {
-        m_pollTimer->setInterval(intervalMs);
-        qInfo() << "[NetworkHandler] Updated QoS poll interval:" << intervalMs << "ms";
-    }
-}
-
-void NetworkHandler::sendQosQuery()
-{
-    if (!m_udpSocket) return;
-
-    // Check connection timeout (no response for > 3.5 seconds)
     qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (m_isConnected && (now - m_lastPacketTime) > 3500) {
         m_isConnected = false;
-        qWarning() << "[NetworkHandler] QoS Server response TIMEOUT. Waiting for server...";
+        qWarning() << "[NetworkHandler] Client QoS stream TIMEOUT. Waiting for packets...";
         emit onConnectionStateChanged(false);
     }
-
-    // Gửi bản tin query qua UDP tới QoS Server (Port 12345)
-    QByteArray queryPayload = "{\"cmd\":\"get_qos\"}";
-    m_udpSocket->writeDatagram(queryPayload, m_serverHost, m_serverPort);
 }
 
 void NetworkHandler::handleUdpReadyRead()
@@ -103,20 +76,42 @@ void NetworkHandler::handleUdpReadyRead()
         }
 
         QJsonObject root = doc.object();
-        if (root.value("status").toString() != "OK") {
-            continue;
+        QJsonObject metrics;
+        if (root.contains("metrics") && root.value("metrics").isObject()) {
+            metrics = root.value("metrics").toObject();
+        } else {
+            metrics = root;
         }
 
-        QJsonObject metrics = root.value("metrics").toObject();
-        double rtt = metrics.value("rtt_ms").toDouble();
-        double bw = metrics.value("estimated_bandwidth_mbps").toDouble();
-        if (bw <= 0.0) {
-            bw = metrics.value("bandwidth_mbps").toDouble();
-        }
-        double sendRate = metrics.value("send_rate_mbps").toDouble();
-        int loss = metrics.value("total_packets_lost").toInt();
-        int flight = metrics.value("flight_size").toInt();
-        int bufMs = metrics.value("recv_buffer_ms").toInt();
+        // Hỗ trợ linh hoạt cả key lồng trong metrics lẫn key trực tiếp ở root
+        double rtt = 0.0;
+        if (metrics.contains("rtt_ms")) rtt = metrics.value("rtt_ms").toDouble();
+        else if (metrics.contains("msRTT")) rtt = metrics.value("msRTT").toDouble();
+        else if (metrics.contains("rtt")) rtt = metrics.value("rtt").toDouble();
+
+        double bw = 0.0;
+        if (metrics.contains("estimated_bandwidth_mbps")) bw = metrics.value("estimated_bandwidth_mbps").toDouble();
+        else if (metrics.contains("bandwidth_mbps")) bw = metrics.value("bandwidth_mbps").toDouble();
+        else if (metrics.contains("mbpsBandwidth")) bw = metrics.value("mbpsBandwidth").toDouble();
+        else if (metrics.contains("bw")) bw = metrics.value("bw").toDouble();
+
+        double sendRate = 0.0;
+        if (metrics.contains("send_rate_mbps")) sendRate = metrics.value("send_rate_mbps").toDouble();
+        else if (metrics.contains("mbpsSendRate")) sendRate = metrics.value("mbpsSendRate").toDouble();
+
+        int loss = 0;
+        if (metrics.contains("total_packets_lost")) loss = metrics.value("total_packets_lost").toInt();
+        else if (metrics.contains("pktSndLossTotal")) loss = metrics.value("pktSndLossTotal").toInt();
+        else if (metrics.contains("loss")) loss = metrics.value("loss").toInt();
+
+        int flight = 0;
+        if (metrics.contains("flight_size")) flight = metrics.value("flight_size").toInt();
+        else if (metrics.contains("pktFlightSize")) flight = metrics.value("pktFlightSize").toInt();
+
+        int bufMs = 0;
+        if (metrics.contains("recv_buffer_ms")) bufMs = metrics.value("recv_buffer_ms").toInt();
+        else if (metrics.contains("pktSndBuf")) bufMs = metrics.value("pktSndBuf").toInt();
+
         QString src = root.value("stream_source").toString();
         if (src.isEmpty()) {
             src = QString("%1:%2").arg(datagram.senderAddress().toString()).arg(datagram.senderPort());
@@ -140,8 +135,7 @@ void NetworkHandler::handleUdpReadyRead()
 
         if (!m_isConnected) {
             m_isConnected = true;
-            qInfo() << "[NetworkHandler] Connected to QoS Server successfully! Stream Status:"
-                    << root.value("stream_state").toString() << "from" << src;
+            qInfo() << "[NetworkHandler] Client connected! Receiving QoS stats from" << src;
             emit onConnectionStateChanged(true);
         }
 

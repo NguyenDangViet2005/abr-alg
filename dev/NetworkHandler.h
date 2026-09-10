@@ -20,11 +20,10 @@ public:
     explicit NetworkHandler(QObject *parent = nullptr);
     ~NetworkHandler();
 
-    void start(const QString &host = QOS_SERVER_DEFAULT_HOST, quint16 port = QOS_SERVER_DEFAULT_PORT, int intervalMs = QOS_SERVER_POLL_INTERVAL_MS);
+    void start(quint16 port = SRT_ABR_QOS_UDP_PORT);
     void stop();
-    void setServerAddress(const QString &host, quint16 port);
-    void setPollInterval(int intervalMs);
     bool isConnected() const { return m_isConnected; }
+    quint16 listenPort() const { return m_listenPort; }
 
 signals:
     void onQosDataReceived(const QVariantList &clients);
@@ -32,14 +31,13 @@ signals:
     void onConnectionStateChanged(bool isConnected);
 
 private slots:
-    void sendQosQuery();
+    void checkTimeoutWatchdog();
     void handleUdpReadyRead();
 
 private:
     QUdpSocket *m_udpSocket;
-    QTimer *m_pollTimer;
-    QHostAddress m_serverHost;
-    quint16 m_serverPort;
+    QTimer *m_watchdogTimer;
+    quint16 m_listenPort;
     bool m_isConnected;
     qint64 m_lastPacketTime;
     int m_packetCount;

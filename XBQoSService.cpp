@@ -1,5 +1,8 @@
 #include "XBQoSService.h"
 #include <QDebug>
+#include <QProcess>
+#include <QCoreApplication>
+#include <QFile>
 #include "ABRFactory.h"
 #include "AICompressor.h"
 #include "dev/NetworkHandler.h"
@@ -10,6 +13,7 @@ XBQoSService::XBQoSService(QObject *parent)
     , m_abrFactory(nullptr)
     , m_aiCompressor(nullptr)
     , m_networkHandler(nullptr)
+    , m_cameraProcess(nullptr)
 {
 }
 
@@ -56,6 +60,44 @@ void XBQoSService::setupConnections()
     });
 }
 
+void XBQoSService::startCameraStreamer()
+{
+    // Kiểm tra xem có script start_camera.sh trong thư mục ứng dụng hoặc thư mục làm việc không
+    QString appDir = QCoreApplication::applicationDirPath();
+    QString scriptPath = appDir + "/start_camera.sh";
+    if (!QFile::exists(scriptPath)) {
+        scriptPath = "./start_camera.sh";
+    }
+
+    if (QFile::exists(scriptPath)) {
+        qInfo() << "[XBQoSService] Found custom camera script:" << scriptPath << "- Launching camera stream...";
+        m_cameraProcess = new QProcess(this);
+        m_cameraProcess->start("/bin/bash", QStringList() << scriptPath);
+        connect(m_cameraProcess, &QProcess::readyReadStandardOutput, this, [this]() {
+            QByteArray out = m_cameraProcess->readAllStandardOutput().trimmed();
+            if (!out.isEmpty()) qInfo() << "[CameraStream]" << out;
+        });
+        connect(m_cameraProcess, &QProcess::readyReadStandardError, this, [this]() {
+            QByteArray err = m_cameraProcess->readAllStandardError().trimmed();
+            if (!err.isEmpty()) qWarning() << "[CameraStream]" << err;
+        });
+    } else if (QFile::exists("/dev/video0")) {
+        qInfo() << "[XBQoSService] Detected USB Camera at /dev/video0.";
+        qInfo() << "[XBQoSService] Note: Create 'start_camera.sh' to automatically launch your custom camera pipeline.";
+    }
+}
+
+void XBQoSService::stopCameraStreamer()
+{
+    if (m_cameraProcess && m_cameraProcess->state() != QProcess::NotRunning) {
+        qInfo() << "[XBQoSService] Stopping camera streamer process...";
+        m_cameraProcess->terminate();
+        if (!m_cameraProcess->waitForFinished(2000)) {
+            m_cameraProcess->kill();
+        }
+    }
+}
+
 void XBQoSService::start()
 {
     printStartupBanner();
@@ -68,18 +110,22 @@ void XBQoSService::start()
     // 2. Khởi tạo Camera Compressor
     m_aiCompressor = AICompressor::instance();
 
-    // 3. Khởi tạo NetworkHandler kết nối UDP tới QoS Server (Mặc định Port 12345)
+    // 3. Khởi tạo NetworkHandler làm UDP Server trên Port 12345
     m_networkHandler = new NetworkHandler(this);
 
     // 4. Thiết lập kết nối Signal / Slot
     setupConnections();
 
-    // 5. Bắt đầu polling QoS Server
-    m_networkHandler->start(QOS_SERVER_DEFAULT_HOST, QOS_SERVER_DEFAULT_PORT, QOS_SERVER_POLL_INTERVAL_MS);
+    // 5. Bắt đầu lắng nghe UDP datagrams từ Client/GCS trên Port 12345
+    m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
+
+    // 6. Khởi chạy tiến trình Camera Stream (nếu có start_camera.sh)
+    startCameraStreamer();
 }
 
 void XBQoSService::stop()
 {
+    stopCameraStreamer();
     if (m_networkHandler) {
         m_networkHandler->stop();
     }
