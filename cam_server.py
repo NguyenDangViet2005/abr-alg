@@ -33,6 +33,7 @@ g_last_update = time.time()
 # Shared latest JPEG frame for HTTP clients
 g_frame_lock = threading.Lock()
 g_latest_jpeg = None
+g_frame_id = 0
 
 def udp_control_listener(host="0.0.0.0", port=5005):
     """Lắng nghe lệnh điều khiển bitrate và resolution từ aiCompressor qua UDP"""
@@ -59,7 +60,7 @@ def udp_control_listener(host="0.0.0.0", port=5005):
 
             state_str = "ENABLED" if g_enabled else "DISABLED (C2_ONLY)"
             print(f"[CamServer] ➔ Adapt Update: State={state_str} | Bitrate={g_bitrate} kbps | "
-                  f"Scale={g_scale}% | FPS={g_fps} | {g_label}", flush=True)
+                  f"Res={g_width}x{g_height} | FPS={g_fps} | {g_label}", flush=True)
         except Exception as e:
             print(f"[CamServer Error] UDP parse error: {e}", flush=True)
 
@@ -78,7 +79,7 @@ def get_jpeg_quality(bitrate_kbps):
 
 def camera_capture_loop(device="/dev/video0"):
     """Vòng lặp đọc camera, điều chỉnh scale, nén JPEG và vẽ HUD thông số"""
-    global g_latest_jpeg
+    global g_latest_jpeg, g_frame_id
 
     cap = cv2.VideoCapture(device)
     if not cap.isOpened():
@@ -98,7 +99,8 @@ def camera_capture_loop(device="/dev/video0"):
         with g_params_lock:
             enabled = g_enabled
             bitrate = g_bitrate
-            scale = g_scale
+            target_w = g_width
+            target_h = g_height
             fps = max(5, g_fps)
             label = g_label
 
@@ -119,6 +121,7 @@ def camera_capture_loop(device="/dev/video0"):
             _, jpeg = cv2.imencode(".jpg", black_frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
             with g_frame_lock:
                 g_latest_jpeg = jpeg.tobytes()
+                g_frame_id += 1
             time.sleep(0.2)
             continue
 
@@ -131,10 +134,10 @@ def camera_capture_loop(device="/dev/video0"):
 
         orig_h, orig_w = frame.shape[:2]
 
-        if scale < 100:
-            target_w = max(320, int(orig_w * scale / 100.0))
-            target_h = max(180, int(orig_h * scale / 100.0))
-            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        # Điều chỉnh kích thước khung hình chuẩn xác theo cấu hình phân giải
+        if target_w > 0 and target_h > 0 and (target_w != orig_w or target_h != orig_h):
+            interp = cv2.INTER_AREA if (target_w < orig_w) else cv2.INTER_LINEAR
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=interp)
 
         cur_h, cur_w = frame.shape[:2]
 
@@ -148,14 +151,74 @@ def camera_capture_loop(device="/dev/video0"):
 
         with g_frame_lock:
             g_latest_jpeg = jpeg.tobytes()
+            g_frame_id += 1
 
         elapsed = time.time() - start_time
         sleep_time = max(0.001, frame_interval - elapsed)
         time.sleep(sleep_time)
 
+HTML_PAGE = b"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XB-QoS Adaptive Video Stream</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0b0f19; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; }
+  .card { background: #161e2e; border-radius: 12px; box-shadow: 0 12px 30px rgba(0,0,0,0.6); overflow: hidden; max-width: 1280px; width: 100%; border: 1px solid #273549; }
+  .header { padding: 12px 20px; background: #0f172a; border-bottom: 1px solid #273549; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: 600; }
+  .status-dot { display: inline-block; width: 10px; height: 10px; background: #22c55e; border-radius: 50%; margin-right: 8px; box-shadow: 0 0 8px #22c55e; }
+  .video-wrapper { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .video-wrapper img { width: 100%; height: 100%; object-fit: contain; }
+  .footer { padding: 12px 20px; background: #0f172a; border-top: 1px solid #273549; display: flex; justify-content: space-between; font-size: 13px; color: #94a3b8; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div><span class="status-dot"></span>XB-QOS ADAPTIVE STREAM</div>
+      <div id="status-hint" style="color: #22c55e; font-size: 13px;">Live MJPEG</div>
+    </div>
+    <div class="video-wrapper">
+      <img id="stream" src="/stream" alt="Live Camera Stream" />
+    </div>
+    <div class="footer">
+      <span>Auto-Adaptive Resolution (1080p / 720p / 480p / 360p)</span>
+      <span>Direct Stream: <a href="/stream" style="color: #38bdf8; text-decoration: none;">/stream</a></span>
+    </div>
+  </div>
+  <script>
+    const img = document.getElementById('stream');
+    const hint = document.getElementById('status-hint');
+    let failCount = 0;
+    img.onerror = () => {
+      failCount++;
+      hint.textContent = 'Reconnecting... (' + failCount + ')';
+      hint.style.color = '#eab308';
+      setTimeout(() => {
+        img.src = '/stream?t=' + Date.now();
+      }, 1000);
+    };
+    img.onload = () => {
+      failCount = 0;
+      hint.textContent = 'Live MJPEG';
+      hint.style.color = '#22c55e';
+    };
+  </script>
+</body>
+</html>
+"""
+
 class StreamingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/" or self.path == "/stream":
+        if self.path == "/" or self.path == "/index.html":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(HTML_PAGE)))
+            self.end_headers()
+            self.wfile.write(HTML_PAGE)
+        elif self.path.startswith("/stream"):
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=--jpgboundary")
             self.send_header("Cache-Control", "no-cache, private")
@@ -163,19 +226,24 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
+            last_id = -1
             while True:
                 try:
                     with g_frame_lock:
+                        fid = g_frame_id
                         jpeg_bytes = g_latest_jpeg
 
-                    if jpeg_bytes is not None:
-                        self.wfile.write(b"--jpgboundary\r\n")
-                        self.send_header("Content-Type", "image/jpeg")
-                        self.send_header("Content-Length", str(len(jpeg_bytes)))
-                        self.end_headers()
+                    if fid != last_id and jpeg_bytes is not None:
+                        last_id = fid
+                        header = (
+                            f"--jpgboundary\r\n"
+                            f"Content-Type: image/jpeg\r\n"
+                            f"Content-Length: {len(jpeg_bytes)}\r\n\r\n"
+                        ).encode("ascii")
+                        self.wfile.write(header)
                         self.wfile.write(jpeg_bytes)
                         self.wfile.write(b"\r\n")
-                    time.sleep(0.033)
+                    time.sleep(0.005)
                 except (BrokenPipeError, ConnectionResetError):
                     break
                 except Exception:
@@ -200,15 +268,16 @@ def main():
 
     port = 8888
     server = ThreadedHTTPServer(("0.0.0.0", port), StreamingHandler)
-    print("=" * 65)
-    print(f"  [XB-QOS-CAMERA] MJPEG Streamer is LIVE at http://0.0.0.0:{port}")
-    print(f"  [XB-QOS-CAMERA] UDP Control Port is LISTENING on 127.0.0.1:5005")
-    print("=" * 65)
+    print("=" * 65, flush=True)
+    print(f"  [XB-QOS-CAMERA] Web Dashboard is LIVE at http://0.0.0.0:{port}", flush=True)
+    print(f"  [XB-QOS-CAMERA] MJPEG Raw Stream at http://0.0.0.0:{port}/stream", flush=True)
+    print(f"  [XB-QOS-CAMERA] UDP Control Port is LISTENING on 127.0.0.1:5005", flush=True)
+    print("=" * 65, flush=True)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[CamServer] Stopping server...")
+        print("\n[CamServer] Stopping server...", flush=True)
     finally:
         server.server_close()
 

@@ -62,9 +62,9 @@ private:
     int m_consecutiveDowngradeCount;
 
     // Các tham số điều khiển độ mượt (Tuning parameters)
-    static constexpr int UPSCALE_CONFIRMATION_CYCLES = 6;    // Cần ổn định ~1.5s - 2s trước khi nâng nấc
-    static constexpr int DOWNSCALE_CONFIRMATION_CYCLES = 2;  // Hạ nhanh hơn (sau ~0.5s) để chống nghẽn
-    static constexpr qint64 MIN_SWITCH_COOLDOWN_MS = 4000;   // Giữ tối thiểu 4 giây giữa 2 lần đổi resolution
+    static constexpr int UPSCALE_CONFIRMATION_CYCLES = 2;    // Cần ổn định 2 chu kỳ (~1.5s) trước khi nâng nấc
+    static constexpr int DOWNSCALE_CONFIRMATION_CYCLES = 1;  // Hạ ngay tức thì (1 chu kỳ) để chống nghẽn và cắt trễ
+    static constexpr qint64 MIN_SWITCH_COOLDOWN_MS = 1500;   // Cooldown 1.5s tránh giật lắc
 };
 
 #endif // VIDEORESOLUTIONADAPTER_H

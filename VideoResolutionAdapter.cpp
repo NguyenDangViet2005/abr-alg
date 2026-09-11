@@ -6,15 +6,15 @@ VideoProfile VideoResolutionAdapter::profile1080p() {
 }
 
 VideoProfile VideoResolutionAdapter::profile720p() {
-    return VideoProfile{1280, 720, 30, 75, "720p (HD)"};
+    return VideoProfile{1280, 720, 30, 100, "720p (HD)"};
 }
 
 VideoProfile VideoResolutionAdapter::profile480p() {
-    return VideoProfile{854, 480, 25, 50, "480p (SD)"};
+    return VideoProfile{854, 480, 25, 67, "480p (SD)"};
 }
 
 VideoProfile VideoResolutionAdapter::profile360p() {
-    return VideoProfile{640, 360, 20, 33, "360p (Low)"};
+    return VideoProfile{640, 360, 20, 50, "360p (Low)"};
 }
 
 static int getProfileLevel(const VideoProfile &p) {
@@ -59,45 +59,75 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    // 1. Exponential Moving Average (EMA) để lọc các xung giật bitrate nhất thời (Alpha = 0.25)
+    // 1. Exponential Moving Average (EMA)
+    // Khi tụt bitrate: Dùng alpha lớn (0.65) để hạ độ phân giải tức thì, giải cứu băng thông
+    // Khi tăng bitrate: Dùng alpha nhỏ (0.30) để lọc nhiễu, nâng nấc mượt mà
     if (m_smoothedBitrate <= 0.0) {
         m_smoothedBitrate = targetBitrateKbps;
     } else {
-        m_smoothedBitrate = m_smoothedBitrate * 0.75 + static_cast<double>(targetBitrateKbps) * 0.25;
+        double alpha = (targetBitrateKbps < m_smoothedBitrate) ? 0.65 : 0.30;
+        m_smoothedBitrate = m_smoothedBitrate * (1.0 - alpha) + static_cast<double>(targetBitrateKbps) * alpha;
     }
 
     int currentLevel = getProfileLevel(m_currentProfile);
     int candidateLevel = currentLevel;
 
-    // 2. Vùng đệm trễ (Hysteresis Bands) chống rung lắc giữa các nấc
-    // Ngưỡng nâng (Upscale): Cần bitrate vượt hẳn mốc cao để chắc chắn mạng đã ổn
-    if (currentLevel < 4 && m_smoothedBitrate >= 3800.0) {
+    // 2. Xác định nấc độ phân giải mục tiêu chính xác theo Bitrate
+    if (m_smoothedBitrate >= 3200.0) {
+        candidateLevel = 4; // 1080p (>= 3200 kbps)
+    } else if (m_smoothedBitrate >= 1600.0) {
+        candidateLevel = 3; // 720p (1600 - 3200 kbps)
+    } else if (m_smoothedBitrate >= 750.0) {
+        candidateLevel = 2; // 480p (750 - 1600 kbps)
+    } else {
+        candidateLevel = 1; // 360p (< 750 kbps, ví dụ 300k - 500k)
+    }
+
+    // 3. Vùng đệm trễ (Hysteresis Deadbands) chống lật nấc liên tục tại biên
+    if (currentLevel == 3 && candidateLevel == 4 && m_smoothedBitrate < 3400.0) {
+        candidateLevel = 3;
+    } else if (currentLevel == 4 && candidateLevel == 3 && m_smoothedBitrate >= 2800.0) {
         candidateLevel = 4;
-    } else if (currentLevel < 3 && m_smoothedBitrate >= 2100.0) {
-        candidateLevel = 3;
-    } else if (currentLevel < 2 && m_smoothedBitrate >= 1100.0) {
+    } else if (currentLevel == 2 && candidateLevel == 3 && m_smoothedBitrate < 1800.0) {
         candidateLevel = 2;
-    }
-
-    // Ngưỡng hạ (Downscale): Có khoảng chết an toàn (Deadband) 300-600 kbps tránh hạ vội
-    if (currentLevel == 4 && m_smoothedBitrate < 3200.0) {
+    } else if (currentLevel == 3 && candidateLevel == 2 && m_smoothedBitrate >= 1400.0) {
         candidateLevel = 3;
-    } else if (currentLevel >= 3 && m_smoothedBitrate < 1600.0) {
-        candidateLevel = 2;
-    } else if (currentLevel >= 2 && m_smoothedBitrate < 850.0) {
+    } else if (currentLevel == 1 && candidateLevel == 2 && m_smoothedBitrate < 850.0) {
         candidateLevel = 1;
+    } else if (currentLevel == 2 && candidateLevel == 1 && m_smoothedBitrate >= 650.0) {
+        candidateLevel = 2;
     }
 
-    // 3. Xử lý logic chuyển đổi mượt mà (Smooth Stepping)
-    if (candidateLevel > currentLevel) {
+    // 4. Xử lý chuyển đổi
+    if (candidateLevel < currentLevel) {
+        // HẠ ĐỘ PHÂN GIẢI: Phản ứng nhanh, hạ ngay tới candidateLevel mục tiêu
+        m_consecutiveDowngradeCount++;
+        m_consecutiveUpgradeCount = 0;
+
+        if (m_consecutiveDowngradeCount >= DOWNSCALE_CONFIRMATION_CYCLES &&
+            (now - m_lastSwitchTimeMs >= MIN_SWITCH_COOLDOWN_MS || m_lastSwitchTimeMs == 0)) {
+            
+            m_currentProfile = getProfileByLevel(candidateLevel);
+            m_lastSwitchTimeMs = now;
+            m_consecutiveDowngradeCount = 0;
+
+            qInfo() << QString("[Resolution Adapter] 🟡 HẠ độ phân giải: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
+                       .arg(m_currentProfile.label)
+                       .arg(m_currentProfile.width)
+                       .arg(m_currentProfile.height)
+                       .arg(m_currentProfile.fps)
+                       .arg(m_currentProfile.scalePercent)
+                       .arg(targetBitrateKbps);
+        }
+    }
+    else if (candidateLevel > currentLevel) {
+        // NÂNG ĐỘ PHÂN GIẢI: Nâng từng nấc một (+1 level) sau khi mạng ổn định
         m_consecutiveUpgradeCount++;
         m_consecutiveDowngradeCount = 0;
 
-        // Cần duy trì bitrate cao liên tục và thỏa mãn thời gian cooldown
         if (m_consecutiveUpgradeCount >= UPSCALE_CONFIRMATION_CYCLES &&
             (now - m_lastSwitchTimeMs >= MIN_SWITCH_COOLDOWN_MS)) {
             
-            // Nâng từng nấc một (+1 level) để chuyển tiếp mượt mà, không nhảy cóc
             int nextLevel = currentLevel + 1;
             m_currentProfile = getProfileByLevel(nextLevel);
             m_lastSwitchTimeMs = now;
@@ -109,37 +139,10 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
                        .arg(m_currentProfile.height)
                        .arg(m_currentProfile.fps)
                        .arg(m_currentProfile.scalePercent)
-                       .arg(static_cast<int>(m_smoothedBitrate));
-        }
-    }
-    else if (candidateLevel < currentLevel) {
-        m_consecutiveDowngradeCount++;
-        m_consecutiveUpgradeCount = 0;
-
-        // Nếu mạng tụt cực sâu (< 500 kbps - tình trạng khẩn cấp) thì cho phép hạ nhanh
-        bool isEmergency = (targetBitrateKbps < 500 && currentLevel > 2);
-        qint64 requiredCooldown = isEmergency ? 1500 : MIN_SWITCH_COOLDOWN_MS;
-
-        if (m_consecutiveDowngradeCount >= DOWNSCALE_CONFIRMATION_CYCLES &&
-            (now - m_lastSwitchTimeMs >= requiredCooldown)) {
-            
-            // Hạ từng nấc một (-1 level) để mắt người xem không bị sốc hình ảnh
-            int nextLevel = isEmergency ? candidateLevel : (currentLevel - 1);
-            m_currentProfile = getProfileByLevel(nextLevel);
-            m_lastSwitchTimeMs = now;
-            m_consecutiveDowngradeCount = 0;
-
-            qInfo() << QString("[Resolution Adapter] 🟡 Mượt mà HẠ độ phân giải: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
-                       .arg(m_currentProfile.label)
-                       .arg(m_currentProfile.width)
-                       .arg(m_currentProfile.height)
-                       .arg(m_currentProfile.fps)
-                       .arg(m_currentProfile.scalePercent)
-                       .arg(static_cast<int>(m_smoothedBitrate));
+                       .arg(targetBitrateKbps);
         }
     }
     else {
-        // Trạng thái cân bằng, reset bộ đếm
         m_consecutiveUpgradeCount = 0;
         m_consecutiveDowngradeCount = 0;
     }
