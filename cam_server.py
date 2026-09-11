@@ -41,7 +41,7 @@ def udp_control_listener(host="0.0.0.0", port=5005):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
-    print(f"[CamServer] UDP Control Listener running on {host}:{port}")
+    print(f"[CamServer] UDP Control Listener running on {host}:{port}", flush=True)
 
     while True:
         try:
@@ -59,9 +59,9 @@ def udp_control_listener(host="0.0.0.0", port=5005):
 
             state_str = "ENABLED" if g_enabled else "DISABLED (C2_ONLY)"
             print(f"[CamServer] ➔ Adapt Update: State={state_str} | Bitrate={g_bitrate} kbps | "
-                  f"Scale={g_scale}% | FPS={g_fps} | {g_label}")
+                  f"Scale={g_scale}% | FPS={g_fps} | {g_label}", flush=True)
         except Exception as e:
-            print(f"[CamServer Error] UDP parse error: {e}")
+            print(f"[CamServer Error] UDP parse error: {e}", flush=True)
 
 def get_jpeg_quality(bitrate_kbps):
     """Tính toán chất lượng nén JPEG theo mức bitrate hiện tại"""

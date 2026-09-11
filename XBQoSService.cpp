@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QHostAddress>
+#include <QThread>
 #include "ABRFactory.h"
 #include "AICompressor.h"
 #include "dev/NetworkHandler.h"
@@ -66,6 +67,44 @@ void XBQoSService::setupConnections()
         sendCameraControlCommand(static_cast<int>(newBitrate), profile, true);
     };
 
+    // 1. Kết nối trực tiếp từ SRT Adaptive Bitrate Streaming (tránh rụng tín hiệu qua tầng trung gian)
+    if (m_abrFactory && m_abrFactory->srtAbr()) {
+        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::bitrateChanged, this, handleBitrateChange);
+        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, [this](bool isEnabled) {
+            m_isVideoStreamEnabled = isEnabled;
+            if (!isEnabled) {
+                qCritical() << ">>> [C2 SAFETY PROTOCOL TRIGGERED] Video Stream is DISABLED to protect Drone Control Link (C2 ONLY Mode)! <<<";
+                // 1. Gửi lệnh UDP 5005 báo cam_server.py ngắt luồng video và hiện màn hình đỏ C2
+                sendCameraControlCommand(0, VideoResolutionAdapter::profileOff(), false);
+                // 2. Tắt tiến trình phát video camera
+                stopCameraStreamer();
+                // 3. Tắt bộ nén AICompressor / Camera Encoder
+                if (m_aiCompressor) {
+                    m_aiCompressor->handleChangeBitrate(0);
+                    m_aiCompressor->handleChangeScale(0);
+                    m_aiCompressor->handleChangeFps(0);
+                }
+            } else {
+                qInfo() << ">>> [C2 RECOVERY PROTOCOL] Video Stream is re-ENABLED! Resuming adaptive streaming... <<<";
+                // 1. Khởi động lại tiến trình phát video camera
+                startCameraStreamer();
+                // 2. Phục hồi cấu hình video an toàn
+                VideoProfile profile = m_resolutionAdapter.currentProfile();
+                sendCameraControlCommand(500, profile, true);
+                if (m_aiCompressor) {
+                    m_aiCompressor->handleChangeBitrate(500); // Khởi động ở mức sàn an toàn
+                    m_aiCompressor->handleChangeScale(profile.scalePercent);
+                    m_aiCompressor->handleChangeFps(profile.fps);
+                }
+            }
+        });
+        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::c2PriorityChanged, this, [](int level, const QString &name) {
+            Q_UNUSED(level);
+            qInfo() << ">>> [C2 Priority Level]:" << name << "<<<";
+        });
+    }
+
+    // 2. Kết nối dự phòng qua tín hiệu của ABRFactory
     connect(m_abrFactory, &ABRFactory::onCamSrtBitrateChanged, this, handleBitrateChange);
     connect(m_abrFactory, &ABRFactory::onCamSockBitrateChanged, this, handleBitrateChange);
 
@@ -73,42 +112,6 @@ void XBQoSService::setupConnections()
     connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
     connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
     connect(m_networkHandler, &NetworkHandler::onConnectionStateChanged, m_abrFactory, &ABRFactory::handleSerialStatus);
-
-    // Lắng nghe sự kiện Bật/Tắt Video Stream do C2 Priority điều phối
-    connect(m_abrFactory, &ABRFactory::onVideoStreamEnableChanged, this, [this](bool isEnabled) {
-        m_isVideoStreamEnabled = isEnabled;
-        if (!isEnabled) {
-            qCritical() << ">>> [C2 SAFETY PROTOCOL TRIGGERED] Video Stream is DISABLED to protect Drone Control Link (C2 ONLY Mode)! <<<";
-            // 1. Gửi lệnh UDP 5005 báo cam_server.py ngắt luồng video và hiện màn hình đỏ C2
-            sendCameraControlCommand(0, VideoResolutionAdapter::profileOff(), false);
-            // 2. Tắt tiến trình phát video camera
-            stopCameraStreamer();
-            // 3. Tắt bộ nén AICompressor / Camera Encoder
-            if (m_aiCompressor) {
-                m_aiCompressor->handleChangeBitrate(0);
-                m_aiCompressor->handleChangeScale(0);
-                m_aiCompressor->handleChangeFps(0);
-            }
-        } else {
-            qInfo() << ">>> [C2 RECOVERY PROTOCOL] Video Stream is re-ENABLED! Resuming adaptive streaming... <<<";
-            // 1. Khởi động lại tiến trình phát video camera
-            startCameraStreamer();
-            // 2. Phục hồi cấu hình video an toàn
-            VideoProfile profile = m_resolutionAdapter.currentProfile();
-            sendCameraControlCommand(500, profile, true);
-            if (m_aiCompressor) {
-                m_aiCompressor->handleChangeBitrate(500); // Khởi động ở mức sàn an toàn
-                m_aiCompressor->handleChangeScale(profile.scalePercent);
-                m_aiCompressor->handleChangeFps(profile.fps);
-            }
-        }
-    });
-
-    // Lắng nghe sự kiện thay đổi C2 Priority Level
-    connect(m_abrFactory, &ABRFactory::onC2PriorityChanged, this, [](int level, const QString &name) {
-        Q_UNUSED(level);
-        qInfo() << ">>> [C2 Priority Level]:" << name << "<<<";
-    });
 }
 
 void XBQoSService::sendCameraControlCommand(int bitrate, const VideoProfile &profile, bool enabled)
@@ -162,6 +165,11 @@ void XBQoSService::startCameraStreamer()
         QFileInfo scriptInfo(scriptPath);
         QString workingDir = scriptInfo.absolutePath();
         qInfo() << "[XBQoSService] Found custom camera script:" << scriptInfo.absoluteFilePath() << "- Launching camera stream in" << workingDir;
+#ifdef Q_OS_LINUX
+        // Dọn dẹp tiến trình cam_server.py cũ nếu có trước khi khởi động tiến trình mới
+        QProcess::execute("pkill", QStringList() << "-9" << "-f" << "cam_server.py");
+        QThread::msleep(300);
+#endif
         if (!m_cameraProcess) {
             m_cameraProcess = new QProcess(this);
             connect(m_cameraProcess, &QProcess::readyReadStandardOutput, this, [this]() {

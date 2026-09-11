@@ -20,6 +20,7 @@ public:
     static ABRFactory* instance();
     void init();
     void processBitrateAdaptive();
+    SRTAdaptiveBitrateStreaming* srtAbr() const { return _srtAdaptiveBitrateStreaming; }
 public slots:
     void startCameraSocketAbr();
     void stopCameraSocketAbr();

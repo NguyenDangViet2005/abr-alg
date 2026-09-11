@@ -706,6 +706,7 @@ void SRTAdaptiveBitrateStreaming::applyNewBitrate(unsigned int targetBitrateKbps
                 .arg(stateStr);
 
     m_currentBitrateKbps = targetBitrateKbps;
+    qInfo() << "[BelaCoder-SRT] Emitting bitrateChanged:" << m_currentBitrateKbps << "kbps";
     emit bitrateChanged(m_currentBitrateKbps);
 }
 
