@@ -7,8 +7,7 @@
 class ABRFactory;
 class AICompressor;
 class NetworkHandler;
-class QProcess;
-class QUdpSocket;
+class CameraControl;
 
 class XBQoSService : public QObject
 {
@@ -23,15 +22,12 @@ public:
 private:
     void printStartupBanner();
     void setupConnections();
-    void startCameraStreamer();
-    void stopCameraStreamer();
-    void sendCameraControlCommand(int bitrate, const VideoProfile &profile, bool enabled);
+    void dispatchToCameraServer(int bitrate, const VideoProfile &profile, bool enabled);
 
     ABRFactory *m_abrFactory;
     AICompressor *m_aiCompressor;
     NetworkHandler *m_networkHandler;
-    QProcess *m_cameraProcess;
-    QUdpSocket *m_camControlSocket;
+    CameraControl *m_cameraControl;
     VideoResolutionAdapter m_resolutionAdapter;
     bool m_isVideoStreamEnabled;
 };

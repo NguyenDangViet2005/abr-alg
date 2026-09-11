@@ -41,6 +41,7 @@ public:
 
     // Reset về trạng thái ban đầu
     void reset();
+    void resetToProfile(const VideoProfile &profile);
 
     // Các profile chuẩn
     static VideoProfile profile1080p();

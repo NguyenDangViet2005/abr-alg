@@ -60,6 +60,7 @@ HEADERS += \
     XBDualCellAdaptiveBitrateStreaming.h \
     XBQoSService.h \
     VideoResolutionAdapter.h \
+    dev/CameraControl.h \
     dev/NetworkHandler.h \
     lib/fuzzyData.h
 
@@ -73,17 +74,10 @@ SOURCES += \
     XBDualCellAdaptiveBitrateStreaming.cpp \
     XBQoSService.cpp \
     VideoResolutionAdapter.cpp \
+    dev/CameraControl.cpp \
     dev/NetworkHandler.cpp
 
-# CameraControl / NetworkHandler chỉ build khi XBFIRM (lib mode).
-equals(XBFIRM, true) {
-    HEADERS += \
-        dev/CameraControl.h \
-        dev/NetworkHandler.h
-    SOURCES += \
-        dev/CameraControl.cpp \
-        dev/NetworkHandler.cpp
-}
+
 
 !equals(XBFIRM, true) {
     SOURCES += main.cpp

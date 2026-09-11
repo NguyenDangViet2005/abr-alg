@@ -23,7 +23,7 @@ CameraControl::CameraControl(QObject *parent)
     , m_nam(new QNetworkAccessManager(this))
 {}
 
-void CameraControl::handleChangeCameraBitrate(int bitrate)
+void CameraControl::sendAdaptBitrate(int bitrate)
 {
     QUrl url(CAMERA_ADAPT_BITRATE_URL);
     QNetworkRequest request(url);
@@ -33,14 +33,26 @@ void CameraControl::handleChangeCameraBitrate(int bitrate)
     payload["bitrate"] = bitrate;
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
+    qInfo().noquote() << QString("[CameraControl -> HTTP API] POST %1: %2")
+                             .arg(CAMERA_ADAPT_BITRATE_URL)
+                             .arg(QString::fromUtf8(body));
+
     QNetworkReply* reply = m_nam->post(request, body);
-    QObject::connect(reply, &QNetworkReply::finished, this, [reply]() {
+    QObject::connect(reply, &QNetworkReply::finished, this, [reply, url]() {
         if (reply->error() == QNetworkReply::NoError) {
-            qDebug() << "[CameraControl] adapt-bitrate OK:" << reply->readAll();
+            qInfo().noquote() << QString("[CameraControl] adapt-bitrate OK (%1): %2")
+                                     .arg(url.toString())
+                                     .arg(QString::fromUtf8(reply->readAll()));
         } else {
-            qDebug() << "[CameraControl] adapt-bitrate lỗi:"
-                     << reply->errorString();
+            qWarning().noquote() << QString("[CameraControl] adapt-bitrate FAILED (%1): %2")
+                                       .arg(url.toString())
+                                       .arg(reply->errorString());
         }
         reply->deleteLater();
     });
+}
+
+void CameraControl::handleChangeCameraBitrate(int bitrate)
+{
+    sendAdaptBitrate(bitrate);
 }
