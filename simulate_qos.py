@@ -54,122 +54,170 @@ def send_packet(sock, host, port, rtt_ms, bw_mbps, loss_total, buffer_ms, c2_rtt
     sock.sendto(data, (host, port))
 
 def run_auto_suite(host, port):
-    print("\n[+] BẮT ĐẦU KỊCH BẢN KIỂM THỬ TỰ ĐỘNG (7 GIAI ĐOẠN)")
-    print("    Mục tiêu: Đánh giá độ nhạy, tính chuẩn xác ABR Engine & Cơ chế C2_ONLY\n")
+    print("\n" + "=" * 75)
+    print("  [+] BẮT ĐẦU KỊCH BẢN KIỂM THỬ TỰ ĐỘNG TOÀN DIỆN (10 GIAI ĐOẠN)")
+    print("  Chu trình: 1080p ➔ 720p ➔ 480p ➔ 360p ➔ C2_ONLY (OFF) ➔ 360p ➔ 480p ➔ 720p ➔ 1080p")
+    print("=" * 75 + "\n")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     total_loss = 0
 
     scenarios = [
         {
-            "name": "Giai đoạn 1: Mạng Sạch & Lý Tưởng (Clear State)",
-            "duration": 12,
-            "rtt": 20.0,
+            "name": "Giai đoạn 1: Môi trường Hoàn Hảo (Clear State)",
+            "duration": 10,
+            "rtt": 18.0,
+            "bw": 7.5,
+            "loss_inc": 0,
+            "buffer": 35,
+            "c2_rtt": 18.0,
+            "c2_loss": 0,
+            "c2_only": False,
+            "target_res": "1080p (Full HD)",
+            "expect": ">> KỲ VỌNG: Bitrate leo dốc mạnh (> 3500 kbps) ➔ Camera hiển thị 1080p (1920x1080 @ 30fps)."
+        },
+        {
+            "name": "Giai đoạn 2: Nhiễu Sóng RF Ngẫu Nhiên (RF Noise / Hold)",
+            "duration": 8,
+            "rtt": 25.0,
             "bw": 6.5,
+            "loss_inc": 1,
+            "buffer": 55,
+            "c2_rtt": 22.0,
+            "c2_loss": 0,
+            "c2_only": False,
+            "target_res": "1080p / 720p (Hold)",
+            "expect": ">> KỲ VỌNG: Nhận diện nhiễu vô tuyến ngẫu nhiên (Loss rải rác nhưng RTT thấp) ➔ GIỮ NGUYÊN nấc phân giải, không hạ oan."
+        },
+        {
+            "name": "Giai đoạn 3: Băng thông hẹp vừa phải (Moderate Link)",
+            "duration": 9,
+            "rtt": 48.0,
+            "bw": 3.2,
+            "loss_inc": 1,
+            "buffer": 100,
+            "c2_rtt": 35.0,
+            "c2_loss": 0,
+            "c2_only": False,
+            "target_res": "720p (HD)",
+            "expect": ">> KỲ VỌNG: Bitrate hạ nhẹ về 2000 - 2400 kbps ➔ Camera chuyển mượt sang 720p (1280x720 @ 30fps)."
+        },
+        {
+            "name": "Giai đoạn 4: Chớm nghẽn / Khoảng cách xa (Mild Congestion)",
+            "duration": 9,
+            "rtt": 90.0,
+            "bw": 1.8,
+            "loss_inc": 2,
+            "buffer": 180,
+            "c2_rtt": 55.0,
+            "c2_loss": 1,
+            "c2_only": False,
+            "target_res": "480p (SD)",
+            "expect": ">> KỲ VỌNG: RTT tăng + Loss nhẹ ➔ Bitrate giảm về 900 - 1300 kbps ➔ Camera chuyển sang 480p (854x480 @ 25fps)."
+        },
+        {
+            "name": "Giai đoạn 5: Nghẽn mạng nặng (Heavy Congestion)",
+            "duration": 9,
+            "rtt": 175.0,
+            "bw": 0.9,
+            "loss_inc": 5,
+            "buffer": 340,
+            "c2_rtt": 110.0,
+            "c2_loss": 4,
+            "c2_only": False,
+            "target_res": "360p (Low)",
+            "expect": ">> KỲ VỌNG: Mạng tắc nghẽn nghiêm trọng ➔ Bitrate ép về sàn 350 - 500 kbps ➔ Camera lập tức hạ sang 360p (640x360 @ 20fps)."
+        },
+        {
+            "name": "Giai đoạn 6: Báo động Kênh Bay C2 (C2_ONLY Drone Safety)",
+            "duration": 8,
+            "rtt": 180.0,
+            "bw": 0.8,
+            "loss_inc": 4,
+            "buffer": 320,
+            "c2_rtt": 320.0,
+            "c2_loss": 14,
+            "c2_only": True,
+            "target_res": "VIDEO OFF (Màn hình đỏ C2)",
+            "expect": ">> KỲ VỌNG: C2_ONLY kích hoạt ➔ TẮT 100% video stream để cứu máy bay, Web hiện màn hình cảnh báo đỏ!"
+        },
+        {
+            "name": "Giai đoạn 7: C2 Hồi phục & Khởi động an toàn (C2 Recovery)",
+            "duration": 8,
+            "rtt": 35.0,
+            "bw": 2.2,
             "loss_inc": 0,
             "buffer": 60,
             "c2_rtt": 20.0,
             "c2_loss": 0,
             "c2_only": False,
-            "expect": ">> KỲ VỌNG: Live Bootstrap nhận diện link tốt, Bitrate tăng dần mượt mà hướng tới Max (6000 kbps)."
+            "target_res": "360p (Safe Resume)",
+            "expect": ">> KỲ VỌNG: C2 thông suốt trở lại ➔ Tự động BẬT LẠI camera ở mức sàn an toàn 360p (500 kbps)."
         },
         {
-            "name": "Giai đoạn 2: Nhiễu Sóng RF Ngẫu Nhiên (RF Noise / Anti-Oscillation)",
-            "duration": 10,
-            "rtt": 25.0,
-            "bw": 6.0,
-            "loss_inc": 1,
-            "buffer": 70,
-            "c2_rtt": 25.0,
+            "name": "Giai đoạn 8: Phục hồi nấc 1 (Recovery to SD)",
+            "duration": 8,
+            "rtt": 28.0,
+            "bw": 3.8,
+            "loss_inc": 0,
+            "buffer": 50,
+            "c2_rtt": 20.0,
             "c2_loss": 0,
             "c2_only": False,
-            "expect": ">> KỲ VỌNG: Thuật toán nhận diện là NHIỄU RF (chứ không phải nghẽn) -> GIỮ NGUYÊN (HOLD) bitrate, không bị hạ oan!"
+            "target_res": "480p (SD)",
+            "expect": ">> KỲ VỌNG: Bitrate tích lũy vượt 1000 kbps ➔ Camera nâng nấc êm ái lên 480p (854x480 @ 25fps)."
         },
         {
-            "name": "Giai đoạn 3: Nghẽn Mạng Thật Sự (Congestion - RTT tăng vọt + Loss dồn)",
-            "duration": 10,
-            "rtt": 135.0,
-            "bw": 2.2,
-            "loss_inc": 5,
-            "buffer": 220,
-            "c2_rtt": 80.0,
-            "c2_loss": 2,
-            "c2_only": False,
-            "expect": ">> KỲ VỌNG: Thuật toán kích hoạt HEAVY CONGESTION -> Lập tức HẠ BITRATE (giảm 20-30%) để cứu luồng video."
-        },
-        {
-            "name": "Giai đoạn 4: Sóng Sập Khẩn Cấp (Panic Mode)",
+            "name": "Giai đoạn 9: Phục hồi nấc 2 (Recovery to HD)",
             "duration": 8,
-            "rtt": 320.0,
-            "bw": 0.8,
-            "loss_inc": 12,
-            "buffer": 450,
-            "c2_rtt": 160.0,
-            "c2_loss": 8,
-            "c2_only": False,
-            "expect": ">> KỲ VỌNG: Kích hoạt PANIC MODE -> Bitrate rớt khẩn cấp về mức sàn an toàn (Min Bitrate ~ 300-500 kbps)."
-        },
-        {
-            "name": "Giai đoạn 5: Mạng Hồi Phục (Recovery Phase)",
-            "duration": 15,
             "rtt": 22.0,
             "bw": 5.5,
             "loss_inc": 0,
-            "buffer": 50,
-            "c2_rtt": 20.0,
+            "buffer": 45,
+            "c2_rtt": 19.0,
             "c2_loss": 0,
             "c2_only": False,
-            "expect": ">> KỲ VỌNG: Cooldown giữ an toàn vài giây, sau đó kiểm tra Consecutive Clear và bắt đầu TĂNG LẠI từng bước."
+            "target_res": "720p (HD)",
+            "expect": ">> KỲ VỌNG: Bitrate vượt 2000 kbps ➔ Camera nâng nấc tiếp lên 720p (1280x720 @ 30fps)."
         },
         {
-            "name": "Giai đoạn 6: Thử Thách C2 Drone Priority Link (Bảo vệ Link Bay - C2 ONLY)",
-            "duration": 12,
-            "rtt": 25.0,
-            "bw": 5.0,
+            "name": "Giai đoạn 10: Phục hồi Đỉnh cao (Full HD Reached)",
+            "duration": 10,
+            "rtt": 17.0,
+            "bw": 8.0,
             "loss_inc": 0,
-            "buffer": 60,
-            "c2_rtt": 280.0,
-            "c2_loss": 12,
-            "c2_only": True,
-            "expect": ">> KỲ VỌNG: ABR nhận diện C2_ONLY -> LẬP TỨC TẮT LUỒNG VIDEO (Bitrate=0, tắt camera streamer) để nhường 100% tài nguyên cho điều khiển drone!"
-        },
-        {
-            "name": "Giai đoạn 7: C2 Hồi Phục Bình Thường (C2 Recovery)",
-            "duration": 12,
-            "rtt": 22.0,
-            "bw": 6.0,
-            "loss_inc": 0,
-            "buffer": 50,
-            "c2_rtt": 20.0,
+            "buffer": 35,
+            "c2_rtt": 18.0,
             "c2_loss": 0,
             "c2_only": False,
-            "expect": ">> KỲ VỌNG: C2 bình thường trở lại -> Tự động BẬT LẠI camera stream (startCameraStreamer) và khôi phục bitrate thích ứng!"
+            "target_res": "1080p (Full HD)",
+            "expect": ">> KỲ VỌNG: Băng thông mở rộng tối đa ➔ Bitrate đạt đỉnh (> 3500 kbps), Camera trở lại 1080p (1920x1080 @ 30fps)."
         }
     ]
 
     for idx, sc in enumerate(scenarios, 1):
-        print("-" * 70)
-        print(f"[{idx}/{len(scenarios)}] {sc['name']}")
-        print(f"    Thời gian: {sc['duration']} giây | RTT: {sc['rtt']}ms | BW: {sc['bw']}Mbps | Buffer: {sc['buffer']}ms")
-        print(f"    {sc['expect']}")
-        print("-" * 70)
+        print("-" * 75)
+        print(f"[{idx:02d}/{len(scenarios)}] {sc['name']}")
+        print(f"     Mục tiêu Camera : \033[1;32m{sc['target_res']}\033[0m")
+        print(f"     Thông số QoS    : RTT={sc['rtt']}ms | BW={sc['bw']}Mbps | Thời gian={sc['duration']}s")
+        print(f"     {sc['expect']}")
+        print("-" * 75)
 
         start_t = time.time()
-        pkt_num = 0
         while time.time() - start_t < sc['duration']:
             total_loss += sc['loss_inc']
-            pkt_num += 1
             send_packet(sock, host, port, sc['rtt'], sc['bw'], total_loss, sc['buffer'], sc['c2_rtt'], sc['c2_loss'], sc.get('c2_only', False))
             
             remain = int(sc['duration'] - (time.time() - start_t))
-            sys.stdout.write(f"\r    -> Đang gửi: RTT={sc['rtt']}ms, BW={sc['bw']}Mbps, Loss={total_loss}, C2_ONLY={sc.get('c2_only', False)} | Còn {remain}s   ")
+            c2_flag = "ON" if sc.get('c2_only', False) else "OFF"
+            sys.stdout.write(f"\r  ➔ Gửi: RTT={sc['rtt']}ms, BW={sc['bw']}M, Loss={total_loss}, C2_ONLY={c2_flag} | Target: [{sc['target_res']}] | Còn {remain:2d}s   ")
             sys.stdout.flush()
             time.sleep(INTERVAL)
         print("\n")
 
-    print("=" * 70)
-    print(">>> HOÀN TẤT BÀI TEST TỰ ĐỘNG! Hãy đối chiếu với log của server ./aiCompressor.")
-    print("=" * 70)
+    print("=" * 75)
+    print(">>> HOÀN TẤT TOÀN DIỆN BÀI TEST 10 GIAI ĐOẠN! Camera đã diễn hoạt đủ 4 nấc phân giải và C2 Safety.")
+    print("=" * 75)
 
 def run_interactive(host, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

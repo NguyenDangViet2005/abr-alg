@@ -74,11 +74,10 @@ void XBQoSService::setupConnections()
             m_isVideoStreamEnabled = isEnabled;
             if (!isEnabled) {
                 qCritical() << ">>> [C2 SAFETY PROTOCOL TRIGGERED] Video Stream is DISABLED to protect Drone Control Link (C2 ONLY Mode)! <<<";
-                // 1. Gửi lệnh UDP 5005 báo cam_server.py ngắt luồng video và hiện màn hình đỏ C2
+                // 1. Gửi lệnh UDP 5005 báo cam_server.py ngắt luồng video và chuyển sang màn hình đỏ C2 Safety
+                // Giữ cam_server.py tiếp tục chạy để duy trì kết nối HTTP cho trình duyệt, không làm rớt socket Web
                 sendCameraControlCommand(0, VideoResolutionAdapter::profileOff(), false);
-                // 2. Tắt tiến trình phát video camera
-                stopCameraStreamer();
-                // 3. Tắt bộ nén AICompressor / Camera Encoder
+                // 2. Tắt bộ nén AICompressor / RF Video Streamer nếu có
                 if (m_aiCompressor) {
                     m_aiCompressor->handleChangeBitrate(0);
                     m_aiCompressor->handleChangeScale(0);
@@ -86,10 +85,12 @@ void XBQoSService::setupConnections()
                 }
             } else {
                 qInfo() << ">>> [C2 RECOVERY PROTOCOL] Video Stream is re-ENABLED! Resuming adaptive streaming... <<<";
-                // 1. Khởi động lại tiến trình phát video camera
-                startCameraStreamer();
-                // 2. Phục hồi cấu hình video an toàn
-                VideoProfile profile = m_resolutionAdapter.currentProfile();
+                // 1. Đảm bảo tiến trình cam_server.py vẫn hoạt động
+                if (!m_cameraProcess || m_cameraProcess->state() == QProcess::NotRunning) {
+                    startCameraStreamer();
+                }
+                // 2. Phục hồi cấu hình video an toàn (360p / 500 kbps)
+                VideoProfile profile = VideoResolutionAdapter::profile360p();
                 sendCameraControlCommand(500, profile, true);
                 if (m_aiCompressor) {
                     m_aiCompressor->handleChangeBitrate(500); // Khởi động ở mức sàn an toàn

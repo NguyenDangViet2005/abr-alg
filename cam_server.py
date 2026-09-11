@@ -93,8 +93,7 @@ def camera_capture_loop(device="/dev/video0"):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    print(f"[CamServer] Camera capture thread started successfully on {device}.")
-
+    was_disabled = False
     while True:
         with g_params_lock:
             enabled = g_enabled
@@ -107,6 +106,7 @@ def camera_capture_loop(device="/dev/video0"):
         frame_interval = 1.0 / fps
 
         if not enabled:
+            was_disabled = True
             black_frame = np.zeros((360, 640, 3), dtype=np.uint8)
             cv2.rectangle(black_frame, (10, 10), (630, 350), (0, 0, 255), 3)
             cv2.putText(black_frame, "!!! C2 SAFETY PROTOCOL ACTIVE !!!", (60, 100),
@@ -124,6 +124,12 @@ def camera_capture_loop(device="/dev/video0"):
                 g_frame_id += 1
             time.sleep(0.2)
             continue
+
+        if enabled and was_disabled:
+            was_disabled = False
+            if cap.isOpened():
+                for _ in range(2):
+                    cap.grab()
 
         start_time = time.time()
         ret, frame = cap.read() if cap.isOpened() else (False, None)
