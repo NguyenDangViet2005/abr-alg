@@ -3,15 +3,7 @@
 
 #include <QObject>
 #include <QUdpSocket>
-#include <QTimer>
-#include <QHostAddress>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QVariantList>
-#include <QVariantMap>
-#include <QDateTime>
-#include <QDebug>
-#include "../ABRConfigs.h"
+#include "../SRTPeerStat.h"
 
 class NetworkHandler : public QObject
 {
@@ -20,29 +12,19 @@ public:
     explicit NetworkHandler(QObject *parent = nullptr);
     ~NetworkHandler();
 
-    void start(const QString &host = QOS_SERVER_DEFAULT_HOST, quint16 port = QOS_SERVER_DEFAULT_PORT, int intervalMs = QOS_SERVER_POLL_INTERVAL_MS);
+    void start();
     void stop();
-    void setServerAddress(const QString &host, quint16 port);
-    void setPollInterval(int intervalMs);
-    bool isConnected() const { return m_isConnected; }
 
 signals:
-    void onQosDataReceived(const QVariantList &clients);
-    void onC2DataReceived(const QVariantMap &c2Stats);
-    void onConnectionStateChanged(bool isConnected);
+    void onQosDataReceived(const QVector<SRTPeerStat> &peers);
+    void onC2DataReceived(const QVector<SRTPeerStat> &peers);
 
 private slots:
-    void sendQosQuery();
     void handleUdpReadyRead();
 
 private:
+    SRTPeerStat parsePeerEntry(const QString &entry);
     QUdpSocket *m_udpSocket;
-    QTimer *m_pollTimer;
-    QHostAddress m_serverHost;
-    quint16 m_serverPort;
-    bool m_isConnected;
-    qint64 m_lastPacketTime;
-    int m_packetCount;
 };
 
 #endif // NETWORKHANDLER_H

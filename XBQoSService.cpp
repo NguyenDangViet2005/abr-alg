@@ -38,7 +38,6 @@ void XBQoSService::setupConnections()
     // Kết nối nhận dữ liệu QoS từ NetworkHandler sang ABRFactory
     connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
     connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
-    connect(m_networkHandler, &NetworkHandler::onConnectionStateChanged, m_abrFactory, &ABRFactory::handleSerialStatus);
 
     // Lắng nghe sự kiện Bật/Tắt Video Stream do C2 Priority điều phối
     connect(m_abrFactory, &ABRFactory::onVideoStreamEnableChanged, this, [](bool isEnabled) {
@@ -74,8 +73,8 @@ void XBQoSService::start()
     // 4. Thiết lập kết nối Signal / Slot
     setupConnections();
 
-    // 5. Bắt đầu polling QoS Server
-    m_networkHandler->start(QOS_SERVER_DEFAULT_HOST, QOS_SERVER_DEFAULT_PORT, QOS_SERVER_POLL_INTERVAL_MS);
+    // 5. Bắt đầu lắng nghe SRT Debug UDP trên port 12345
+    m_networkHandler->start();
 }
 
 void XBQoSService::stop()

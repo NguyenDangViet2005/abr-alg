@@ -1,23 +1,15 @@
 #include "NetworkHandler.h"
 #include <QNetworkDatagram>
-
 #include <QDebug>
+
+static const int SRT_DEBUG_PORT = 12345;
+static const int STREAM_PREFIX_LEN = 4;
 
 NetworkHandler::NetworkHandler(QObject *parent)
     : QObject(parent)
-    , m_udpSocket(nullptr)
-    , m_pollTimer(nullptr)
-    , m_serverHost(QOS_SERVER_DEFAULT_HOST)
-    , m_serverPort(QOS_SERVER_DEFAULT_PORT)
-    , m_isConnected(false)
-    , m_lastPacketTime(0)
-    , m_packetCount(0)
+    , m_udpSocket(new QUdpSocket(this))
 {
-    m_udpSocket = new QUdpSocket(this);
-    m_pollTimer = new QTimer(this);
-
     connect(m_udpSocket, &QUdpSocket::readyRead, this, &NetworkHandler::handleUdpReadyRead);
-    connect(m_pollTimer, &QTimer::timeout, this, &NetworkHandler::sendQosQuery);
 }
 
 NetworkHandler::~NetworkHandler()
@@ -25,68 +17,20 @@ NetworkHandler::~NetworkHandler()
     stop();
 }
 
-void NetworkHandler::start(const QString &host, quint16 port, int intervalMs)
+void NetworkHandler::start()
 {
-    m_serverHost = QHostAddress(host);
-    m_serverPort = port;
-
-    // Bind socket on any free local port to receive UDP responses
     if (m_udpSocket->state() != QAbstractSocket::BoundState) {
-        m_udpSocket->bind(QHostAddress::Any, 0);
+        m_udpSocket->bind(QHostAddress::Any, SRT_DEBUG_PORT);
     }
-
-    m_pollTimer->setInterval(intervalMs > 0 ? intervalMs : QOS_SERVER_POLL_INTERVAL_MS);
-    m_pollTimer->start();
-
-    qInfo() << "[NetworkHandler] Started polling QoS Server at" << host << ":" << port
-            << "(Interval:" << m_pollTimer->interval() << "ms)";
-
-    // Send immediate first query
-    sendQosQuery();
+    qInfo() << "[NetworkHandler] Listening UDP 0.0.0.0:" << SRT_DEBUG_PORT;
 }
 
 void NetworkHandler::stop()
 {
-    if (m_pollTimer && m_pollTimer->isActive()) {
-        m_pollTimer->stop();
-    }
     if (m_udpSocket && m_udpSocket->state() == QAbstractSocket::BoundState) {
         m_udpSocket->close();
     }
-    m_isConnected = false;
-    qInfo() << "[NetworkHandler] Stopped QoS Server polling.";
-}
-
-void NetworkHandler::setServerAddress(const QString &host, quint16 port)
-{
-    m_serverHost = QHostAddress(host);
-    m_serverPort = port;
-    qInfo() << "[NetworkHandler] Updated target QoS Server address:" << host << ":" << port;
-}
-
-void NetworkHandler::setPollInterval(int intervalMs)
-{
-    if (m_pollTimer && intervalMs > 0) {
-        m_pollTimer->setInterval(intervalMs);
-        qInfo() << "[NetworkHandler] Updated QoS poll interval:" << intervalMs << "ms";
-    }
-}
-
-void NetworkHandler::sendQosQuery()
-{
-    if (!m_udpSocket) return;
-
-    // Check connection timeout (no response for > 3.5 seconds)
-    qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (m_isConnected && (now - m_lastPacketTime) > 3500) {
-        m_isConnected = false;
-        qWarning() << "[NetworkHandler] QoS Server response TIMEOUT. Waiting for server...";
-        emit onConnectionStateChanged(false);
-    }
-
-    // Gửi bản tin query qua UDP tới QoS Server (Port 12345)
-    QByteArray queryPayload = "{\"cmd\":\"get_qos\"}";
-    m_udpSocket->writeDatagram(queryPayload, m_serverHost, m_serverPort);
+    qInfo() << "[NetworkHandler] Stopped.";
 }
 
 void NetworkHandler::handleUdpReadyRead()
@@ -94,75 +38,79 @@ void NetworkHandler::handleUdpReadyRead()
     while (m_udpSocket && m_udpSocket->hasPendingDatagrams()) {
         QNetworkDatagram datagram = m_udpSocket->receiveDatagram();
         QByteArray data = datagram.data();
-        if (data.isEmpty()) continue;
+        if (data.size() < STREAM_PREFIX_LEN) continue;
 
-        QJsonParseError parseError;
-        QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
-        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
-            continue;
+        QByteArray prefix = data.mid(0, STREAM_PREFIX_LEN);
+        QByteArray body = data.mid(STREAM_PREFIX_LEN);
+
+        QString streamType = (prefix == "9990") ? "Camera" :
+                             (prefix == "9991") ? "Controlling" : "Unknown";
+
+        qInfo().noquote() << QString("[NetworkHandler] UDP recv from %1:%2 (%3 bytes) | prefix=%4 [%5]")
+                                 .arg(datagram.senderAddress().toString())
+                                 .arg(datagram.senderPort())
+                                 .arg(data.size())
+                                 .arg(QString::fromLatin1(prefix))
+                                 .arg(streamType);
+
+        QVector<SRTPeerStat> peers;
+        const QList<QByteArray> entries = body.split('#');
+        for (const QByteArray &entry : entries) {
+            if (entry.isEmpty()) continue;
+            peers.append(parsePeerEntry(QString::fromLatin1(entry)));
         }
 
-        QJsonObject root = doc.object();
-        if (root.value("status").toString() != "OK") {
-            continue;
+        if (peers.isEmpty()) continue;
+
+        for (int i = 0; i < peers.size(); ++i) {
+            const SRTPeerStat &p = peers[i];
+            qInfo().noquote() << QString("[NetworkHandler]   Peer[%1] %2:%3 | RTT: %4ms | SendRate: %5 Mbps | BW: %6 Mbps | Loss: %7/%8 | Retrans: %9")
+                                     .arg(i)
+                                     .arg(p.peerAddress)
+                                     .arg(p.peerPort)
+                                     .arg(p.msRTT, 0, 'f', 2)
+                                     .arg(p.mbpsSendRate, 0, 'f', 2)
+                                     .arg(p.mbpsBandwidth, 0, 'f', 2)
+                                     .arg(p.pktSndLossTotal)
+                                     .arg(p.pktRcvLossTotal)
+                                     .arg(p.pktRetransTotal);
         }
 
-        QJsonObject metrics = root.value("metrics").toObject();
-        double rtt = metrics.value("rtt_ms").toDouble();
-        double bw = metrics.value("estimated_bandwidth_mbps").toDouble();
-        if (bw <= 0.0) {
-            bw = metrics.value("bandwidth_mbps").toDouble();
-        }
-        double sendRate = metrics.value("send_rate_mbps").toDouble();
-        int loss = metrics.value("total_packets_lost").toInt();
-        int flight = metrics.value("flight_size").toInt();
-        int bufMs = metrics.value("recv_buffer_ms").toInt();
-        QString src = root.value("stream_source").toString();
-        if (src.isEmpty()) {
-            src = QString("%1:%2").arg(datagram.senderAddress().toString()).arg(datagram.senderPort());
-        }
+        emit onQosDataReceived(peers);
 
-        // Đóng gói cấu trúc SRT Camera stats chuẩn cho ABRFactory & BelaCoder
-        QVariantMap clientQos;
-        clientQos["peerAddress"] = src;
-        clientQos["msRTT"] = rtt;
-        clientQos["mbpsBandwidth"] = bw;
-        clientQos["mbpsSendRate"] = sendRate;
-        clientQos["pktSndLossTotal"] = loss;
-        clientQos["pktFlightSize"] = flight;
-        clientQos["pktSndBuf"] = bufMs;
-
-        QVariantList clientList;
-        clientList.append(clientQos);
-
-        m_packetCount++;
-        m_lastPacketTime = QDateTime::currentMSecsSinceEpoch();
-
-        if (!m_isConnected) {
-            m_isConnected = true;
-            qInfo() << "[NetworkHandler] Connected to QoS Server successfully! Stream Status:"
-                    << root.value("stream_state").toString() << "from" << src;
-            emit onConnectionStateChanged(true);
-        }
-
-        // Bắn dữ liệu QoS vào ABR engine
-        emit onQosDataReceived(clientList);
-
-        // Đóng gói cấu trúc C2 Telemetry stats (TCP_INFO) nếu có trong JSON
-        if (root.contains("c2_metrics")) {
-            QJsonObject c2Obj = root.value("c2_metrics").toObject();
-            QVariantMap c2Stats;
-            c2Stats["rtt_ms"] = c2Obj.value("rtt_ms").toDouble();
-            c2Stats["rtt_var_ms"] = c2Obj.value("rtt_var_ms").toDouble();
-            c2Stats["delivery_rate_mbps"] = c2Obj.value("delivery_rate_mbps").toDouble();
-            c2Stats["retransmits"] = c2Obj.value("retransmits").toInt();
-            c2Stats["tcpi_loss"] = c2Obj.value("tcpi_loss").toInt();
-            c2Stats["unacked_pkts"] = c2Obj.value("unacked_pkts").toInt();
-            c2Stats["snd_cwnd"] = c2Obj.value("snd_cwnd").toInt();
-            c2Stats["min_rtt_ms"] = c2Obj.value("min_rtt_ms").toDouble();
-            c2Stats["congestion_state"] = c2Obj.value("congestion_state").toString();
-
-            emit onC2DataReceived(c2Stats);
+        if (prefix == "9991") {
+            emit onC2DataReceived(peers);
         }
     }
+}
+
+SRTPeerStat NetworkHandler::parsePeerEntry(const QString &entry)
+{
+    SRTPeerStat stat;
+    const QStringList pairs = entry.split(';', Qt::SkipEmptyParts);
+    for (const QString &pair : pairs) {
+        const int eqIdx = pair.indexOf('=');
+        if (eqIdx < 0) continue;
+
+        const QString key = pair.left(eqIdx);
+        const QString value = pair.mid(eqIdx + 1);
+
+        if (key == "peerAddress")          stat.peerAddress = value;
+        else if (key == "peerPort")        stat.peerPort = value.toInt();
+        else if (key == "msTimeStamp")     stat.msTimeStamp = value.toLongLong();
+        else if (key == "pktSentTotal")    stat.pktSentTotal = value.toLongLong();
+        else if (key == "pktRecvTotal")    stat.pktRecvTotal = value.toLongLong();
+        else if (key == "pktSndLossTotal") stat.pktSndLossTotal = value.toInt();
+        else if (key == "pktRcvLossTotal") stat.pktRcvLossTotal = value.toInt();
+        else if (key == "pktRetransTotal") stat.pktRetransTotal = value.toInt();
+        else if (key == "byteSentTotal")   stat.byteSentTotal = value.toLongLong();
+        else if (key == "byteRecvTotal")   stat.byteRecvTotal = value.toLongLong();
+        else if (key == "mbpsSendRate")    stat.mbpsSendRate = value.toDouble();
+        else if (key == "mbpsRecvRate")    stat.mbpsRecvRate = value.toDouble();
+        else if (key == "msRTT")           stat.msRTT = value.toDouble();
+        else if (key == "mbpsBandwidth")   stat.mbpsBandwidth = value.toDouble();
+        else if (key == "pktSndDropTotal") stat.pktSndDropTotal = value.toInt();
+        else if (key == "pktRcvDropTotal") stat.pktRcvDropTotal = value.toInt();
+    }
+    return stat;
 }
