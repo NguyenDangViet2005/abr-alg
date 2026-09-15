@@ -15,9 +15,9 @@ class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
     Q_OBJECT
 public:
     // ── BelaCoder Configuration Constants ──
-    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 100;
+    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
-    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 500;
+    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 1000;
 
     // Bitrate adjustment step scales (tinh chỉnh mịn cho dải vài trăm kbps)
     static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 20;   // Tăng tối thiểu 20 kbps
