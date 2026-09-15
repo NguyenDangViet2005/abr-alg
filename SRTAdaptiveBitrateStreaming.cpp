@@ -217,27 +217,27 @@ void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
         m_c2Priority = C2PriorityLevel::C2_Only;
         m_isVideoEnabled = false; // TẮT VIDEO HOÀN TOÀN để bảo vệ an toàn bay
     }
-    // 2. Vùng Nguy hiểm (Critical: Unacked lớn > 10, Retransmit >= 3, hoặc RTT > 250ms)
-    else if (m_c2Unacked > 10 || m_c2Retransmits >= 3 || m_c2Rtt > 250.0) {
+    // 2. Vùng Nguy hiểm (Critical: Retransmit lớn >= 6, Unacked > 10, hoặc RTT > 250ms)
+    else if (m_c2Retransmits >= 6 || m_c2Unacked > 10 || m_c2Rtt > 250.0) {
         m_c2Quality = C2Quality::Critical;
         m_c2Priority = C2PriorityLevel::C2_Only;
         m_isVideoEnabled = false; // TẮT VIDEO để nhường 100% tài nguyên cho C2
     }
-    // 3. Vùng Xấu (Poor: Unacked >= 3, Retransmit >= 1, hoặc RTT > 120ms)
-    else if (m_c2Unacked >= 3 || m_c2Retransmits >= 1 || m_c2Rtt > 120.0) {
+    // 3. Vùng Xấu (Poor: Retransmit >= 3, Unacked >= 5, hoặc RTT > 150ms)
+    else if (m_c2Retransmits >= 3 || m_c2Unacked >= 5 || m_c2Rtt > 150.0) {
         m_c2Quality = C2Quality::Poor;
         m_c2Priority = C2PriorityLevel::Critical;
-        m_isVideoEnabled = true; // Video vẫn bật nhưng bị bóp nghẹt bitrate
+        m_isVideoEnabled = true; // Video vẫn bật nhưng ưu tiên cứu C2
     }
-    // 4. Vùng Chớm chập chờn (Fair: RTT > 60ms hoặc RTT Variance > 30ms)
-    else if (m_c2Rtt > 60.0 || m_c2RttVar > 30.0) {
+    // 4. Vùng Chớm chập chờn (Fair: Retransmit >= 1, hoặc RTT > 60ms, hoặc RTT Variance > 30ms)
+    else if (m_c2Retransmits >= 1 || m_c2Rtt > 60.0 || m_c2RttVar > 30.0) {
         m_c2Quality = C2Quality::Fair;
         m_c2Priority = C2PriorityLevel::High;
         m_isVideoEnabled = true;
     }
     // 5. Vùng Tốt / Xuất sắc (Good / Excellent)
     else {
-        m_c2Quality = (m_c2Rtt > 0.0 && m_c2Rtt < 25.0 && m_c2Retransmits == 0) ? C2Quality::Excellent : C2Quality::Good;
+        m_c2Quality = (m_c2Rtt > 0.0 && m_c2Rtt < 30.0 && m_c2Retransmits == 0) ? C2Quality::Excellent : C2Quality::Good;
         m_c2Priority = C2PriorityLevel::Normal;
         m_isVideoEnabled = true;
     }
@@ -565,11 +565,36 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         return;
     }
 
-    // Nếu vừa hồi phục từ C2_ONLY (bitrate = 0), khởi động lại ở mức sàn an toàn
+    // Nếu vừa hồi phục từ C2_ONLY (bitrate = 0), khởi động lại động theo QoS thực tế đo được
     if (m_currentBitrateKbps == 0) {
-        m_currentBitrateKbps = m_minBitrateKbps;
-        m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
-        applyNewBitrate(m_minBitrateKbps, smoothedRtt, smoothedBw, deltaLoss);
+        double linkCapacityKbps = (smoothedBw > 0.0) ? (smoothedBw * 1000.0) : 500.0;
+        unsigned int recoveredBitrate = 0;
+
+        if (state == CongestionState::Clear) {
+            recoveredBitrate = static_cast<unsigned int>(linkCapacityKbps * 0.75); // Mạng thông thoáng: lấy 75% băng thông
+        } else if (state == CongestionState::Light) {
+            recoveredBitrate = static_cast<unsigned int>(linkCapacityKbps * 0.60); // Nhiễu nhẹ: lấy 60%
+        } else if (state == CongestionState::HeavyLight) {
+            recoveredBitrate = static_cast<unsigned int>(linkCapacityKbps * 0.40); // Chớm nghẽn: lấy 40%
+        } else {
+            recoveredBitrate = qMax(100u, static_cast<unsigned int>(linkCapacityKbps * 0.25)); // Nghẽn nặng
+        }
+
+        recoveredBitrate = (recoveredBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+        recoveredBitrate = qBound(100u, recoveredBitrate, m_maxBitrateKbps);
+
+        m_currentBitrateKbps = recoveredBitrate;
+        m_cooldownUntilMs = ctime + 1000; // Cooldown ngắn 1s để kịp thời tăng tốc theo bài test
+        m_lastBitrateChangeTime = ctime;
+        m_lastBitrateIncrTime = ctime;
+        m_consecutiveClearCount = 0;
+
+        qInfo().noquote() << QString(">>> [C2 RECOVERY ENGINE] Dynamic Bitrate Resumed from QoS: %1 kbps (Measured BW: %2 Mbps, State: %3) <<<")
+                    .arg(m_currentBitrateKbps)
+                    .arg(smoothedBw, 0, 'f', 2)
+                    .arg((state == CongestionState::Clear) ? "CLEAR" : "CONGESTED");
+
+        applyNewBitrate(m_currentBitrateKbps, smoothedRtt, smoothedBw, deltaLoss);
         return;
     }
 

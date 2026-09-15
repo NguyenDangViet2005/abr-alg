@@ -77,16 +77,7 @@ void XBQoSService::setupConnections()
                     m_aiCompressor->handleChangeFps(0);
                 }
             } else {
-                qInfo() << ">>> [C2 RECOVERY PROTOCOL] Video Stream is re-ENABLED! Resuming adaptive streaming... <<<";
-                // Phục hồi cấu hình video an toàn (360p / 500 kbps)
-                VideoProfile profile = VideoResolutionAdapter::profile360p();
-                m_resolutionAdapter.resetToProfile(profile);
-                dispatchToCameraServer(500, profile, true);
-                if (m_aiCompressor) {
-                    m_aiCompressor->handleChangeBitrate(500);
-                    m_aiCompressor->handleChangeScale(profile.scalePercent);
-                    m_aiCompressor->handleChangeFps(profile.fps);
-                }
+                qInfo() << ">>> [C2 RECOVERY PROTOCOL] Video Stream is re-ENABLED! Waiting for dynamic QoS bitrate... <<<";
             }
         });
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::c2PriorityChanged, this, [](int level, const QString &name) {

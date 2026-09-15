@@ -102,25 +102,40 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
                    .arg(targetBitrateKbps);
     }
     // 2. NÂNG ĐỘ PHÂN GIẢI (Upscale):
-    // Nâng từng bước một (+1 level) và có thời gian cooldown để mắt người xem không bị giật hình
     else if (targetLevel > currentLevel) {
-        m_consecutiveUpgradeCount++;
-
-        if (m_consecutiveUpgradeCount >= UPSCALE_CONFIRMATION_CYCLES &&
-            (now - m_lastSwitchTimeMs >= MIN_SWITCH_COOLDOWN_MS)) {
-
-            int nextLevel = currentLevel + 1;
-            m_currentProfile = getProfileByLevel(nextLevel);
+        // Nếu vừa khởi động (chưa từng switch) hoặc vừa từ C2_ONLY (level 1 sau khi tắt video), cho phép nhảy thẳng đến targetLevel đo được
+        if (m_lastSwitchTimeMs == 0) {
+            m_currentProfile = getProfileByLevel(targetLevel);
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
 
-            qInfo().noquote() << QString("[Resolution Adapter] 🟢 Mượt mà NÂNG độ phân giải: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
+            qInfo().noquote() << QString("[Resolution Adapter] 🟢 KHỞI ĐỘNG độ phân giải mục tiêu: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
                        .arg(m_currentProfile.label)
                        .arg(m_currentProfile.width)
                        .arg(m_currentProfile.height)
                        .arg(m_currentProfile.fps)
                        .arg(m_currentProfile.scalePercent)
                        .arg(targetBitrateKbps);
+        }
+        else {
+            m_consecutiveUpgradeCount++;
+
+            if (m_consecutiveUpgradeCount >= UPSCALE_CONFIRMATION_CYCLES &&
+                (now - m_lastSwitchTimeMs >= MIN_SWITCH_COOLDOWN_MS)) {
+
+                int nextLevel = currentLevel + 1;
+                m_currentProfile = getProfileByLevel(nextLevel);
+                m_lastSwitchTimeMs = now;
+                m_consecutiveUpgradeCount = 0;
+
+                qInfo().noquote() << QString("[Resolution Adapter] 🟢 Mượt mà NÂNG độ phân giải: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
+                           .arg(m_currentProfile.label)
+                           .arg(m_currentProfile.width)
+                           .arg(m_currentProfile.height)
+                           .arg(m_currentProfile.fps)
+                           .arg(m_currentProfile.scalePercent)
+                           .arg(targetBitrateKbps);
+            }
         }
     }
     else {
