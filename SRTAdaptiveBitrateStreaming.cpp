@@ -444,8 +444,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     else if (rttInflation > 120.0 || (deltaLoss >= 4 && rttInflation > 35.0) || (bs > 0 && bs > bs_th2) || smoothedRtt > (m_srtLatencyMs / 5.0)) {
         state = CongestionState::HeavyModerate;
     }
-    // VÙNG NGHẼN NHẸ (Heavy Light - 10-15%): Chớm nghẽn (RTT tăng nhẹ > 60ms) hoặc Loss dồn dập (>= 8 gói)
-    else if (rttInflation > 60.0 || (deltaLoss >= 2 && rttInflation > 20.0) || deltaLoss >= 8) {
+    // VÙNG NGHẼN NHẸ (Heavy Light - 10-15%):
+    // 1. RTT tăng rõ rệt (> 50ms)
+    // 2. Có Loss kèm RTT tăng (deltaLoss >= 1 && rttInflation > 20ms) -> nghẽn hàng đợi
+    // 3. Bitrate đang phát vượt quá băng thông khả dụng của đường truyền (m_currentBitrateKbps > estBwKbps) kèm RTT tăng nhẹ (> 10ms)
+    // 4. Loss dồn dập (>= 6 gói)
+    else if (rttInflation > 50.0 || (deltaLoss >= 1 && rttInflation > 20.0) || deltaLoss >= 6
+             || (estBwKbps > 0.0 && m_currentBitrateKbps > estBwKbps && rttInflation > 10.0)) {
         state = CongestionState::HeavyLight;
     }
     // VÙNG NHIỄU SÓNG RF HOẶC GIỮ NHỊP (Hold / Light Congestion)
@@ -570,13 +575,12 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         recoveredBitrate = (recoveredBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
         recoveredBitrate = qBound(m_minBitrateKbps, recoveredBitrate, m_maxBitrateKbps);
 
-        m_currentBitrateKbps = recoveredBitrate;
         m_cooldownUntilMs = ctime + 5000; // Giữ nấc an toàn 360p trong 5s để C2 drone hoàn toàn ổn định
         m_lastBitrateChangeTime = ctime;
         m_lastBitrateIncrTime = ctime;
         m_consecutiveClearCount = 0;
 
-        applyNewBitrate(m_currentBitrateKbps, smoothedRtt, smoothedBw, deltaLoss);
+        applyNewBitrate(recoveredBitrate, smoothedRtt, smoothedBw, deltaLoss);
         return;
     }
 
@@ -603,8 +607,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
         qint64 timeSinceLastChange = ctime - m_lastBitrateChangeTime;
         qint64 requiredInterval = (state == CongestionState::Panic) ? BITRATE_DECR_FAST_INTERVAL_MS
-                               : (state == CongestionState::HeavyModerate) ? 600
-                               : 1000;
+                               : (state == CongestionState::HeavyModerate) ? 500
+                               : 700;
 
         // Chỉ hạ bitrate khi đã qua chu kỳ kiểm tra và hết cooldown
         if (timeSinceLastChange >= requiredInterval && ctime >= m_cooldownUntilMs) {
@@ -614,8 +618,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 safeCapacity = (estBwKbps > 0.0) ? (estBwKbps * 0.40) : 300.0;
             } else if (state == CongestionState::HeavyModerate) {
                 safeCapacity = (estBwKbps > 0.0) ? (estBwKbps * 0.50) : 400.0;
-            } else { // HeavyLight (chớm nghẽn / RTT cao nhẹ)
-                safeCapacity = (estBwKbps > 0.0) ? (estBwKbps * 0.65) : 800.0;
+            } else { // HeavyLight (chớm nghẽn / RTT cao nhẹ / băng thông hẹp)
+                safeCapacity = (estBwKbps > 0.0) ? (estBwKbps * 0.70) : 800.0;
             }
 
             unsigned int safeFloor = qMax(MIN_ACTIVE_VIDEO_BITRATE_KBPS, static_cast<unsigned int>(safeCapacity));
@@ -637,7 +641,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
                 m_lastBitrateChangeTime = ctime;
-                m_cooldownUntilMs = ctime + ((state == CongestionState::Panic) ? 800 : 1200);
+                m_cooldownUntilMs = ctime + ((state == CongestionState::Panic) ? 500 : (state == CongestionState::HeavyModerate) ? 600 : 800);
 
                 applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
             }

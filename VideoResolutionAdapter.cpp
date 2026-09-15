@@ -21,7 +21,8 @@ static int getProfileLevel(const VideoProfile &p) {
     if (p.height >= 1080) return 4;
     if (p.height >= 720)  return 3;
     if (p.height >= 480)  return 2;
-    return 1; // 360p
+    if (p.height >= 360)  return 1;
+    return 0; // OFF (Stream Disabled)
 }
 
 static VideoProfile getProfileByLevel(int level) {
@@ -63,7 +64,9 @@ void VideoResolutionAdapter::resetToProfile(const VideoProfile &profile)
 VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbps)
 {
     if (targetBitrateKbps == 0) {
-        return profileOff();
+        m_currentProfile = profileOff();
+        m_lastSwitchTimeMs = 0;
+        return m_currentProfile;
     }
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();

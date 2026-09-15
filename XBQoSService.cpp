@@ -68,6 +68,7 @@ void XBQoSService::setupConnections()
             m_isVideoStreamEnabled = isEnabled;
             if (!isEnabled) {
                 qCritical().noquote() << "[C2 Safety] Video Stream DISABLED -> C2 ONLY Mode!";
+                m_resolutionAdapter.updateBitrate(0);
                 // Thông báo tới Camera Server tắt luồng video để nhường toàn bộ băng thông cho C2 Drone
                 dispatchToCameraServer(0, VideoResolutionAdapter::profileOff(), false);
                 if (m_aiCompressor) {
