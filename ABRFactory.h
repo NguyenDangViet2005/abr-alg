@@ -11,6 +11,7 @@
 #endif
 #include "CellularPredictive.h"
 #include "SRTAdaptiveBitrateStreaming.h"
+#include "SRTPeerStat.h"
 
 class ABRFactory : public QObject
 {
@@ -30,14 +31,11 @@ public slots:
     void handleCloudBitrateChanged(unsigned int new_bitrate_kbps);
     void handleSrtBitrateChanged(unsigned int new_bitrate_kbps);
     void handleSetMaxBitrate(int maxBitrate);
-    void handleC2Data(const QVariantMap &c2Stats);
+    void handleC2Data(const QVector<SRTPeerStat> &peers);
 signals:
-    void onSrtCameraConnection(const QVariantList &clients);
-    void onSrtControllingConnection(const QVariantList &clients);
-    void onC2TelemetryData(const QVariantMap &c2Stats);
-
-    void onQosCameraConnection(const QVariantList &clients);
-    void onQosControllingConnection(const QVariantList &clients);
+    void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);
+    void onSrtControllingConnection(const QVector<SRTPeerStat> &peers);
+    void onC2TelemetryData(const QVector<SRTPeerStat> &peers);
     void onAbrRequestChangeBitrateStep(int bitrateStep);
     void onVideoStreamEnableChanged(bool isEnabled);
     void onC2PriorityChanged(int priorityLevel, const QString &priorityName);

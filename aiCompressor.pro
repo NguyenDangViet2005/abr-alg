@@ -56,6 +56,7 @@ HEADERS += \
     CellularPredictive.h \
     IAdaptiveBitrateStreaming.h \
     SRTAdaptiveBitrateStreaming.h \
+    SRTPeerStat.h \
     XBAdaptiveBitrateStreaming.h \
     XBDualCellAdaptiveBitrateStreaming.h \
     XBQoSService.h \
@@ -70,6 +71,7 @@ SOURCES += \
     CellularPredictive.cpp \
     IAdaptiveBitrateStreaming.cpp \
     SRTAdaptiveBitrateStreaming.cpp \
+    SRTPeerStat.cpp \
     XBAdaptiveBitrateStreaming.cpp \
     XBDualCellAdaptiveBitrateStreaming.cpp \
     XBQoSService.cpp \

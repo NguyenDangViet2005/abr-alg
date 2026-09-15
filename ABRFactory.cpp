@@ -1,5 +1,6 @@
 #include "ABRFactory.h"
 #include <QDebug>
+#include "SRTPeerStat.h"
 
 ABRFactory* ABRFactory::_instance = nullptr;
 
@@ -96,15 +97,15 @@ void ABRFactory::startCameraSocketAbr()
         // ABRFactory/XBSRTFactory — KHÔNG phải của SRTAdaptiveBitrateStreaming.
         // Chuỗi QoS: XBSRTFactory::onQosCameraConnection → ABRFactory::onSrtCameraConnection
         //            → SRTAdaptiveBitrateStreaming::handleQosCameraConnection (SLOT).
-        this->disconnect(this, SIGNAL(onSrtCameraConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVariantList)));
-        this->disconnect(this, SIGNAL(onSrtControllingConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVariantList)));
+        this->disconnect(this, SIGNAL(onSrtCameraConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVector<SRTPeerStat>)));
+        this->disconnect(this, SIGNAL(onSrtControllingConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVector<SRTPeerStat>)));
 
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
         this->connect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, &ABRFactory::onVideoStreamEnableChanged);
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::c2PriorityChanged, this, &ABRFactory::onC2PriorityChanged);
-        this->connect(this, SIGNAL(onSrtCameraConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVariantList)));
-        this->connect(this, SIGNAL(onSrtControllingConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVariantList)));
+        this->connect(this, SIGNAL(onSrtCameraConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVector<SRTPeerStat>)));
+        this->connect(this, SIGNAL(onSrtControllingConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVector<SRTPeerStat>)));
         this->connect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
 
         _srtAdaptiveBitrateStreaming->handleSerialStatus(_havingSerial);
@@ -113,12 +114,12 @@ void ABRFactory::startCameraSocketAbr()
     // Connect srt abr
 }
 
-void ABRFactory::handleC2Data(const QVariantMap &c2Stats)
+void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
 {
     if (_srtAdaptiveBitrateStreaming) {
-        _srtAdaptiveBitrateStreaming->handleC2ConnectionStats(c2Stats);
+        _srtAdaptiveBitrateStreaming->handleC2ConnectionStats(peers);
     }
-    emit onC2TelemetryData(c2Stats);
+    emit onC2TelemetryData(peers);
 }
 
 void ABRFactory::stopCameraSocketAbr()
@@ -143,8 +144,8 @@ void ABRFactory::stopCameraSocketAbr()
     if (_srtAdaptiveBitrateStreaming) {
         this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
         this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
-        this->disconnect(this, SIGNAL(onSrtCameraConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVariantList)));
-        this->disconnect(this, SIGNAL(onSrtControllingConnection(QVariantList)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVariantList)));
+        this->disconnect(this, SIGNAL(onSrtCameraConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVector<SRTPeerStat>)));
+        this->disconnect(this, SIGNAL(onSrtControllingConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVector<SRTPeerStat>)));
         _srtAdaptiveBitrateStreaming->stop();
     }
 }
