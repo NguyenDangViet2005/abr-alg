@@ -33,10 +33,6 @@ void CameraControl::sendAdaptBitrate(int bitrate)
     payload["bitrate"] = bitrate;
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
-    qDebug().noquote() << QString("[CameraControl] POST %1: %2")
-                             .arg(CAMERA_ADAPT_BITRATE_URL)
-                             .arg(QString::fromUtf8(body));
-
     QNetworkReply* reply = m_nam->post(request, body);
     QObject::connect(reply, &QNetworkReply::finished, this, [reply, url]() {
         if (reply->error() != QNetworkReply::NoError) {

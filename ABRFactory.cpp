@@ -180,7 +180,6 @@ void ABRFactory::handleCloudBitrateChanged(unsigned int new_bitrate_kbps)
 
 void ABRFactory::handleSrtBitrateChanged(unsigned int new_bitrate_kbps)
 {
-    qDebug() << "--> [ABRFactory] handleSrtBitrateChanged:" << new_bitrate_kbps << "kbps";
     _currentSrtCamBitrate = new_bitrate_kbps;
     emit this->onCamSrtBitrateChanged(_currentSrtCamBitrate);
     emit this->onCamSockBitrateChanged(_currentSrtCamBitrate);

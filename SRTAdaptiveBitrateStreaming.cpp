@@ -601,26 +601,46 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         // Reset bộ đếm CLEAR khi có bất kỳ dấu hiệu nghẽn nào
         m_consecutiveClearCount = 0;
 
-        // Cho phép hạ bitrate nếu đã hết thời gian cooldown hạ
-        if (ctime >= m_cooldownUntilMs) {
-            double dropFactor = 0.85; // HeavyLight: -15%
-            if (state == CongestionState::HeavyModerate) {
-                dropFactor = 0.70;    // HeavyModerate: -30%
-            } else if (state == CongestionState::Panic) {
-                dropFactor = 0.55;    // Panic: -45%
+        qint64 timeSinceLastChange = ctime - m_lastBitrateChangeTime;
+        qint64 requiredInterval = (state == CongestionState::Panic) ? BITRATE_DECR_FAST_INTERVAL_MS
+                               : (state == CongestionState::HeavyModerate) ? 600
+                               : 1000;
+
+        // Chỉ hạ bitrate khi đã qua chu kỳ kiểm tra và hết cooldown
+        if (timeSinceLastChange >= requiredInterval && ctime >= m_cooldownUntilMs) {
+            // Xác định dung lượng trần an toàn theo băng thông đo được
+            double safeCapacity = 0.0;
+            if (state == CongestionState::Panic) {
+                safeCapacity = (estBwKbps > 0.0) ? (estBwKbps * 0.40) : 300.0;
+            } else if (state == CongestionState::HeavyModerate) {
+                safeCapacity = (estBwKbps > 0.0) ? (estBwKbps * 0.50) : 400.0;
+            } else { // HeavyLight (chớm nghẽn / RTT cao nhẹ)
+                safeCapacity = (estBwKbps > 0.0) ? (estBwKbps * 0.65) : 800.0;
             }
 
-            unsigned int targetBitrate = static_cast<unsigned int>(m_currentBitrateKbps * dropFactor);
+            unsigned int safeFloor = qMax(MIN_ACTIVE_VIDEO_BITRATE_KBPS, static_cast<unsigned int>(safeCapacity));
 
-            if (state == CongestionState::Panic && (rttInflation > 200.0 || deltaLoss >= 8)) {
-                targetBitrate = qMin(targetBitrate, 200u);
+            // Chỉ hạ tiếp nếu bitrate hiện tại còn cao hơn trần an toàn của mức mạng này
+            if (m_currentBitrateKbps > safeFloor) {
+                double dropFactor = 0.85; // HeavyLight: -15%
+                if (state == CongestionState::HeavyModerate) {
+                    dropFactor = 0.70;    // HeavyModerate: -30%
+                } else if (state == CongestionState::Panic) {
+                    dropFactor = 0.50;    // Panic: -50%
+                }
+
+                unsigned int targetBitrate = static_cast<unsigned int>(m_currentBitrateKbps * dropFactor);
+                // Giữ không tụt quá trần an toàn nếu drop quá đà
+                targetBitrate = qMax(safeFloor, targetBitrate);
+
+                targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+                targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
+
+                m_lastBitrateChangeTime = ctime;
+                m_cooldownUntilMs = ctime + ((state == CongestionState::Panic) ? 800 : 1200);
+
+                applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
             }
-
-            targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
-            targetBitrate = qBound(m_minBitrateKbps, targetBitrate, m_maxBitrateKbps);
-
-            m_lastBitrateChangeTime = ctime;
-            applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
         }
     }
     else if (state == CongestionState::Light) {

@@ -18,6 +18,7 @@ public:
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 1000;
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 300; // Nấc sàn tối thiểu của video đang chạy (360p Low)
 
     // Bitrate adjustment step scales (tinh chỉnh mịn cho dải vài trăm kbps)
     static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 20;   // Tăng tối thiểu 20 kbps
