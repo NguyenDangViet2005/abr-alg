@@ -476,7 +476,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     // ── 7.5. Live Bootstrapping: Định vị Bitrate ban đầu theo đúng phân vùng mạng chuẩn ──
     if (!m_isBootstrapped) {
         unsigned int calculatedInitialBitrate = m_minBitrateKbps;
-        double linkCapacityKbps = (smoothedBw > 0.0) ? (smoothedBw * 1000.0) : 2000.0;
+        double linkCapacityKbps = (smoothedBw > 0.0) ? (smoothedBw * 1000.0) : static_cast<double>(DEFAULT_INITIAL_BITRATE_KBPS);
         QString stateName;
 
         switch (state) {
@@ -598,7 +598,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
 
         if (timeSinceLastChange >= BITRATE_DECR_FAST_INTERVAL_MS) {
-            unsigned int dropAmount = qMax(400u, static_cast<unsigned int>(m_currentBitrateKbps * 0.40));
+            unsigned int dropAmount = qMax(BITRATE_DECR_MIN_KBPS * 2, static_cast<unsigned int>(m_currentBitrateKbps * 0.35));
             unsigned int targetBitrate = (m_currentBitrateKbps > dropAmount) ? (m_currentBitrateKbps - dropAmount) : m_minBitrateKbps;
 
             targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -613,7 +613,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
 
         if (timeSinceLastChange >= BITRATE_DECR_FAST_INTERVAL_MS) {
-            unsigned int dropAmount = qMax(200u, static_cast<unsigned int>(m_currentBitrateKbps * 0.22));
+            unsigned int dropAmount = qMax(BITRATE_DECR_MIN_KBPS, static_cast<unsigned int>(m_currentBitrateKbps * 0.20));
             unsigned int targetBitrate = (m_currentBitrateKbps > dropAmount) ? (m_currentBitrateKbps - dropAmount) : m_minBitrateKbps;
 
             targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -628,7 +628,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_cooldownUntilMs = ctime + 1500; // 1.5s cooldown
 
         if (timeSinceLastChange >= BITRATE_DECR_NORMAL_INTERVAL_MS) {
-            unsigned int dropAmount = qMax(100u, static_cast<unsigned int>(m_currentBitrateKbps * 0.12));
+            unsigned int dropAmount = qMax(BITRATE_DECR_MIN_KBPS, static_cast<unsigned int>(m_currentBitrateKbps * 0.10));
             unsigned int targetBitrate = (m_currentBitrateKbps > dropAmount) ? (m_currentBitrateKbps - dropAmount) : m_minBitrateKbps;
 
             targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -651,14 +651,14 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         bool consecutiveClearMet = (m_consecutiveClearCount >= CONSECUTIVE_CLEAR_REQUIRED);
 
         if (cooldownExpired && decisionIntervalExpired && consecutiveClearMet) {
-            // Giới hạn bitrate tăng theo chất lượng đường truyền (🟠 Mục 5)
-            unsigned int stepKbps = 50;
+            // Giới hạn bitrate tăng theo chất lượng đường truyền (tinh chỉnh mịn cho dải vài trăm kbps)
+            unsigned int stepKbps = BITRATE_INCR_MIN_KBPS;
             if (rttInflation < 5.0) {
-                stepKbps = 150; // Mạng cực kỳ thông thoáng và RTT sát đáy
+                stepKbps = 50; // Mạng cực kỳ thông thoáng và RTT sát đáy
             } else if (rttInflation < 15.0) {
-                stepKbps = 100; // Mạng tốt
+                stepKbps = 30; // Mạng tốt
             } else {
-                stepKbps = 50;  // Thăm dò cẩn trọng
+                stepKbps = 20; // Thăm dò cẩn trọng
             }
 
             unsigned int targetBitrate = m_currentBitrateKbps + stepKbps;

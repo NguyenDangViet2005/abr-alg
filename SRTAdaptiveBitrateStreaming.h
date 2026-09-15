@@ -15,14 +15,14 @@ class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
     Q_OBJECT
 public:
     // ── BelaCoder Configuration Constants ──
-    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 300;
+    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 100;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
-    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 2000;
+    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 500;
 
-    // Bitrate adjustment step scales
-    static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;   // Additive increase floor (50 kbps)
-    static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 200;  // Maximum increase in a single decision step
-    static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;  // Minimum decrease amount (100 kbps)
+    // Bitrate adjustment step scales (tinh chỉnh mịn cho dải vài trăm kbps)
+    static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 20;   // Tăng tối thiểu 20 kbps
+    static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 100;  // Tăng tối đa 100 kbps mỗi bước
+    static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 30;   // Giảm tối thiểu 30 kbps
 
     // Decision intervals & Cooldowns
     static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 1000; // Decision interval for increasing bitrate (1.0s)
@@ -37,7 +37,7 @@ public:
 
     // Latency and Rounding
     static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000; // Standard negotiated SRT buffer latency (ms)
-    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 50;   // Làm tròn theo nấc 50 kbps
+    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;   // Làm tròn nấc mịn 10 kbps (thay vì 50 kbps)
 
     enum class CongestionState {
         Clear = 0,

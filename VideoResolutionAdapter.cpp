@@ -34,8 +34,8 @@ static VideoProfile getProfileByLevel(int level) {
 }
 
 VideoResolutionAdapter::VideoResolutionAdapter()
-    : m_currentProfile(profile720p())
-    , m_smoothedBitrate(2000.0)
+    : m_currentProfile(profile360p())
+    , m_smoothedBitrate(500.0)
     , m_lastSwitchTimeMs(0)
     , m_consecutiveUpgradeCount(0)
     , m_consecutiveDowngradeCount(0)
@@ -44,8 +44,8 @@ VideoResolutionAdapter::VideoResolutionAdapter()
 
 void VideoResolutionAdapter::reset()
 {
-    m_currentProfile = profile720p();
-    m_smoothedBitrate = 2000.0;
+    m_currentProfile = profile360p();
+    m_smoothedBitrate = 500.0;
     m_lastSwitchTimeMs = 0;
     m_consecutiveUpgradeCount = 0;
     m_consecutiveDowngradeCount = 0;

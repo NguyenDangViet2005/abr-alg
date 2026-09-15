@@ -132,11 +132,10 @@ void XBQoSService::start()
     // 4. Thiết lập kết nối Signal / Slot
     setupConnections();
 
-    // 5. Bắt đầu lắng nghe UDP datagrams từ Client/GCS trên Port 12345
+    // 5. Bắt đầu lắng nghe UDP datagrams từ Client/GCS/Mikrotik trên Port 12345
     m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
-
-    // 6. Gửi cấu hình khởi tạo ban đầu sang Camera Server API (2000 kbps, 720p HD)
-    dispatchToCameraServer(2000, m_resolutionAdapter.currentProfile(), true);
+    qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT
+            << "- Waiting for first live QoS packet from Mikrotik to lock real bitrate...";
 }
 
 void XBQoSService::stop()

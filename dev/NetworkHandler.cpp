@@ -94,10 +94,18 @@ void NetworkHandler::handleUdpReadyRead()
         else if (metrics.contains("bandwidth_mbps")) bw = metrics.value("bandwidth_mbps").toDouble();
         else if (metrics.contains("mbpsBandwidth")) bw = metrics.value("mbpsBandwidth").toDouble();
         else if (metrics.contains("bw")) bw = metrics.value("bw").toDouble();
+        else if (metrics.contains("bandwidth_kbps")) bw = metrics.value("bandwidth_kbps").toDouble() / 1000.0;
+        else if (metrics.contains("bitrate_kbps")) bw = metrics.value("bitrate_kbps").toDouble() / 1000.0;
+        else if (metrics.contains("bitrate")) {
+            double rawBitrate = metrics.value("bitrate").toDouble();
+            // Nếu bitrate > 100 thì đơn vị là kbps, nếu nhỏ hơn thì là Mbps
+            bw = (rawBitrate > 100.0) ? (rawBitrate / 1000.0) : rawBitrate;
+        }
 
         double sendRate = 0.0;
         if (metrics.contains("send_rate_mbps")) sendRate = metrics.value("send_rate_mbps").toDouble();
         else if (metrics.contains("mbpsSendRate")) sendRate = metrics.value("mbpsSendRate").toDouble();
+        else if (metrics.contains("send_rate_kbps")) sendRate = metrics.value("send_rate_kbps").toDouble() / 1000.0;
 
         int loss = 0;
         if (metrics.contains("total_packets_lost")) loss = metrics.value("total_packets_lost").toInt();
@@ -135,7 +143,12 @@ void NetworkHandler::handleUdpReadyRead()
 
         if (!m_isConnected) {
             m_isConnected = true;
-            qInfo() << "[NetworkHandler] Client connected! Receiving QoS stats from" << src;
+            qInfo().noquote() << QString(">>> [NetworkHandler] FIRST PACKET RECEIVED from %1! Raw Bandwidth: %2 Mbps (%3 kbps), RTT: %4ms, Loss: %5 <<<")
+                        .arg(src)
+                        .arg(bw, 0, 'f', 2)
+                        .arg(bw * 1000.0, 0, 'f', 0)
+                        .arg(rtt, 0, 'f', 1)
+                        .arg(loss);
             emit onConnectionStateChanged(true);
         }
 
