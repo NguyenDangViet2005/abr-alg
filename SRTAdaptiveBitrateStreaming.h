@@ -14,26 +14,15 @@ class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
     Q_OBJECT
 public:
-<<<<<<< HEAD
     // ── BelaCoder Configuration Constants ──
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
-=======
-    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 300;
->>>>>>> 0b68b3da79ddedf29a5064388cb35446afa0ede8
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 1000;
     static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 300; // Nấc sàn tối thiểu của video đang chạy (360p Low)
 
-<<<<<<< HEAD
-    // Bitrate adjustment step scales (tinh chỉnh mịn cho dải vài trăm kbps)
-    static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 20;   // Tăng tối thiểu 20 kbps
-    static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 100;  // Tăng tối đa 100 kbps mỗi bước
-    static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 30;   // Giảm tối thiểu 30 kbps
-=======
     static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;
     static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 200;
     static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;
->>>>>>> 0b68b3da79ddedf29a5064388cb35446afa0ede8
 
     static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 1000;
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250;
@@ -44,14 +33,9 @@ public:
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
-<<<<<<< HEAD
     // Latency and Rounding
     static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000; // Standard negotiated SRT buffer latency (ms)
     static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;   // Làm tròn nấc mịn 10 kbps (thay vì 50 kbps)
-=======
-    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000;
-    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 50;
->>>>>>> 0b68b3da79ddedf29a5064388cb35446afa0ede8
 
     enum class CongestionState {
         Clear = 0,
@@ -96,22 +80,7 @@ private:
     unsigned int m_maxBitrateKbps;
     int m_srtLatencyMs;
 
-<<<<<<< HEAD
-    // C2 Telemetry & Priority State
-    C2Quality m_c2Quality;
-    C2PriorityLevel m_c2Priority;
-    bool m_isVideoEnabled;
-    bool m_isExplicitC2Only;
-    double m_c2Rtt;
-    double m_c2RttVar;
-    int m_c2Retransmits;
-    int m_c2Unacked;
-    int m_c2Loss;
-    qint64 m_lastC2PacketTime;
-
     // Sliding window sample histories
-=======
->>>>>>> 0b68b3da79ddedf29a5064388cb35446afa0ede8
     QVector<double> m_rttHistory;
     QVector<double> m_bwHistory;
     QVector<int> m_lossHistory;

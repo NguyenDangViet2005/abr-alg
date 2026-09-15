@@ -93,11 +93,7 @@ void XBQoSService::setupConnections()
     // Kết nối nhận dữ liệu QoS từ NetworkHandler sang ABRFactory
     connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
     connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
-<<<<<<< HEAD
-    connect(m_networkHandler, &NetworkHandler::onConnectionStateChanged, m_abrFactory, &ABRFactory::handleSerialStatus);
 }
-=======
->>>>>>> 0b68b3da79ddedf29a5064388cb35446afa0ede8
 
 void XBQoSService::dispatchToCameraServer(int bitrate, const VideoProfile &profile, bool enabled)
 {
@@ -126,15 +122,10 @@ void XBQoSService::start()
     // 4. Thiết lập kết nối Signal / Slot
     setupConnections();
 
-<<<<<<< HEAD
     // 5. Bắt đầu lắng nghe UDP datagrams từ Client/GCS/Mikrotik trên Port 12345
     m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
     qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT
             << "- Waiting for first live QoS packet from Mikrotik to lock real bitrate...";
-=======
-    // 5. Bắt đầu lắng nghe SRT Debug UDP trên port 12345
-    m_networkHandler->start();
->>>>>>> 0b68b3da79ddedf29a5064388cb35446afa0ede8
 }
 
 void XBQoSService::stop()
