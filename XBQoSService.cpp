@@ -43,13 +43,12 @@ void XBQoSService::setupConnections()
 
         VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
 
-        qInfo().noquote() << QString(">>> [Dispatch to Camera Server] Bitrate: %1 kbps | Profile: %2 (%3x%4 @ %5fps, Scale: %6%) <<<")
+        qInfo().noquote() << QString("[Bitrate Output] %1 kbps | Profile: %2 (%3x%4 @%5fps)")
                    .arg(newBitrate)
                    .arg(profile.label)
                    .arg(profile.width)
                    .arg(profile.height)
-                   .arg(profile.fps)
-                   .arg(profile.scalePercent);
+                   .arg(profile.fps);
 
         // 1. Cập nhật AICompressor nếu có
         if (m_aiCompressor) {
@@ -62,13 +61,13 @@ void XBQoSService::setupConnections()
         dispatchToCameraServer(static_cast<int>(newBitrate), profile, true);
     };
 
-    // 1. Kết nối trực tiếp từ SRT Adaptive Bitrate Streaming (tránh rụng tín hiệu qua tầng trung gian)
+    // 1. Kết nối trực tiếp từ SRT Adaptive Bitrate Streaming (tránh trùng lặp tín hiệu qua tầng trung gian)
     if (m_abrFactory && m_abrFactory->srtAbr()) {
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::bitrateChanged, this, handleBitrateChange);
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, [this](bool isEnabled) {
             m_isVideoStreamEnabled = isEnabled;
             if (!isEnabled) {
-                qCritical() << ">>> [C2 SAFETY PROTOCOL TRIGGERED] Video Stream is DISABLED to protect Drone Control Link (C2 ONLY Mode)! <<<";
+                qCritical().noquote() << "[C2 Safety] Video Stream DISABLED -> C2 ONLY Mode!";
                 // Thông báo tới Camera Server tắt luồng video để nhường toàn bộ băng thông cho C2 Drone
                 dispatchToCameraServer(0, VideoResolutionAdapter::profileOff(), false);
                 if (m_aiCompressor) {
@@ -77,18 +76,18 @@ void XBQoSService::setupConnections()
                     m_aiCompressor->handleChangeFps(0);
                 }
             } else {
-                qInfo() << ">>> [C2 RECOVERY PROTOCOL] Video Stream is re-ENABLED! Waiting for dynamic QoS bitrate... <<<";
+                qInfo().noquote() << "[C2 Recovery] Video Stream re-ENABLED!";
             }
         });
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::c2PriorityChanged, this, [](int level, const QString &name) {
             Q_UNUSED(level);
-            qInfo() << ">>> [C2 Priority Level]:" << name << "<<<";
+            if (name.contains("Critical") || name.contains("High")) {
+                qWarning().noquote() << QString("[C2 Priority] %1").arg(name);
+            }
         });
+    } else if (m_abrFactory) {
+        connect(m_abrFactory, &ABRFactory::onCamSockBitrateChanged, this, handleBitrateChange);
     }
-
-    // 2. Kết nối dự phòng qua tín hiệu của ABRFactory
-    connect(m_abrFactory, &ABRFactory::onCamSrtBitrateChanged, this, handleBitrateChange);
-    connect(m_abrFactory, &ABRFactory::onCamSockBitrateChanged, this, handleBitrateChange);
 
     // Kết nối nhận dữ liệu QoS từ NetworkHandler sang ABRFactory
     connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);

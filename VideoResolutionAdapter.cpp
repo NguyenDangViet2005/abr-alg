@@ -93,12 +93,11 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
         m_lastSwitchTimeMs = now;
         m_consecutiveUpgradeCount = 0;
 
-        qInfo().noquote() << QString("[Resolution Adapter] 🟡 HẠ độ phân giải tức thì: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
+        qInfo().noquote() << QString("[Resolution] 🟡 Hạ: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
                    .arg(m_currentProfile.label)
                    .arg(m_currentProfile.width)
                    .arg(m_currentProfile.height)
                    .arg(m_currentProfile.fps)
-                   .arg(m_currentProfile.scalePercent)
                    .arg(targetBitrateKbps);
     }
     // 2. NÂNG ĐỘ PHÂN GIẢI (Upscale):
@@ -109,12 +108,11 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
 
-            qInfo().noquote() << QString("[Resolution Adapter] 🟢 KHỞI ĐỘNG độ phân giải mục tiêu: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
+            qInfo().noquote() << QString("[Resolution] 🟢 Khởi động: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
                        .arg(m_currentProfile.label)
                        .arg(m_currentProfile.width)
                        .arg(m_currentProfile.height)
                        .arg(m_currentProfile.fps)
-                       .arg(m_currentProfile.scalePercent)
                        .arg(targetBitrateKbps);
         }
         else {
@@ -128,12 +126,11 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
                 m_lastSwitchTimeMs = now;
                 m_consecutiveUpgradeCount = 0;
 
-                qInfo().noquote() << QString("[Resolution Adapter] 🟢 Mượt mà NÂNG độ phân giải: %1 (%2x%3 @ %4fps, Scale: %5%) - Bitrate: %6 kbps")
+                qInfo().noquote() << QString("[Resolution] 🟢 Nâng: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
                            .arg(m_currentProfile.label)
                            .arg(m_currentProfile.width)
                            .arg(m_currentProfile.height)
                            .arg(m_currentProfile.fps)
-                           .arg(m_currentProfile.scalePercent)
                            .arg(targetBitrateKbps);
             }
         }
