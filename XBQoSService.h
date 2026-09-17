@@ -8,6 +8,7 @@ class ABRFactory;
 class AICompressor;
 class NetworkHandler;
 class CameraControl;
+class QTimer;
 
 class XBQoSService : public QObject
 {
@@ -30,6 +31,8 @@ private:
     CameraControl *m_cameraControl;
     VideoResolutionAdapter m_resolutionAdapter;
     bool m_isVideoStreamEnabled;
+    unsigned int m_currentBitrate;
+    QTimer *m_cameraKeepAliveTimer;
 };
 
 #endif // XB_QOS_SERVICE_H

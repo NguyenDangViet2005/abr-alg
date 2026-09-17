@@ -6,15 +6,15 @@ VideoProfile VideoResolutionAdapter::profile1080p() {
 }
 
 VideoProfile VideoResolutionAdapter::profile720p() {
-    return VideoProfile{1280, 720, 30, 100, "720p (HD)"};
+    return VideoProfile{1280, 720, 30, 67, "720p (HD)"};
 }
 
 VideoProfile VideoResolutionAdapter::profile480p() {
-    return VideoProfile{854, 480, 25, 67, "480p (SD)"};
+    return VideoProfile{854, 480, 30, 50, "480p (SD)"};
 }
 
 VideoProfile VideoResolutionAdapter::profile360p() {
-    return VideoProfile{640, 360, 20, 50, "360p (Low)"};
+    return VideoProfile{640, 360, 30, 33, "360p (Low)"};
 }
 
 static int getProfileLevel(const VideoProfile &p) {
@@ -64,7 +64,7 @@ void VideoResolutionAdapter::resetToProfile(const VideoProfile &profile)
 VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbps)
 {
     if (targetBitrateKbps == 0) {
-        m_currentProfile = profileOff();
+        m_currentProfile = profile360p();
         m_lastSwitchTimeMs = 0;
         return m_currentProfile;
     }
@@ -74,16 +74,16 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
     // targetBitrateKbps đã được thuật toán BelaCoder phân tích và quyết định chuẩn xác
     m_smoothedBitrate = static_cast<double>(targetBitrateKbps);
 
-    // Xác định nấc độ phân giải mục tiêu chuẩn theo Bitrate
+    // Xác định nấc độ phân giải mục tiêu chuẩn theo Bitrate (phân dải mượt mà)
     int targetLevel = 1;
-    if (targetBitrateKbps >= 3200) {
-        targetLevel = 4; // 1080p (>= 3200 kbps)
+    if (targetBitrateKbps >= 3500) {
+        targetLevel = 4; // 1080p (>= 3500 kbps)
     } else if (targetBitrateKbps >= 1600) {
-        targetLevel = 3; // 720p (1600 - 3200 kbps)
-    } else if (targetBitrateKbps >= 750) {
-        targetLevel = 2; // 480p (750 - 1600 kbps)
+        targetLevel = 3; // 720p (1600 - 3499 kbps, bao gồm case 30% loss @ 1800k)
+    } else if (targetBitrateKbps >= 1000) {
+        targetLevel = 2; // 480p (1000 - 1599 kbps, bao gồm 1200k)
     } else {
-        targetLevel = 1; // 360p (< 750 kbps, ví dụ 300k - 500k)
+        targetLevel = 1; // 360p (< 1000 kbps, ví dụ 400k - 700k)
     }
 
     int currentLevel = getProfileLevel(m_currentProfile);

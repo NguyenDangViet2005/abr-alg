@@ -11,8 +11,8 @@ class CameraControl : public QObject
 public:
     explicit CameraControl(QObject *parent = nullptr);
 
-    // Gửi yêu cầu thay đổi bitrate tới camera API (POST JSON: { "bitrate": <kbps> })
-    void sendAdaptBitrate(int bitrate);
+    // Gửi yêu cầu thay đổi bitrate và độ phân giải tới camera API (POST JSON: { "bitrate": <kbps>, ... })
+    void sendAdaptBitrate(int bitrate, const VideoProfile &profile = VideoProfile{0, 0, 0, 0, ""});
 
 public slots:
     void handleChangeCameraBitrate(int bitrate);

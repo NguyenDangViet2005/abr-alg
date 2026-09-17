@@ -23,7 +23,7 @@ CameraControl::CameraControl(QObject *parent)
     , m_nam(new QNetworkAccessManager(this))
 {}
 
-void CameraControl::sendAdaptBitrate(int bitrate)
+void CameraControl::sendAdaptBitrate(int bitrate, const VideoProfile &profile)
 {
     QUrl url(CAMERA_ADAPT_BITRATE_URL);
     QNetworkRequest request(url);
@@ -31,6 +31,13 @@ void CameraControl::sendAdaptBitrate(int bitrate)
 
     QJsonObject payload;
     payload["bitrate"] = bitrate;
+    if (profile.width > 0) {
+        payload["width"] = profile.width;
+        payload["height"] = profile.height;
+        payload["fps"] = profile.fps;
+        payload["scale"] = profile.scalePercent;
+        payload["resolution"] = profile.label;
+    }
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
     QNetworkReply* reply = m_nam->post(request, body);

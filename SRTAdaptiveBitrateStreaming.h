@@ -17,19 +17,19 @@ public:
     // ── BelaCoder Configuration Constants ──
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
-    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 1000;
-    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 300; // Nấc sàn tối thiểu của video đang chạy (360p Low)
+    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 400; // Sàn sinh tồn khẩn cấp (360p @30fps) khi mất gói cực đoan >= 80%
 
     static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;
-    static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 200;
+    static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 500;
     static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;
 
-    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 1000;
-    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250;
-    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;
-    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 2000;
-
-    static constexpr int CONSECUTIVE_CLEAR_REQUIRED                 = 4;
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 800;  // 800ms: Tăng bitrate đầm chắc, tránh spam encoder liên tục
+    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 400;  // 400ms: Phản ứng nhanh khi có mất gói
+    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 600;  // 600ms: Giảm tải mượt mà
+    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500; // 1.5s cooldown sau khi giảm tải để xả sạch buffer
+ 
+    static constexpr int CONSECUTIVE_CLEAR_REQUIRED                 = 3;    // 3 mẫu liên tiếp (~1.5s) ổn định mới bắt đầu tăng tốc
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
@@ -43,6 +43,7 @@ public:
         HeavyLight,
         HeavyModerate,
         HeavySevere,
+        Extreme,
         Panic
     };
 
@@ -135,6 +136,8 @@ private:
     double m_latestSmoothedRtt;
     double m_latestSmoothedBw;
     int m_latestDeltaLoss;
+    double m_lossPercentAvg;
+    double m_latestSmoothedLossPercent;
     QString m_latestStatusReason;
     qint64 m_lastQosPacketTime;
 

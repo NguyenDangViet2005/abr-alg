@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QDir>
+#include <QTimer>
 #include "ABRFactory.h"
 #include "AICompressor.h"
 #include "dev/NetworkHandler.h"
@@ -16,6 +17,8 @@ XBQoSService::XBQoSService(QObject *parent)
     , m_networkHandler(nullptr)
     , m_cameraControl(nullptr)
     , m_isVideoStreamEnabled(true)
+    , m_currentBitrate(0)
+    , m_cameraKeepAliveTimer(nullptr)
 {
     m_cameraControl = new CameraControl(this);
 }
@@ -34,31 +37,50 @@ void XBQoSService::printStartupBanner()
 
 void XBQoSService::setupConnections()
 {
+    // Khởi tạo Timer Heartbeat định kỳ 3 giây để giữ bitrate cho Camera Encoder
+    // Tránh việc camera phần cứng tự động decay / reset bitrate trong giai đoạn HOLD
+    m_cameraKeepAliveTimer = new QTimer(this);
+    m_cameraKeepAliveTimer->setInterval(3000);
+    connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this]() {
+        if (m_currentBitrate > 0) {
+            dispatchToCameraServer(static_cast<int>(m_currentBitrate), m_resolutionAdapter.currentProfile(), true);
+        }
+    });
+
     // Kết nối signal thay đổi bitrate từ SRT ABR sang Camera Encoder
     auto handleBitrateChange = [this](unsigned int newBitrate) {
-        if (!m_isVideoStreamEnabled) {
-            qInfo() << "[QoS Engine] Video is currently DISABLED (C2 ONLY Mode). Ignoring bitrate update:" << newBitrate << "kbps";
+        if (newBitrate == m_currentBitrate) {
             return;
         }
+        m_currentBitrate = newBitrate;
 
         VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
 
-        qInfo().noquote() << QString(">>> [BITRATE OUTPUT] ===> \033[1;32m[%1 kbps]\033[0m <=== | Profile: \033[1;36m%2 (%3x%4 @%5fps)\033[0m <<<")
+        qInfo().noquote() << QString(">>> [BITRATE OUTPUT] ===> \033[1;32m[%1 kbps]\033[0m <=== | Profile: \033[1;36m%2 (%3x%4 @%5fps - Scale %6%)\033[0m <<<")
                    .arg(newBitrate)
                    .arg(profile.label)
                    .arg(profile.width)
                    .arg(profile.height)
-                   .arg(profile.fps);
+                   .arg(profile.fps)
+                   .arg(profile.scalePercent);
 
-        // 1. Cập nhật AICompressor nếu có
+        // 1. Cập nhật AICompressor: điều chỉnh Bitrate và Scale theo nấc phân giải
         if (m_aiCompressor) {
             m_aiCompressor->handleChangeBitrate(static_cast<int>(newBitrate));
-            m_aiCompressor->handleChangeScale(profile.scalePercent);
-            m_aiCompressor->handleChangeFps(profile.fps);
+            static int lastDispatchedScale = -1;
+            if (profile.scalePercent != lastDispatchedScale) {
+                lastDispatchedScale = profile.scalePercent;
+                m_aiCompressor->handleChangeScale(profile.scalePercent);
+            }
         }
 
         // 2. Call HTTP REST API tới Camera Server thực tế (POST http://host:port/api/camera/adapt-bitrate)
         dispatchToCameraServer(static_cast<int>(newBitrate), profile, true);
+
+        // Reset lại timer 3s để bắt đầu chu kỳ keepalive từ thời điểm thay đổi mới nhất
+        if (m_cameraKeepAliveTimer) {
+            m_cameraKeepAliveTimer->start();
+        }
     };
 
     // 1. Kết nối trực tiếp từ SRT Adaptive Bitrate Streaming (tránh trùng lặp tín hiệu qua tầng trung gian)
@@ -67,17 +89,13 @@ void XBQoSService::setupConnections()
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, [this](bool isEnabled) {
             m_isVideoStreamEnabled = isEnabled;
             if (!isEnabled) {
-                qCritical().noquote() << "[C2 Safety] Video Stream DISABLED -> C2 ONLY Mode!";
-                m_resolutionAdapter.updateBitrate(300);
-                // Camera service từ chối bitrate 0, nên gửi mức sàn 300 kbps để thắt chặt băng thông cho C2
-                dispatchToCameraServer(300, VideoResolutionAdapter::profileOff(), false);
+                qWarning().noquote() << "[C2 Priority] Video bitrate constrained to survival floor 400 kbps";
+                dispatchToCameraServer(400, m_resolutionAdapter.currentProfile(), true);
                 if (m_aiCompressor) {
-                    m_aiCompressor->handleChangeBitrate(0);
-                    m_aiCompressor->handleChangeScale(0);
-                    m_aiCompressor->handleChangeFps(0);
+                    m_aiCompressor->handleChangeBitrate(400);
                 }
             } else {
-                qInfo().noquote() << "[C2 Recovery] Video Stream re-ENABLED!";
+                qInfo().noquote() << "[C2 Normal] Video bitrate operating normally";
             }
         });
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::c2PriorityChanged, this, [](int level, const QString &name) {
@@ -99,10 +117,9 @@ void XBQoSService::setupConnections()
 
 void XBQoSService::dispatchToCameraServer(int bitrate, const VideoProfile &profile, bool enabled)
 {
-    Q_UNUSED(profile);
     Q_UNUSED(enabled);
     if (m_cameraControl) {
-        m_cameraControl->sendAdaptBitrate(bitrate);
+        m_cameraControl->sendAdaptBitrate(bitrate, profile);
     }
 }
 
@@ -131,6 +148,9 @@ void XBQoSService::start()
 
 void XBQoSService::stop()
 {
+    if (m_cameraKeepAliveTimer) {
+        m_cameraKeepAliveTimer->stop();
+    }
     if (m_networkHandler) {
         m_networkHandler->stop();
     }
