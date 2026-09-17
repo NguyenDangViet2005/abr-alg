@@ -1,8 +1,9 @@
 #include "NetworkHandler.h"
 #include <QNetworkDatagram>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDebug>
 
-static const int SRT_DEBUG_PORT = 12345;
 static const int STREAM_PREFIX_LEN = 4;
 
 NetworkHandler::NetworkHandler(QObject *parent)
@@ -38,51 +39,93 @@ void NetworkHandler::handleUdpReadyRead()
     while (m_udpSocket && m_udpSocket->hasPendingDatagrams()) {
         QNetworkDatagram datagram = m_udpSocket->receiveDatagram();
         QByteArray data = datagram.data();
-        if (data.size() < STREAM_PREFIX_LEN) continue;
+        if (data.isEmpty()) continue;
 
-        QByteArray prefix = data.mid(0, STREAM_PREFIX_LEN);
-        QByteArray body = data.mid(STREAM_PREFIX_LEN);
-
-        QString streamType = (prefix == "9990") ? "Camera" :
-                             (prefix == "9991") ? "Controlling" : "Unknown";
-
-        qInfo().noquote() << QString("[NetworkHandler] UDP recv from %1:%2 (%3 bytes) | prefix=%4 [%5]")
-                                 .arg(datagram.senderAddress().toString())
-                                 .arg(datagram.senderPort())
-                                 .arg(data.size())
-                                 .arg(QString::fromLatin1(prefix))
-                                 .arg(streamType);
-
-        QVector<SRTPeerStat> peers;
-        const QList<QByteArray> entries = body.split('#');
-        for (const QByteArray &entry : entries) {
-            if (entry.isEmpty()) continue;
-            peers.append(parsePeerEntry(QString::fromLatin1(entry)));
-        }
-
-        if (peers.isEmpty()) continue;
-
-        for (int i = 0; i < peers.size(); ++i) {
-            const SRTPeerStat &p = peers[i];
-            qInfo().noquote() << QString("[NetworkHandler]   Peer[%1] %2:%3 | RTT: %4ms | SendRate: %5 Mbps | BW: %6 Mbps | Loss: %7/%8 | Retrans: %9")
-                                     .arg(i)
-                                     .arg(p.peerAddress)
-                                     .arg(p.peerPort)
-                                     .arg(p.msRTT, 0, 'f', 2)
-                                     .arg(p.mbpsSendRate, 0, 'f', 2)
-                                     .arg(p.mbpsBandwidth, 0, 'f', 2)
-                                     .arg(p.pktSndLossTotal)
-                                     .arg(p.pktRcvLossTotal)
-                                     .arg(p.pktRetransTotal);
-        }
-
-        if (prefix == "9990") {
-            emit onQosDataReceived(peers);
-        } else if (prefix == "9991") {
-            emit onC2DataReceived(peers);
+        QByteArray trimmed = data.trimmed();
+        if (trimmed.startsWith('{')) {
+            parseJsonDatagram(data, datagram.senderAddress(), datagram.senderPort());
         } else {
-            qWarning().noquote() << QString("[NetworkHandler] Unknown stream prefix: %1").arg(QString::fromLatin1(prefix));
+            parsePrefixDatagram(data, datagram.senderAddress(), datagram.senderPort());
         }
+    }
+}
+
+void NetworkHandler::parseJsonDatagram(const QByteArray &data, const QHostAddress &senderAddress, quint16 senderPort)
+{
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        return;
+    }
+
+    QJsonObject root = doc.object();
+    QString src = root.value("source").toString();
+    if (src.isEmpty()) {
+        src = QString("%1:%2").arg(senderAddress.toString()).arg(senderPort);
+    }
+
+    // 1. Camera metrics
+    QJsonObject metrics = root.value("metrics").toObject();
+    if (!metrics.isEmpty()) {
+        SRTPeerStat cam;
+        cam.peerAddress = src;
+        cam.peerPort = senderPort;
+        cam.msRTT = metrics.value("rtt_ms").toDouble();
+        cam.mbpsBandwidth = metrics.value("estimated_bandwidth_mbps").toDouble();
+        if (cam.mbpsBandwidth <= 0.0) {
+            cam.mbpsBandwidth = metrics.value("bandwidth_mbps").toDouble();
+        }
+        cam.mbpsSendRate = metrics.value("send_rate_mbps").toDouble();
+        cam.pktSndLossTotal = metrics.value("total_packets_lost").toInt();
+        cam.pktSndDropTotal = metrics.value("flight_size").toInt();
+        cam.pktRetransTotal = metrics.value("recv_buffer_ms").toInt();
+
+        QVector<SRTPeerStat> camPeers;
+        camPeers.append(cam);
+        emit onQosDataReceived(camPeers);
+    }
+
+    // 2. C2 Telemetry metrics
+    if (root.contains("c2_metrics")) {
+        QJsonObject c2Obj = root.value("c2_metrics").toObject();
+        SRTPeerStat c2;
+        c2.peerAddress = src;
+        c2.peerPort = senderPort;
+        c2.msRTT = c2Obj.value("rtt_ms").toDouble();
+        c2.mbpsBandwidth = c2Obj.value("delivery_rate_mbps").toDouble();
+        c2.pktRetransTotal = c2Obj.value("retransmits").toInt();
+        c2.pktSndLossTotal = c2Obj.value("tcpi_loss").toInt();
+        c2.pktSndDropTotal = c2Obj.value("unacked_pkts").toInt();
+        c2.isC2Only = c2Obj.value("c2_only").toBool() || (c2Obj.value("congestion_state").toString().toUpper() == "C2_ONLY");
+
+        QVector<SRTPeerStat> c2Peers;
+        c2Peers.append(c2);
+        emit onC2DataReceived(c2Peers);
+    }
+}
+
+void NetworkHandler::parsePrefixDatagram(const QByteArray &data, const QHostAddress &senderAddress, quint16 senderPort)
+{
+    Q_UNUSED(senderAddress);
+    Q_UNUSED(senderPort);
+    if (data.size() < STREAM_PREFIX_LEN) return;
+
+    QByteArray prefix = data.mid(0, STREAM_PREFIX_LEN);
+    QByteArray body = data.mid(STREAM_PREFIX_LEN);
+
+    QVector<SRTPeerStat> peers;
+    const QList<QByteArray> entries = body.split('#');
+    for (const QByteArray &entry : entries) {
+        if (entry.isEmpty()) continue;
+        peers.append(parsePeerEntry(QString::fromLatin1(entry)));
+    }
+
+    if (peers.isEmpty()) return;
+
+    if (prefix == "9990") {
+        emit onQosDataReceived(peers);
+    } else if (prefix == "9991") {
+        emit onC2DataReceived(peers);
     }
 }
 
@@ -113,6 +156,7 @@ SRTPeerStat NetworkHandler::parsePeerEntry(const QString &entry)
         else if (key == "mbpsBandwidth")   stat.mbpsBandwidth = value.toDouble();
         else if (key == "pktSndDropTotal") stat.pktSndDropTotal = value.toInt();
         else if (key == "pktRcvDropTotal") stat.pktRcvDropTotal = value.toInt();
+        else if (key == "isC2Only" || key == "c2_only") stat.isC2Only = (value == "1" || value.toLower() == "true");
     }
     return stat;
 }

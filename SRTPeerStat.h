@@ -21,6 +21,7 @@ struct SRTPeerStat {
     double mbpsBandwidth = 0.0;
     int pktSndDropTotal = 0;
     int pktRcvDropTotal = 0;
+    bool isC2Only = false;
 };
 
 Q_DECLARE_METATYPE(SRTPeerStat)

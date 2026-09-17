@@ -25,6 +25,8 @@ private slots:
     void handleUdpReadyRead();
 
 private:
+    void parseJsonDatagram(const QByteArray &data, const QHostAddress &senderAddress, quint16 senderPort);
+    void parsePrefixDatagram(const QByteArray &data, const QHostAddress &senderAddress, quint16 senderPort);
     SRTPeerStat parsePeerEntry(const QString &entry);
     QUdpSocket *m_udpSocket;
 };

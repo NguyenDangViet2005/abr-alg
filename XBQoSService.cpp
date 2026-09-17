@@ -43,7 +43,7 @@ void XBQoSService::setupConnections()
 
         VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
 
-        qInfo().noquote() << QString("[Bitrate Output] %1 kbps | Profile: %2 (%3x%4 @%5fps)")
+        qInfo().noquote() << QString(">>> [BITRATE OUTPUT] ===> \033[1;32m[%1 kbps]\033[0m <=== | Profile: \033[1;36m%2 (%3x%4 @%5fps)\033[0m <<<")
                    .arg(newBitrate)
                    .arg(profile.label)
                    .arg(profile.width)
@@ -68,9 +68,9 @@ void XBQoSService::setupConnections()
             m_isVideoStreamEnabled = isEnabled;
             if (!isEnabled) {
                 qCritical().noquote() << "[C2 Safety] Video Stream DISABLED -> C2 ONLY Mode!";
-                m_resolutionAdapter.updateBitrate(0);
-                // Thông báo tới Camera Server tắt luồng video để nhường toàn bộ băng thông cho C2 Drone
-                dispatchToCameraServer(0, VideoResolutionAdapter::profileOff(), false);
+                m_resolutionAdapter.updateBitrate(300);
+                // Camera service từ chối bitrate 0, nên gửi mức sàn 300 kbps để thắt chặt băng thông cho C2
+                dispatchToCameraServer(300, VideoResolutionAdapter::profileOff(), false);
                 if (m_aiCompressor) {
                     m_aiCompressor->handleChangeBitrate(0);
                     m_aiCompressor->handleChangeScale(0);
@@ -90,9 +90,11 @@ void XBQoSService::setupConnections()
         connect(m_abrFactory, &ABRFactory::onCamSockBitrateChanged, this, handleBitrateChange);
     }
 
-    // Kết nối nhận dữ liệu QoS từ NetworkHandler sang ABRFactory
-    connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
-    connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+    // Kết nối nhận dữ liệu QoS từ NetworkHandler (Lắng nghe UDP Port 12345 từ background service trên xblink)
+    if (m_abrFactory) {
+        connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
+        connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+    }
 }
 
 void XBQoSService::dispatchToCameraServer(int bitrate, const VideoProfile &profile, bool enabled)
@@ -122,10 +124,9 @@ void XBQoSService::start()
     // 4. Thiết lập kết nối Signal / Slot
     setupConnections();
 
-    // 5. Bắt đầu lắng nghe UDP datagrams từ Client/GCS/Mikrotik trên Port 12345
+    // 5. Bắt đầu lắng nghe UDP datagrams từ Port 12345
     m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
-    qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT
-            << "- Waiting for first live QoS packet from Mikrotik to lock real bitrate...";
+    qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT;
 }
 
 void XBQoSService::stop()
