@@ -86,31 +86,29 @@ void NetworkHandler::handleUdpReadyRead()
 
 SRTPeerStat NetworkHandler::parsePeerEntry(const QString &entry)
 {
-    SRTPeerStat stat;
-    const QStringList pairs = entry.split(';', Qt::SkipEmptyParts);
-    for (const QString &pair : pairs) {
-        const int eqIdx = pair.indexOf('=');
-        if (eqIdx < 0) continue;
-
-        const QString key = pair.left(eqIdx);
-        const QString value = pair.mid(eqIdx + 1);
-
-        if (key == "peerAddress")          stat.peerAddress = value;
-        else if (key == "peerPort")        stat.peerPort = value.toInt();
-        else if (key == "msTimeStamp")     stat.msTimeStamp = value.toLongLong();
-        else if (key == "pktSentTotal")    stat.pktSentTotal = value.toLongLong();
-        else if (key == "pktRecvTotal")    stat.pktRecvTotal = value.toLongLong();
-        else if (key == "pktSndLossTotal") stat.pktSndLossTotal = value.toInt();
-        else if (key == "pktRcvLossTotal") stat.pktRcvLossTotal = value.toInt();
-        else if (key == "pktRetransTotal") stat.pktRetransTotal = value.toInt();
-        else if (key == "byteSentTotal")   stat.byteSentTotal = value.toLongLong();
-        else if (key == "byteRecvTotal")   stat.byteRecvTotal = value.toLongLong();
-        else if (key == "mbpsSendRate")    stat.mbpsSendRate = value.toDouble();
-        else if (key == "mbpsRecvRate")    stat.mbpsRecvRate = value.toDouble();
-        else if (key == "msRTT")           stat.msRTT = value.toDouble();
-        else if (key == "mbpsBandwidth")   stat.mbpsBandwidth = value.toDouble();
-        else if (key == "pktSndDropTotal") stat.pktSndDropTotal = value.toInt();
-        else if (key == "pktRcvDropTotal") stat.pktRcvDropTotal = value.toInt();
+    // Positional format: addr;port;ts;pktSent;pktRecv;lossSnd;lossRcv;retrans;byteSent;byteRecv;rateSend;rateRecv;rtt;bw;dropSnd;dropRcv
+    const QStringList f = entry.split(';', Qt::SkipEmptyParts);
+    if (f.size() < 16) {
+        qWarning() << "[NetworkHandler] Expected 16 fields, got" << f.size() << ":" << entry;
+        return {};
     }
+
+    SRTPeerStat stat;
+    stat.peerAddress      = f[0];
+    stat.peerPort         = f[1].toInt();
+    stat.msTimeStamp      = f[2].toLongLong();
+    stat.pktSentTotal     = f[3].toLongLong();
+    stat.pktRecvTotal     = f[4].toLongLong();
+    stat.pktSndLossTotal  = f[5].toInt();
+    stat.pktRcvLossTotal  = f[6].toInt();
+    stat.pktRetransTotal  = f[7].toInt();
+    stat.byteSentTotal    = f[8].toLongLong();
+    stat.byteRecvTotal    = f[9].toLongLong();
+    stat.mbpsSendRate     = f[10].toDouble();
+    stat.mbpsRecvRate     = f[11].toDouble();
+    stat.msRTT            = f[12].toDouble();
+    stat.mbpsBandwidth    = f[13].toDouble();
+    stat.pktSndDropTotal  = f[14].toInt();
+    stat.pktRcvDropTotal  = f[15].toInt();
     return stat;
 }
