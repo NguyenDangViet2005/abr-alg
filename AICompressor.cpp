@@ -115,12 +115,12 @@ void AICompressor::handleChangeBitrate(int bitrate)
 
 void AICompressor::handleChangeFps(int fps)
 {
-    Q_UNUSED(fps)
+    this->updateFps(fps);
 }
 
 void AICompressor::handleChangeScale(int scale)
 {
-    Q_UNUSED(scale)
+    this->updateScale(scale);
 }
 
 void AICompressor::handleGetInfoTimer()

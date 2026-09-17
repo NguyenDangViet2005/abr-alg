@@ -14,9 +14,11 @@ class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
     Q_OBJECT
 public:
-    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 300;
+    // ── BelaCoder Configuration Constants ──
+    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
-    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 2000;
+    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 1000;
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 300; // Nấc sàn tối thiểu của video đang chạy (360p Low)
 
     static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;
     static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 200;
@@ -31,8 +33,9 @@ public:
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
-    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000;
-    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 50;
+    // Latency and Rounding
+    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000; // Standard negotiated SRT buffer latency (ms)
+    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;   // Làm tròn nấc mịn 10 kbps (thay vì 50 kbps)
 
     enum class CongestionState {
         Clear = 0,
@@ -77,6 +80,7 @@ private:
     unsigned int m_maxBitrateKbps;
     int m_srtLatencyMs;
 
+    // Sliding window sample histories
     QVector<double> m_rttHistory;
     QVector<double> m_bwHistory;
     QVector<int> m_lossHistory;

@@ -17,12 +17,12 @@ NetworkHandler::~NetworkHandler()
     stop();
 }
 
-void NetworkHandler::start()
+void NetworkHandler::start(quint16 port)
 {
     if (m_udpSocket->state() != QAbstractSocket::BoundState) {
-        m_udpSocket->bind(QHostAddress::Any, SRT_DEBUG_PORT);
+        m_udpSocket->bind(QHostAddress::Any, port);
     }
-    qInfo() << "[NetworkHandler] Listening UDP 0.0.0.0:" << SRT_DEBUG_PORT;
+    qInfo() << "[NetworkHandler] Listening UDP 0.0.0.0:" << port;
 }
 
 void NetworkHandler::stop()
@@ -76,10 +76,12 @@ void NetworkHandler::handleUdpReadyRead()
                                      .arg(p.pktRetransTotal);
         }
 
-        emit onQosDataReceived(peers);
-
-        if (prefix == "9991") {
+        if (prefix == "9990") {
+            emit onQosDataReceived(peers);
+        } else if (prefix == "9991") {
             emit onC2DataReceived(peers);
+        } else {
+            qWarning().noquote() << QString("[NetworkHandler] Unknown stream prefix: %1").arg(QString::fromLatin1(prefix));
         }
     }
 }

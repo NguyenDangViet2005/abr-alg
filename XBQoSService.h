@@ -1,11 +1,13 @@
-﻿#ifndef XB_QOS_SERVICE_H
+#ifndef XB_QOS_SERVICE_H
 #define XB_QOS_SERVICE_H
 
 #include <QObject>
+#include "VideoResolutionAdapter.h"
 
 class ABRFactory;
 class AICompressor;
 class NetworkHandler;
+class CameraControl;
 
 class XBQoSService : public QObject
 {
@@ -20,10 +22,14 @@ public:
 private:
     void printStartupBanner();
     void setupConnections();
+    void dispatchToCameraServer(int bitrate, const VideoProfile &profile, bool enabled);
 
     ABRFactory *m_abrFactory;
     AICompressor *m_aiCompressor;
     NetworkHandler *m_networkHandler;
+    CameraControl *m_cameraControl;
+    VideoResolutionAdapter m_resolutionAdapter;
+    bool m_isVideoStreamEnabled;
 };
 
 #endif // XB_QOS_SERVICE_H
