@@ -86,7 +86,7 @@ public slots:
     void onHeartbeatTimeout();
 
 private:
-    void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps, int rawLossTotal);
+    void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps, int rawLossTotal, qint64 rawSentTotal = 0);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
 
     void evaluateC2Quality();
@@ -131,6 +131,7 @@ private:
     qint64 m_lastBitrateIncrTime;
     qint64 m_cooldownUntilMs;
     int m_consecutiveClearCount;
+    int m_consecutiveZeroLossCount;
 
     QTimer *m_heartbeatTimer;
     double m_latestSmoothedRtt;
@@ -143,6 +144,8 @@ private:
 
     int m_lastLossTotal;
     bool m_hasLastLoss;
+    qint64 m_lastSentTotal;
+    bool m_hasLastSent;
     bool m_isBootstrapped;
     CongestionState m_lastCongestionState;
 };

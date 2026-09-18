@@ -3,7 +3,6 @@
 
 #include <QObject>
 #include <QNetworkAccessManager>
-#include "VideoResolutionAdapter.h"
 
 class CameraControl : public QObject
 {
@@ -11,8 +10,8 @@ class CameraControl : public QObject
 public:
     explicit CameraControl(QObject *parent = nullptr);
 
-    // Gửi yêu cầu thay đổi bitrate và độ phân giải tới camera API (POST JSON: { "bitrate": <kbps>, ... })
-    void sendAdaptBitrate(int bitrate, const VideoProfile &profile = VideoProfile{0, 0, 0, 0, ""});
+    // Gửi yêu cầu thay đổi bitrate tới camera API (POST JSON: { "bitrate": <kbps> })
+    void sendAdaptBitrate(int bitrate);
 
 public slots:
     void handleChangeCameraBitrate(int bitrate);

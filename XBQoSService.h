@@ -23,7 +23,7 @@ public:
 private:
     void printStartupBanner();
     void setupConnections();
-    void dispatchToCameraServer(int bitrate, const VideoProfile &profile, bool enabled);
+    void dispatchToCameraServer(int bitrate);
 
     ABRFactory *m_abrFactory;
     AICompressor *m_aiCompressor;

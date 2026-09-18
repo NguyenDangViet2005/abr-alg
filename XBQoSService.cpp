@@ -43,7 +43,7 @@ void XBQoSService::setupConnections()
     m_cameraKeepAliveTimer->setInterval(3000);
     connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this]() {
         if (m_currentBitrate > 0) {
-            dispatchToCameraServer(static_cast<int>(m_currentBitrate), m_resolutionAdapter.currentProfile(), true);
+            dispatchToCameraServer(static_cast<int>(m_currentBitrate));
         }
     });
 
@@ -64,7 +64,7 @@ void XBQoSService::setupConnections()
                    .arg(profile.fps)
                    .arg(profile.scalePercent);
 
-        // 1. Cập nhật AICompressor: điều chỉnh Bitrate và Scale theo nấc phân giải
+        // 1. Cập nhật AICompressor: điều chỉnh Bitrate, Scale và FPS theo nấc phân giải
         if (m_aiCompressor) {
             m_aiCompressor->handleChangeBitrate(static_cast<int>(newBitrate));
             static int lastDispatchedScale = -1;
@@ -72,10 +72,15 @@ void XBQoSService::setupConnections()
                 lastDispatchedScale = profile.scalePercent;
                 m_aiCompressor->handleChangeScale(profile.scalePercent);
             }
+            static int lastDispatchedFps = -1;
+            if (profile.fps != lastDispatchedFps) {
+                lastDispatchedFps = profile.fps;
+                m_aiCompressor->handleChangeFps(profile.fps);
+            }
         }
 
         // 2. Call HTTP REST API tới Camera Server thực tế (POST http://host:port/api/camera/adapt-bitrate)
-        dispatchToCameraServer(static_cast<int>(newBitrate), profile, true);
+        dispatchToCameraServer(static_cast<int>(newBitrate));
 
         // Reset lại timer 3s để bắt đầu chu kỳ keepalive từ thời điểm thay đổi mới nhất
         if (m_cameraKeepAliveTimer) {
@@ -90,7 +95,7 @@ void XBQoSService::setupConnections()
             m_isVideoStreamEnabled = isEnabled;
             if (!isEnabled) {
                 qWarning().noquote() << "[C2 Priority] Video bitrate constrained to survival floor 400 kbps";
-                dispatchToCameraServer(400, m_resolutionAdapter.currentProfile(), true);
+                dispatchToCameraServer(400);
                 if (m_aiCompressor) {
                     m_aiCompressor->handleChangeBitrate(400);
                 }
@@ -115,11 +120,10 @@ void XBQoSService::setupConnections()
     }
 }
 
-void XBQoSService::dispatchToCameraServer(int bitrate, const VideoProfile &profile, bool enabled)
+void XBQoSService::dispatchToCameraServer(int bitrate)
 {
-    Q_UNUSED(enabled);
     if (m_cameraControl) {
-        m_cameraControl->sendAdaptBitrate(bitrate, profile);
+        m_cameraControl->sendAdaptBitrate(bitrate);
     }
 }
 

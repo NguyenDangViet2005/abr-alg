@@ -11,7 +11,8 @@ struct VideoProfile {
     int height;
     int fps;
     int scalePercent;
-    QString label;
+    QString name;        // Mã ngắn chuẩn: "1080p", "720p", "480p", "360p"
+    QString label;       // Chuỗi mô tả hiển thị log
 
     bool operator==(const VideoProfile &other) const {
         return width == other.width && height == other.height && fps == other.fps;
@@ -48,7 +49,7 @@ public:
     static VideoProfile profile720p();
     static VideoProfile profile480p();
     static VideoProfile profile360p();
-    static VideoProfile profileOff() { return VideoProfile{0, 0, 0, 0, "OFF (Stream Disabled)"}; }
+    static VideoProfile profileOff() { return VideoProfile{0, 0, 0, 0, "OFF", "OFF (Stream Disabled)"}; }
 
     double smoothedBitrate() const { return m_smoothedBitrate; }
 
@@ -63,9 +64,9 @@ private:
     int m_consecutiveDowngradeCount;
 
     // Các tham số điều khiển độ mượt (Tuning parameters)
-    static constexpr int UPSCALE_CONFIRMATION_CYCLES = 2;    // Cần ổn định 2 chu kỳ (~1.5s) trước khi nâng nấc
-    static constexpr int DOWNSCALE_CONFIRMATION_CYCLES = 1;  // Hạ ngay tức thì (1 chu kỳ) để chống nghẽn và cắt trễ
-    static constexpr qint64 MIN_SWITCH_COOLDOWN_MS = 1500;   // Cooldown 1.5s tránh giật lắc
+    static constexpr int UPSCALE_CONFIRMATION_CYCLES = 2;      // Ổn định 2 chu kỳ (~1.6s) trước khi nâng nấc
+    static constexpr qint64 MIN_SWITCH_COOLDOWN_MS = 2000;     // Cooldown 2.0s khi nâng nấc
+    static constexpr qint64 MIN_DOWNSCALE_COOLDOWN_MS = 3000;  // Cooldown tối thiểu 3s giữa các lần hạ phân giải (tránh sinh IDR dồn dập làm sập stream)
 };
 
 #endif // VIDEORESOLUTIONADAPTER_H
