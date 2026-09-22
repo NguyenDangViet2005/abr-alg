@@ -35,6 +35,10 @@
 #define AI_COMPRESSOR_DEFAULT_INPUT_PIPELINE  "rtsp://192.168.144.240:8554/payload"
 #define AI_COMPRESSOR_DEFAULT_OUTPUT_PIPELINE "rtsp://127.0.0.1:12345/xbstream"
 
+
+#define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
+#define VIDEO_DISABLED_BITRATE_KBPS           0
+
 // ── SRT / RF QoS Server Settings (Port 12345) ──
 #define QOS_SERVER_DEFAULT_HOST               "127.0.0.1"
 #define QOS_SERVER_DEFAULT_PORT               12345

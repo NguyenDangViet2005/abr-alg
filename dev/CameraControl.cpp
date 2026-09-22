@@ -66,7 +66,7 @@ void CameraControl::sendAdaptBitrate(int bitrate)
                                            .arg(bitrate)
                                            .arg(message.isEmpty() ? QString::fromUtf8(respData) : message);
             } else {
-                qInfo().noquote() << QString(">>> [CameraControl] \033[1;32mSUCCESS\033[0m: Camera adjusted to \033[1;33m[%1 kbps]\033[0m <<<")
+                qInfo().noquote() << QString(">>> [CameraControl] \033[1;32mSUCCESS: Camera adjusted to [%1 kbps]\033[0m <<<")
                                            .arg(bitrate);
             }
         }

@@ -30,7 +30,9 @@ private:
     NetworkHandler *m_networkHandler;
     CameraControl *m_cameraControl;
     VideoResolutionAdapter m_resolutionAdapter;
-    bool m_isVideoStreamEnabled;
+
+    int m_lastDispatchedScale;
+    int m_lastDispatchedFps;
     unsigned int m_currentBitrate;
     QTimer *m_cameraKeepAliveTimer;
 };

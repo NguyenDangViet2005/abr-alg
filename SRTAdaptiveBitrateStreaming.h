@@ -10,6 +10,13 @@
 #include "IAdaptiveBitrateStreaming.h"
 #include "SRTPeerStat.h"
 
+#ifndef VIDEO_DISABLED_BITRATE_KBPS
+#define VIDEO_DISABLED_BITRATE_KBPS 0
+#endif
+#ifndef ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF
+#define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF false
+#endif
+
 class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
     Q_OBJECT
@@ -18,24 +25,32 @@ public:
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
-    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 400; // Sàn sinh tồn khẩn cấp (360p @30fps) khi mất gói cực đoan >= 80%
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 400; 
 
     static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;
     static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 500;
     static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;
 
-    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 800;  // 800ms: Tăng bitrate đầm chắc, tránh spam encoder liên tục
-    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 400;  // 400ms: Phản ứng nhanh khi có mất gói
-    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 600;  // 600ms: Giảm tải mượt mà
-    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500; // 1.5s cooldown sau khi giảm tải để xả sạch buffer
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 800;  
+    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 400; 
+    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 600;  
+    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500;
  
-    static constexpr int CONSECUTIVE_CLEAR_REQUIRED                 = 3;    // 3 mẫu liên tiếp (~1.5s) ổn định mới bắt đầu tăng tốc
+    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 1500;
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
+    static constexpr double BW_UTILIZATION_RATIO                    = 0.90;
+
+    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 500;
+
+    static constexpr int RTT_BASELINE_WARMUP_SAMPLES                = 5;
+
+    static constexpr double RTT_BASELINE_DRIFT_PER_SEC              = 0.002;
+
     // Latency and Rounding
-    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000; // Standard negotiated SRT buffer latency (ms)
-    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;   // Làm tròn nấc mịn 10 kbps (thay vì 50 kbps)
+    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000; 
+    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;  
 
     enum class CongestionState {
         Clear = 0,
@@ -69,6 +84,8 @@ public:
     void reset(int bitrateKbps) override;
     void setMaxAbrBitrate(unsigned int newMaxAbrBitrate) override;
     void setSrtLatency(int latencyMs);
+    void setC2StrictVideoCutoff(bool strict);
+    bool isC2StrictVideoCutoff() const { return m_isStrictVideoCutoff; }
 
     unsigned int currentBitrate() const { return m_currentBitrateKbps; }
     CongestionState congestionState() const { return m_lastCongestionState; }
@@ -86,7 +103,15 @@ public slots:
     void onHeartbeatTimeout();
 
 private:
-    void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps, int rawLossTotal, qint64 rawSentTotal = 0);
+    CongestionState classifyCongestion(double lossPercent, double rtt, double rttInflation, bool useExitThresholds, bool hasLatencyDrops = false) const;
+
+    // rawDropSndTotal / rawDropRcvTotal: gói SRT BỎ HẲN (quá hạn latency), khác với loss
+    // (mất nhưng còn cứu được bằng retransmit). Phải tính vào loss% vì đây mới là phần
+    // thất bại thật; nếu bỏ qua, loss% bão hòa ~50% dù mạng mất nhiều hơn.
+    void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps,
+                       int rawLossTotal, qint64 rawSentTotal = 0,
+                       int rawDropSndTotal = 0, int rawDropRcvTotal = 0,
+                       int rawRetransTotal = 0);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
 
     void evaluateC2Quality();
@@ -109,29 +134,30 @@ private:
     C2PriorityLevel m_c2Priority;
     bool m_isVideoEnabled;
     bool m_isExplicitC2Only;
+    bool m_isStrictVideoCutoff;
     double m_c2Rtt;
     int m_c2Retransmits;
-    int m_c2Loss;
     int m_c2Unacked;
     qint64 m_lastC2PacketTime;
 
     // Sliding window sample histories
     QVector<double> m_rttHistory;
     QVector<double> m_bwHistory;
-    QVector<int> m_lossHistory;
 
     double m_rttAvg;
     double m_rttAvgDelta;
     double m_prevRtt;
     double m_rttMin;
-    double m_rttJitter;
+    // Cửa sổ warmup để seed baseline RTT từ sample thật (xem RTT_BASELINE_WARMUP_SAMPLES).
+    QVector<double> m_rttWarmupHistory;
+    bool m_rttMinSeeded;
 
-    double m_throughput;
     qint64 m_lastBitrateChangeTime;
     qint64 m_lastBitrateIncrTime;
     qint64 m_cooldownUntilMs;
-    int m_consecutiveClearCount;
     int m_consecutiveZeroLossCount;
+    qint64 m_clearSinceMs;
+    unsigned int m_lastCongestedBitrate;
 
     QTimer *m_heartbeatTimer;
     double m_latestSmoothedRtt;
@@ -146,6 +172,13 @@ private:
     bool m_hasLastLoss;
     qint64 m_lastSentTotal;
     bool m_hasLastSent;
+    // Drop counters (gói bỏ hẳn vì quá hạn latency) — cộng vào loss% cùng với loss.
+    int m_lastDropSndTotal;
+    bool m_hasLastDropSnd;
+    int m_lastDropRcvTotal;
+    bool m_hasLastDropRcv;
+    int m_lastRetransTotal;
+    bool m_hasLastRetrans;
     bool m_isBootstrapped;
     CongestionState m_lastCongestionState;
 };

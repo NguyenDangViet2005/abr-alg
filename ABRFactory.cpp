@@ -93,10 +93,6 @@ void ABRFactory::startCameraSocketAbr()
         qDebug() << "--> Start Qos srt camera connection";
         this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
         this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
-        // Lưu ý: onQosCameraConnection/onQosControllingConnection là SIGNAL của
-        // ABRFactory/XBSRTFactory — KHÔNG phải của SRTAdaptiveBitrateStreaming.
-        // Chuỗi QoS: XBSRTFactory::onQosCameraConnection → ABRFactory::onSrtCameraConnection
-        //            → SRTAdaptiveBitrateStreaming::handleQosCameraConnection (SLOT).
         this->disconnect(this, SIGNAL(onSrtCameraConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVector<SRTPeerStat>)));
         this->disconnect(this, SIGNAL(onSrtControllingConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVector<SRTPeerStat>)));
 
@@ -116,9 +112,6 @@ void ABRFactory::startCameraSocketAbr()
 
 void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
 {
-    if (_srtAdaptiveBitrateStreaming) {
-        _srtAdaptiveBitrateStreaming->handleC2ConnectionStats(peers);
-    }
     emit onC2TelemetryData(peers);
 }
 
