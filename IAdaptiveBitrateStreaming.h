@@ -21,6 +21,7 @@ signals:
     void videoStreamEnableChanged(bool isEnabled);
     void c2PriorityChanged(int priorityLevel, const QString &priorityName);
     void requestStartConnectionStats();
+    void requestKeyframe();
 };
 
 #endif // IADAPTIVEBITRATESTREAMING_H

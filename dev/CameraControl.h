@@ -2,6 +2,7 @@
 #define CAMERACONTROL_H
 
 #include <QObject>
+#include <QString>
 #include <QNetworkAccessManager>
 
 class CameraControl : public QObject
@@ -10,8 +11,13 @@ class CameraControl : public QObject
 public:
     explicit CameraControl(QObject *parent = nullptr);
 
-    // Gửi yêu cầu thay đổi bitrate tới camera API (POST JSON: { "bitrate": <kbps> })
     void sendAdaptBitrate(int bitrate);
+
+    void requestStreamRefresh(int currentBitrateKbps);
+
+signals:
+    void bitrateReported(int requestedKbps, int achievedKbps);
+    void bitrateRejected(int requestedKbps, const QString &reason);
 
 public slots:
     void handleChangeCameraBitrate(int bitrate);

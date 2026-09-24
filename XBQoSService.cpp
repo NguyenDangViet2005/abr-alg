@@ -46,7 +46,6 @@ void XBQoSService::setupConnections()
         }
     });
 
-    // Kết nối signal thay đổi bitrate từ SRT ABR sang Camera Encoder
     auto handleBitrateChange = [this](unsigned int newBitrate) {
         if (newBitrate == m_currentBitrate) {
             return;
@@ -76,7 +75,6 @@ void XBQoSService::setupConnections()
                    .arg(profile.fps)
                    .arg(profile.scalePercent);
 
-        // 1. Cập nhật AICompressor: điều chỉnh Bitrate, Scale và FPS theo nấc phân giải
         if (m_aiCompressor) {
             m_aiCompressor->handleChangeBitrate(static_cast<int>(newBitrate));
             if (wasDisabled || profile.scalePercent != m_lastDispatchedScale) {
@@ -89,16 +87,13 @@ void XBQoSService::setupConnections()
             }
         }
 
-        // 2. Call HTTP REST API tới Camera Server thực tế (POST http://host:port/api/camera/adapt-bitrate)
         dispatchToCameraServer(static_cast<int>(newBitrate));
 
-        // Reset lại timer 3s để bắt đầu chu kỳ keepalive từ thời điểm thay đổi mới nhất
         if (m_cameraKeepAliveTimer) {
             m_cameraKeepAliveTimer->start();
         }
     };
 
-    // 1. Kết nối trực tiếp từ SRT Adaptive Bitrate Streaming (tránh trùng lặp tín hiệu qua tầng trung gian)
     if (m_abrFactory && m_abrFactory->srtAbr()) {
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::bitrateChanged, this, handleBitrateChange);
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, [](bool isEnabled) {
@@ -114,14 +109,34 @@ void XBQoSService::setupConnections()
                 qWarning().noquote() << QString("[C2 Priority] %1").arg(name);
             }
         });
+        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this]() {
+            qInfo().noquote() << "[QoS Recovery] Flush stale decoder queue after congestion";
+            if (m_cameraControl) {
+                m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
+            }
+        });
     } else if (m_abrFactory) {
         connect(m_abrFactory, &ABRFactory::onCamSockBitrateChanged, this, handleBitrateChange);
     }
 
-    // Kết nối nhận dữ liệu QoS từ NetworkHandler (Lắng nghe UDP Port 12345 từ background service trên xblink)
     if (m_abrFactory) {
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+    }
+
+    if (m_cameraControl && m_abrFactory && m_abrFactory->srtAbr()) {
+        connect(m_cameraControl, &CameraControl::bitrateReported, this, [this](int requestedKbps, int achievedKbps) {
+            if (achievedKbps > 0) {
+                m_abrFactory->srtAbr()->handleCameraReportedBitrate(achievedKbps);
+            } else {
+                Q_UNUSED(requestedKbps);
+            }
+        });
+        connect(m_cameraControl, &CameraControl::bitrateRejected, this, [](int requestedKbps, const QString &reason) {
+            qWarning().noquote() << QString(">>> [QoS] ⚠️ Camera REJECTED command %1 kbps: %2 — ABR will no longer fool itself <<<")
+                                        .arg(requestedKbps)
+                                        .arg(reason);
+        });
     }
 }
 
@@ -136,21 +151,16 @@ void XBQoSService::start()
 {
     printStartupBanner();
 
-    // 1. Khởi tạo ABR Factory
     m_abrFactory = ABRFactory::instance();
     m_abrFactory->init();
     m_abrFactory->startCameraSocketAbr();
 
-    // 2. Khởi tạo Camera Compressor
     m_aiCompressor = AICompressor::instance();
 
-    // 3. Khởi tạo NetworkHandler làm UDP Server trên Port 12345
     m_networkHandler = new NetworkHandler(this);
 
-    // 4. Thiết lập kết nối Signal / Slot
     setupConnections();
 
-    // 5. Bắt đầu lắng nghe UDP datagrams từ Port 12345
     m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
     qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT;
 }

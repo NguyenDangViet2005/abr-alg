@@ -71,28 +71,21 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    // targetBitrateKbps đã được thuật toán BelaCoder phân tích và quyết định chuẩn xác
     m_smoothedBitrate = static_cast<double>(targetBitrateKbps);
 
-    // Xác định nấc độ phân giải mục tiêu chuẩn theo Bitrate:
-    // Nới rộng dải 1080p và 720p để Encoder tự điều tiết QP (Quantization Parameter),
-    // hạn chế tối đa việc đổi Resolution (vốn bắt buộc phải sinh SPS/PPS và IDR Keyframe gây rách hình dưới mạng loss)
     int targetLevel = 1;
     if (targetBitrateKbps >= 2500) {
-        targetLevel = 4; // 1080p (2500 - 6000 kbps: 1080p nén mượt ở 30fps)
+        targetLevel = 4; // 1080p (2500 - 6000 kbps: 1080p compresses smoothly at 30fps)
     } else if (targetBitrateKbps >= 1400) {
-        targetLevel = 3; // 720p (1400 - 2499 kbps, bao gồm case 1800k HeavyModerate)
+        targetLevel = 3; // 720p (1400 - 2499 kbps, includes the 1800k HeavyModerate case)
     } else if (targetBitrateKbps >= 800) {
-        targetLevel = 2; // 480p (800 - 1399 kbps, bao gồm case 1000k HeavySevere)
+        targetLevel = 2; // 480p (800 - 1399 kbps, includes the 1000k HeavySevere case)
     } else {
-        targetLevel = 1; // 360p (< 800 kbps, sàn sinh tồn 400k - 700k)
+        targetLevel = 1; // 360p (< 800 kbps, includes the 250k - 799k survival floor band)
     }
 
     int currentLevel = getProfileLevel(m_currentProfile);
 
-    // 1. HẠ ĐỘ PHÂN GIẢI (Downscale):
-    // Bảo vệ camera pipeline: Chặn việc đổi nấc liên tục trong thời gian ngắn (vốn gây sinh nhiều IDR Frame làm sập stream dưới 50-70% loss).
-    // Phải cách lần đổi nấc trước ít nhất MIN_DOWNSCALE_COOLDOWN_MS (3 giây), trừ khi là lần đầu khởi tạo.
     if (targetLevel < currentLevel) {
         bool canDownscale = (m_lastSwitchTimeMs == 0 || (now - m_lastSwitchTimeMs >= MIN_DOWNSCALE_COOLDOWN_MS));
 
@@ -101,7 +94,7 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
 
-            qInfo().noquote() << QString("[Resolution] 🟡 Hạ: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
+            qInfo().noquote() << QString("[Resolution] 🟡 Downscale: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
                        .arg(m_currentProfile.label)
                        .arg(m_currentProfile.width)
                        .arg(m_currentProfile.height)
@@ -109,16 +102,14 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
                        .arg(targetBitrateKbps);
         }
     }
-    // 2. NÂNG ĐỘ PHÂN GIẢI (Upscale):
-    // Nhảy THẲNG lên targetLevel (ví dụ 360p -> 1080p) sau khi mạng Clear và Bitrate ổn định trong 2 chu kỳ (~1.6s).
-    // Triệt tiêu hoàn toàn độ trễ nâng từng nấc và chỉ sinh ĐÚNG 1 KEYFRAME DUY NHẤT, giúp hình ảnh phục hồi 1080p tức thì!
+  
     else if (targetLevel > currentLevel) {
         if (m_lastSwitchTimeMs == 0) {
             m_currentProfile = getProfileByLevel(targetLevel);
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
 
-            qInfo().noquote() << QString("[Resolution] 🟢 Khởi động: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
+            qInfo().noquote() << QString("[Resolution] 🟢 Startup: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
                        .arg(m_currentProfile.label)
                        .arg(m_currentProfile.width)
                        .arg(m_currentProfile.height)
@@ -135,7 +126,7 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
                 m_lastSwitchTimeMs = now;
                 m_consecutiveUpgradeCount = 0;
 
-                qInfo().noquote() << QString("[Resolution] 🟢 Nâng trực tiếp: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
+                qInfo().noquote() << QString("[Resolution] 🟢 Direct upgrade: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
                            .arg(m_currentProfile.label)
                            .arg(m_currentProfile.width)
                            .arg(m_currentProfile.height)

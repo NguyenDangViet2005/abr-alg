@@ -25,7 +25,7 @@ public:
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
-    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 400; 
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 250;
 
     static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;
     static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 500;
@@ -49,8 +49,11 @@ public:
     static constexpr double RTT_BASELINE_DRIFT_PER_SEC              = 0.002;
 
     // Latency and Rounding
-    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000; 
-    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;  
+    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000;
+    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;
+    static constexpr qint64 KEYFRAME_REQUEST_COOLDOWN_MS            = 10000;
+
+    static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 3000;
 
     enum class CongestionState {
         Clear = 0,
@@ -93,6 +96,7 @@ public:
     C2PriorityLevel c2Priority() const { return m_c2Priority; }
     bool isVideoEnabled() const { return m_isVideoEnabled; }
     bool isRunning() const { return m_isRunning; }
+    bool isVideoCollapsed() const { return m_isVideoCollapsed; }
 
 public slots:
     void handleSerialStatus(bool isConnected) override;
@@ -101,13 +105,11 @@ public slots:
     void handleQosControllingConnection(const QVector<SRTPeerStat> &peers);
     void handleC2ConnectionStats(const QVector<SRTPeerStat> &peers);
     void onHeartbeatTimeout();
+    void handleCameraReportedBitrate(int achievedKbps);
 
 private:
     CongestionState classifyCongestion(double lossPercent, double rtt, double rttInflation, bool useExitThresholds, bool hasLatencyDrops = false) const;
 
-    // rawDropSndTotal / rawDropRcvTotal: gói SRT BỎ HẲN (quá hạn latency), khác với loss
-    // (mất nhưng còn cứu được bằng retransmit). Phải tính vào loss% vì đây mới là phần
-    // thất bại thật; nếu bỏ qua, loss% bão hòa ~50% dù mạng mất nhiều hơn.
     void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps,
                        int rawLossTotal, qint64 rawSentTotal = 0,
                        int rawDropSndTotal = 0, int rawDropRcvTotal = 0,
@@ -148,7 +150,6 @@ private:
     double m_rttAvgDelta;
     double m_prevRtt;
     double m_rttMin;
-    // Cửa sổ warmup để seed baseline RTT từ sample thật (xem RTT_BASELINE_WARMUP_SAMPLES).
     QVector<double> m_rttWarmupHistory;
     bool m_rttMinSeeded;
 
@@ -172,7 +173,6 @@ private:
     bool m_hasLastLoss;
     qint64 m_lastSentTotal;
     bool m_hasLastSent;
-    // Drop counters (gói bỏ hẳn vì quá hạn latency) — cộng vào loss% cùng với loss.
     int m_lastDropSndTotal;
     bool m_hasLastDropSnd;
     int m_lastDropRcvTotal;
@@ -181,6 +181,13 @@ private:
     bool m_hasLastRetrans;
     bool m_isBootstrapped;
     CongestionState m_lastCongestionState;
+    bool m_wasCongested;
+    qint64 m_lastKeyframeRequestTime;
+
+    qint64 m_lastCameraQosTime;
+    bool m_isVideoCollapsed;
+    qint64 m_lastCollapseLogTime;
+    unsigned int m_lastAchievedBitrateKbps;
 };
 
 #endif // SRTADAPTIVEBITRATESTREAMING_H
