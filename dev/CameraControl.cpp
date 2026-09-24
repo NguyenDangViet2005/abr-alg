@@ -24,9 +24,16 @@ CameraControl::CameraControl(QObject *parent)
 
 void CameraControl::sendAdaptBitrate(int bitrate)
 {
+    if (m_currentReply) {
+        m_currentReply->abort();
+        m_currentReply->deleteLater();
+        m_currentReply = nullptr;
+    }
+
     QUrl url(CAMERA_ADAPT_BITRATE_URL);
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setTransferTimeout(2000);
 
     QJsonObject payload;
     payload["bitrate"] = bitrate;
@@ -37,12 +44,19 @@ void CameraControl::sendAdaptBitrate(int bitrate)
                              .arg(QString::fromUtf8(body));
 
     QNetworkReply* reply = m_nam->post(request, body);
+    m_currentReply = reply;
     QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, url, bitrate]() {
+        if (m_currentReply == reply) {
+            m_currentReply = nullptr;
+        }
+
         if (reply->error() != QNetworkReply::NoError) {
-            qWarning().noquote() << QString("[CameraControl] adapt-bitrate FAILED (%1): %2")
-                                       .arg(url.toString())
-                                       .arg(reply->errorString());
-            emit bitrateRejected(bitrate, reply->errorString());
+            if (reply->error() != QNetworkReply::OperationCanceledError) {
+                qWarning().noquote() << QString("[CameraControl] adapt-bitrate FAILED (%1): %2")
+                                           .arg(url.toString())
+                                           .arg(reply->errorString());
+                emit bitrateRejected(bitrate, reply->errorString());
+            }
             reply->deleteLater();
             return;
         }
@@ -89,7 +103,7 @@ void CameraControl::sendAdaptBitrate(int bitrate)
 
 void CameraControl::requestStreamRefresh(int currentBitrateKbps)
 {
-    qInfo().noquote() << QString("[CameraControl] Request stream refresh (re-apply %1 kbps) to flush decoder")
+    qInfo().noquote() << QString("[CameraControl] 🚀 Request stream refresh (re-apply %1 kbps) to flush decoder")
                                  .arg(currentBitrateKbps);
     sendAdaptBitrate(currentBitrateKbps);
 }

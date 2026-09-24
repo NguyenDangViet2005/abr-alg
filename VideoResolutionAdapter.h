@@ -54,19 +54,15 @@ public:
     double smoothedBitrate() const { return m_smoothedBitrate; }
 
 private:
-    VideoProfile getRawProfile(double bitrateKbps) const;
-    VideoProfile stepTransition(const VideoProfile &current, const VideoProfile &target) const;
-
     VideoProfile m_currentProfile;
     double m_smoothedBitrate;
     qint64 m_lastSwitchTimeMs;
     int m_consecutiveUpgradeCount;
-    int m_consecutiveDowngradeCount;
 
     // Các tham số điều khiển độ mượt (Tuning parameters)
     static constexpr int UPSCALE_CONFIRMATION_CYCLES = 2;      // Ổn định 2 chu kỳ (~1.6s) trước khi nâng nấc
     static constexpr qint64 MIN_SWITCH_COOLDOWN_MS = 2000;     // Cooldown 2.0s khi nâng nấc
-    static constexpr qint64 MIN_DOWNSCALE_COOLDOWN_MS = 3000;  // Cooldown tối thiểu 3s giữa các lần hạ phân giải (tránh sinh IDR dồn dập làm sập stream)
+    static constexpr qint64 MIN_DOWNSCALE_COOLDOWN_MS = 600;   // Cooldown 600ms giữa các lần hạ phân giải (phản ứng nhanh nhưng chuyển nấc mượt)
 };
 
 #endif // VIDEORESOLUTIONADAPTER_H

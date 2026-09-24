@@ -32,8 +32,8 @@ public:
     static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;
 
     static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 800;  
-    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 400; 
-    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 600;  
+    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
+    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  
     static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500;
  
     static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 1500;
@@ -56,13 +56,10 @@ public:
     static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 3000;
 
     enum class CongestionState {
-        Clear = 0,
-        Light,
-        HeavyLight,
-        HeavyModerate,
-        HeavySevere,
-        Extreme,
-        Panic
+        Clear = 0,      // Vùng 1: Tối ưu / Bình thường (1080p @ 4500-6000 kbps)
+        Moderate,       // Vùng 2: Nghẽn trung bình (720p @ 2000-3000 kbps)
+        Severe,         // Vùng 3: Nghẽn nặng (480p @ 800-1200 kbps)
+        Panic           // Vùng 4: Nguy cấp / Sinh tồn (360p @ 250-400 kbps)
     };
 
     enum class C2Quality {
@@ -186,6 +183,7 @@ private:
 
     qint64 m_lastCameraQosTime;
     bool m_isVideoCollapsed;
+    bool m_needRecoveryRefresh;
     qint64 m_lastCollapseLogTime;
     unsigned int m_lastAchievedBitrateKbps;
 };

@@ -75,7 +75,7 @@ void NetworkHandler::parsePrefixDatagram(const QByteArray &data)
 SRTPeerStat NetworkHandler::parsePeerEntry(const QString &entry)
 {
     // Positional: addr;port;ts;pktSent;pktRecv;lossSnd;lossRcv;retrans;byteSent;byteRecv;rateSend;rateRecv;rtt;bw;dropSnd;dropRcv
-    const QStringList f = entry.split(';', Qt::SkipEmptyParts);
+    const QStringList f = entry.split(';');
     if (f.size() < 16) {
         qWarning() << "[NetworkHandler] Expected 16 fields, got" << f.size() << ":" << entry;
         return {};

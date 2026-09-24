@@ -30,6 +30,7 @@
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
 
 // ── AICompressor defaults ──
+#define AI_COMPRESSOR_ENABLED                 false
 #define AI_COMPRESSOR_DEFAULT_HOST            "127.0.0.1"
 #define AI_COMPRESSOR_DEFAULT_PORT            8001
 #define AI_COMPRESSOR_DEFAULT_INPUT_PIPELINE  "rtsp://192.168.144.240:8554/payload"

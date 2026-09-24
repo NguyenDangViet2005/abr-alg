@@ -27,18 +27,22 @@ void CellularPredictive::processCellularInfo(double RSRP, double SNIR)
             deltaTime = (currentTimestamp - _lastTimestamp) / 1000.0f;
             // Additional protection: ensure deltaTime is reasonable (0.001s to 60s)
             deltaTime = constrain_val(deltaTime, 0.001f, 60.0f);
+            _cellular.d_RSRP = static_cast<float>((RSRP - _lastRSRP) / deltaTime);
+        }
+        else
+        {
+            _cellular.d_RSRP = 0.0f;
         }
 
-        _cellular.RSRP = RSRP;
-        _cellular.d_RSRP = (RSRP - _lastRSRP) / deltaTime;
-        _cellular.SNIR = SNIR;
+        _cellular.RSRP = static_cast<float>(RSRP);
+        _cellular.SNIR = static_cast<float>(SNIR);
 
         qDebug() << "CellularPredictive::processCellularInfo - Input:";
         qDebug() << "  - RSRP:" << RSRP << "dBm";
         qDebug() << "  - d_RSRP:" << _cellular.d_RSRP << "dBm/s (dt:" << deltaTime << "s)";
         qDebug() << "  - SNIR:" << SNIR << "dB";
 
-        _lastRSRP = RSRP;
+        _lastRSRP = static_cast<float>(RSRP);
         _lastTimestamp = currentTimestamp;
 
         // Calculate fuzzy outputs

@@ -123,7 +123,7 @@ private:
     // ==== Xử lý dữ liệu ====
     void processGetCamerasResponse(const QString &response);
     void storeCameraData(const QJsonArray &cameras);
-    QJsonObject* findCameraByName(const QString &cameraName);
+    QJsonObject findCameraByName(const QString &cameraName);
     void updateCameraBitrate(const QString &cameraName, int newBitrate);
     void updateCameraScale(const QString &cameraName, int scaling);
     void updateCameraFps(const QString &cameraName, int newFps);

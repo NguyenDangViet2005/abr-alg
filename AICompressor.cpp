@@ -533,9 +533,9 @@ void AICompressor::processGetCamerasResponse(const QString &response)
             selectedCameraName = cameraNames.first();
             qDebug() << "AICompressor: auto-selected first camera:" << selectedCameraName;
 
-            QJsonObject *selectedCamera = findCameraByName(selectedCameraName);
-            if (selectedCamera) {
-                int selectedCameraId = selectedCamera->value("id").toInt();
+            QJsonObject selectedCamera = findCameraByName(selectedCameraName);
+            if (!selectedCamera.isEmpty()) {
+                int selectedCameraId = selectedCamera.value("id").toInt();
                 qDebug() << "AICompressor: selected camera ID:" << selectedCameraId;
             }
 
@@ -604,33 +604,31 @@ void AICompressor::storeCameraData(const QJsonArray &cameras)
     }
 }
 
-QJsonObject *AICompressor::findCameraByName(const QString &cameraName)
+QJsonObject AICompressor::findCameraByName(const QString &cameraName)
 {
     qDebug() << "AICompressor: searching for camera by name:" << cameraName;
-    for (auto it = cameraList.begin(); it != cameraList.end(); ++it)
+    for (const auto &it : cameraList)
     {
-        QJsonObject camera = it->toObject();
+        QJsonObject camera = it.toObject();
         if (camera.contains("name") && camera["name"].toString() == cameraName)
         {
-            static QJsonObject result;
-            result = camera;
             qDebug() << "AICompressor: camera found, id =" << camera.value("id").toInt();
-            return &result;
+            return camera;
         }
     }
     qDebug() << "AICompressor: camera not found:" << cameraName;
-    return nullptr;
+    return QJsonObject();
 }
 
 // ================== Update Camera Params ==================
 
 void AICompressor::updateCameraBitrate(const QString &cameraName, int newBitrate)
 {
-    QJsonObject *camera = findCameraByName(cameraName);
-    if (!camera)
+    QJsonObject camera = findCameraByName(cameraName);
+    if (camera.isEmpty())
         return;
 
-    int cameraId = camera->value("id").toInt();
+    int cameraId = camera.value("id").toInt();
     QString modifyCommand = createModifyCameraCommand(cameraId, newBitrate);
     updateCameraParameter(cameraName, "videoBitrate", newBitrate, modifyCommand);
     emit bitrateUpdated(cameraName, newBitrate);
@@ -638,11 +636,11 @@ void AICompressor::updateCameraBitrate(const QString &cameraName, int newBitrate
 
 void AICompressor::updateCameraScale(const QString &cameraName, int scaling)
 {
-    QJsonObject *camera = findCameraByName(cameraName);
-    if (!camera)
+    QJsonObject camera = findCameraByName(cameraName);
+    if (camera.isEmpty())
         return;
 
-    int cameraId = camera->value("id").toInt();
+    int cameraId = camera.value("id").toInt();
     QString modifyCommand = createModifyCameraScaleCommand(cameraId, scaling);
     updateCameraParameter(cameraName, "scaling", scaling, modifyCommand);
     emit scaleUpdated(cameraName, scaling);
@@ -650,11 +648,11 @@ void AICompressor::updateCameraScale(const QString &cameraName, int scaling)
 
 void AICompressor::updateCameraFps(const QString &cameraName, int newFps)
 {
-    QJsonObject *camera = findCameraByName(cameraName);
-    if (!camera)
+    QJsonObject camera = findCameraByName(cameraName);
+    if (camera.isEmpty())
         return;
 
-    int cameraId = camera->value("id").toInt();
+    int cameraId = camera.value("id").toInt();
     QString modifyCommand = createModifyCameraFpsCommand(cameraId, newFps);
     updateCameraParameter(cameraName, "FPS", newFps, modifyCommand);
     emit fpsUpdated(cameraName, newFps);
@@ -705,17 +703,17 @@ void AICompressor::updateCameraParameter(const QString &cameraName, const QStrin
     qDebug() << "AICompressor: sending modify command for camera" << cameraName << "param" << paramName << "value" << value;
     webSocket->sendTextMessage(modifyCommand);
 
-    QJsonObject *camera = findCameraByName(cameraName);
-    if (!camera) {
+    QJsonObject camera = findCameraByName(cameraName);
+    if (camera.isEmpty()) {
         qDebug() << "AICompressor: update aborted, camera not found locally:" << cameraName;
         return;
     }
 
-    int cameraId = camera->value("id").toInt();
-    QJsonObject settings = camera->value("settings").toObject();
+    int cameraId = camera.value("id").toInt();
+    QJsonObject settings = camera.value("settings").toObject();
     settings[paramName] = value;
 
-    QJsonObject updatedCamera = *camera;
+    QJsonObject updatedCamera = camera;
     updatedCamera["settings"] = settings;
 
     for (auto it = cameraList.begin(); it != cameraList.end(); ++it)

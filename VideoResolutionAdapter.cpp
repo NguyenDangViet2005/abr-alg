@@ -39,7 +39,6 @@ VideoResolutionAdapter::VideoResolutionAdapter()
     , m_smoothedBitrate(1000.0)
     , m_lastSwitchTimeMs(0)
     , m_consecutiveUpgradeCount(0)
-    , m_consecutiveDowngradeCount(0)
 {
 }
 
@@ -49,7 +48,6 @@ void VideoResolutionAdapter::reset()
     m_smoothedBitrate = 1000.0;
     m_lastSwitchTimeMs = 0;
     m_consecutiveUpgradeCount = 0;
-    m_consecutiveDowngradeCount = 0;
 }
 
 void VideoResolutionAdapter::resetToProfile(const VideoProfile &profile)
@@ -58,53 +56,86 @@ void VideoResolutionAdapter::resetToProfile(const VideoProfile &profile)
     m_smoothedBitrate = (profile.height >= 1080) ? 3500.0 : ((profile.height >= 720) ? 2000.0 : ((profile.height >= 480) ? 1000.0 : 450.0));
     m_lastSwitchTimeMs = QDateTime::currentMSecsSinceEpoch();
     m_consecutiveUpgradeCount = 0;
-    m_consecutiveDowngradeCount = 0;
+}
+
+static int determineTargetLevel(double bitrateKbps, int currentLevel) {
+    if (currentLevel == 0) { // Off -> Khởi động lại
+        if (bitrateKbps >= 2500) return 4;
+        if (bitrateKbps >= 1400) return 3;
+        if (bitrateKbps >= 800)  return 2;
+        return 1;
+    }
+
+    switch (currentLevel) {
+    case 4: // 1080p: Vùng trễ [2100, 2600]
+        if (bitrateKbps < 750)  return 1; // Sập mạng rớt thẳng 360p
+        if (bitrateKbps < 1200) return 2; // Rớt về 480p
+        if (bitrateKbps < 2100) return 3; // Hạ 720p
+        return 4; // Giữ 1080p
+    case 3: // 720p: Vùng trễ [1200, 1500]
+        if (bitrateKbps >= 2600) return 4; // Nâng 1080p
+        if (bitrateKbps < 750)  return 1; // Sập mạng
+        if (bitrateKbps < 1200) return 2; // Hạ 480p
+        return 3; // Giữ 720p
+    case 2: // 480p: Vùng trễ [650, 850]
+        if (bitrateKbps >= 2600) return 4; // Nhảy vọt 1080p
+        if (bitrateKbps >= 1500) return 3; // Nâng 720p
+        if (bitrateKbps < 650)  return 1; // Hạ 360p
+        return 2; // Giữ 480p
+    case 1: // 360p
+    default:
+        if (bitrateKbps >= 2600) return 4;
+        if (bitrateKbps >= 1500) return 3;
+        if (bitrateKbps >= 850)  return 2;
+        return 1; // Giữ 360p
+    }
 }
 
 VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbps)
 {
     if (targetBitrateKbps == 0) {
-        m_currentProfile = profile360p();
+        m_currentProfile = profileOff();
+        m_smoothedBitrate = 0.0;
         m_lastSwitchTimeMs = 0;
+        m_consecutiveUpgradeCount = 0;
         return m_currentProfile;
     }
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    m_smoothedBitrate = static_cast<double>(targetBitrateKbps);
-
-    int targetLevel = 1;
-    if (targetBitrateKbps >= 2500) {
-        targetLevel = 4; // 1080p (2500 - 6000 kbps: 1080p compresses smoothly at 30fps)
-    } else if (targetBitrateKbps >= 1400) {
-        targetLevel = 3; // 720p (1400 - 2499 kbps, includes the 1800k HeavyModerate case)
-    } else if (targetBitrateKbps >= 800) {
-        targetLevel = 2; // 480p (800 - 1399 kbps, includes the 1000k HeavySevere case)
+    // EMA smoothing: làm mịn biến động bitrate đột ngột
+    if (m_smoothedBitrate <= 0.0 || m_lastSwitchTimeMs == 0) {
+        m_smoothedBitrate = static_cast<double>(targetBitrateKbps);
     } else {
-        targetLevel = 1; // 360p (< 800 kbps, includes the 250k - 799k survival floor band)
+        // Khi bitrate giảm, dùng alpha nhạy hơn (0.65) để bám sát nhịp giảm và phản ứng kịp thời với nghẽn mạng
+        const double alpha = (static_cast<double>(targetBitrateKbps) < m_smoothedBitrate) ? 0.65 : 0.40;
+        m_smoothedBitrate = (alpha * static_cast<double>(targetBitrateKbps)) + ((1.0 - alpha) * m_smoothedBitrate);
     }
 
     int currentLevel = getProfileLevel(m_currentProfile);
+    int targetLevel = determineTargetLevel(m_smoothedBitrate, currentLevel);
 
     if (targetLevel < currentLevel) {
         bool canDownscale = (m_lastSwitchTimeMs == 0 || (now - m_lastSwitchTimeMs >= MIN_DOWNSCALE_COOLDOWN_MS));
 
         if (canDownscale) {
-            m_currentProfile = getProfileByLevel(targetLevel);
+            // Hạ từng bước một (currentLevel - 1) để bảo đảm chuyển nấc mượt mà (1080p -> 720p -> 480p -> 360p)
+            int nextDownLevel = currentLevel - 1;
+            m_currentProfile = getProfileByLevel(nextDownLevel);
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
 
-            qInfo().noquote() << QString("[Resolution] 🟡 Downscale: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
+            qInfo().noquote() << QString("[Resolution] 🟡 Downscale: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps (smoothed: %6)")
                        .arg(m_currentProfile.label)
                        .arg(m_currentProfile.width)
                        .arg(m_currentProfile.height)
                        .arg(m_currentProfile.fps)
-                       .arg(targetBitrateKbps);
+                       .arg(targetBitrateKbps)
+                       .arg(static_cast<int>(m_smoothedBitrate));
         }
     }
-  
     else if (targetLevel > currentLevel) {
-        if (m_lastSwitchTimeMs == 0) {
+        if (m_lastSwitchTimeMs == 0 || currentLevel == 0) {
             m_currentProfile = getProfileByLevel(targetLevel);
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
@@ -126,12 +157,13 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
                 m_lastSwitchTimeMs = now;
                 m_consecutiveUpgradeCount = 0;
 
-                qInfo().noquote() << QString("[Resolution] 🟢 Direct upgrade: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
+                qInfo().noquote() << QString("[Resolution] 🟢 Upgrade: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps (smoothed: %6)")
                            .arg(m_currentProfile.label)
                            .arg(m_currentProfile.width)
                            .arg(m_currentProfile.height)
                            .arg(m_currentProfile.fps)
-                           .arg(targetBitrateKbps);
+                           .arg(targetBitrateKbps)
+                           .arg(static_cast<int>(m_smoothedBitrate));
             }
         }
     }

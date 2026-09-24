@@ -5,6 +5,9 @@
 #include <QString>
 #include <QNetworkAccessManager>
 
+#include <QPointer>
+#include <QNetworkReply>
+
 class CameraControl : public QObject
 {
     Q_OBJECT
@@ -24,6 +27,7 @@ public slots:
 
 private:
     QNetworkAccessManager* m_nam;
+    QPointer<QNetworkReply> m_currentReply;
 };
 
 #endif // CAMERACONTROL_H

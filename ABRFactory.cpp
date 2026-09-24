@@ -28,8 +28,7 @@ ABRFactory *ABRFactory::instance()
 
 void ABRFactory::init()
 {
-    this->connect(this, SIGNAL(setCamSockMaxBitrate(int)), this, SLOT(handleSetMaxBitrate(int)));
-    // this->connect(this, SIGNAL(bitrateChanged(uint)), this, SLOT(handleCloudBitrateChanged(int)));
+    this->connect(this, &ABRFactory::setCamSockMaxBitrate, this, &ABRFactory::handleSetMaxBitrate);
 }
 
 void ABRFactory::processBitrateAdaptive()
@@ -92,16 +91,17 @@ void ABRFactory::startCameraSocketAbr()
     if (enableMultilink) {
         qDebug() << "--> Start Qos srt camera connection";
         this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
-        this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
-        this->disconnect(this, SIGNAL(onSrtCameraConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVector<SRTPeerStat>)));
-        this->disconnect(this, SIGNAL(onSrtControllingConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVector<SRTPeerStat>)));
+        this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::onStatus, this, &ABRFactory::onCamSrtStatus);
+        this->disconnect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
+        this->disconnect(this, &ABRFactory::onSrtControllingConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosControllingConnection);
+        this->disconnect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
 
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
-        this->connect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
+        this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::onStatus, this, &ABRFactory::onCamSrtStatus);
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, &ABRFactory::onVideoStreamEnableChanged);
         this->connect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::c2PriorityChanged, this, &ABRFactory::onC2PriorityChanged);
-        this->connect(this, SIGNAL(onSrtCameraConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVector<SRTPeerStat>)));
-        this->connect(this, SIGNAL(onSrtControllingConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVector<SRTPeerStat>)));
+        this->connect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
+        this->connect(this, &ABRFactory::onSrtControllingConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosControllingConnection);
         this->connect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
 
         _srtAdaptiveBitrateStreaming->handleSerialStatus(_havingSerial);
@@ -136,9 +136,10 @@ void ABRFactory::stopCameraSocketAbr()
 
     if (_srtAdaptiveBitrateStreaming) {
         this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::bitrateChanged, this, &ABRFactory::handleSrtBitrateChanged);
-        this->disconnect(_srtAdaptiveBitrateStreaming, SIGNAL(onStatus(int)), this, SIGNAL(onCamSrtStatus(int)));
-        this->disconnect(this, SIGNAL(onSrtCameraConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosCameraConnection(QVector<SRTPeerStat>)));
-        this->disconnect(this, SIGNAL(onSrtControllingConnection(QVector<SRTPeerStat>)), _srtAdaptiveBitrateStreaming, SLOT(handleQosControllingConnection(QVector<SRTPeerStat>)));
+        this->disconnect(_srtAdaptiveBitrateStreaming, &IAdaptiveBitrateStreaming::onStatus, this, &ABRFactory::onCamSrtStatus);
+        this->disconnect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
+        this->disconnect(this, &ABRFactory::onSrtControllingConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosControllingConnection);
+        this->disconnect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
         _srtAdaptiveBitrateStreaming->stop();
     }
 }

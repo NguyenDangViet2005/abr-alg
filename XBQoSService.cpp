@@ -110,9 +110,12 @@ void XBQoSService::setupConnections()
             }
         });
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this]() {
-            qInfo().noquote() << "[QoS Recovery] Flush stale decoder queue after congestion";
+            qInfo().noquote() << "[QoS Recovery] 🚀 Flush stale decoder queue & refresh pipeline after collapse/congestion";
             if (m_cameraControl) {
                 m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
+            }
+            if (m_aiCompressor) {
+                m_aiCompressor->refreshCamera();
             }
         });
     } else if (m_abrFactory) {
@@ -155,7 +158,17 @@ void XBQoSService::start()
     m_abrFactory->init();
     m_abrFactory->startCameraSocketAbr();
 
+#if defined(AI_COMPRESSOR_ENABLED) && AI_COMPRESSOR_ENABLED
     m_aiCompressor = AICompressor::instance();
+#ifdef XBFIRM
+    m_aiCompressor->start(Settings::generalSetting()->aiCompressorDefaultInputPipeline());
+#else
+    m_aiCompressor->start(AI_COMPRESSOR_DEFAULT_INPUT_PIPELINE);
+#endif
+#else
+    m_aiCompressor = nullptr;
+    qInfo() << "[QoS Engine] AI Compressor client disabled (standalone camera mode).";
+#endif
 
     m_networkHandler = new NetworkHandler(this);
 
@@ -169,6 +182,9 @@ void XBQoSService::stop()
 {
     if (m_cameraKeepAliveTimer) {
         m_cameraKeepAliveTimer->stop();
+    }
+    if (m_aiCompressor) {
+        m_aiCompressor->stop();
     }
     if (m_networkHandler) {
         m_networkHandler->stop();
