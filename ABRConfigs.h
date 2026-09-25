@@ -29,12 +29,6 @@
 #define ABR_DEFAULT_MAX_ABR_BITRATE           6000
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
 
-// ── AICompressor defaults ──
-#define AI_COMPRESSOR_ENABLED                 false
-#define AI_COMPRESSOR_DEFAULT_HOST            "127.0.0.1"
-#define AI_COMPRESSOR_DEFAULT_PORT            8001
-#define AI_COMPRESSOR_DEFAULT_INPUT_PIPELINE  "rtsp://192.168.144.240:8554/payload"
-#define AI_COMPRESSOR_DEFAULT_OUTPUT_PIPELINE "rtsp://127.0.0.1:12345/xbstream"
 
 
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false

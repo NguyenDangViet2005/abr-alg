@@ -5,7 +5,6 @@
 #include "VideoResolutionAdapter.h"
 
 class ABRFactory;
-class AICompressor;
 class NetworkHandler;
 class CameraControl;
 class QTimer;
@@ -26,14 +25,12 @@ private:
     void dispatchToCameraServer(int bitrate);
 
     ABRFactory *m_abrFactory;
-    AICompressor *m_aiCompressor;
     NetworkHandler *m_networkHandler;
     CameraControl *m_cameraControl;
     VideoResolutionAdapter m_resolutionAdapter;
 
-    int m_lastDispatchedScale;
-    int m_lastDispatchedFps;
     unsigned int m_currentBitrate;
+    bool m_cameraNeedsSync;
     QTimer *m_cameraKeepAliveTimer;
 };
 

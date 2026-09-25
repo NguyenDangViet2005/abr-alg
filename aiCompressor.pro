@@ -2,7 +2,7 @@
 QT += core
 QT += network
 # QT += serialport
-QT += websockets
+# QT += websockets
 QT += gui
 QT += xml
 # QT += positioning
@@ -52,7 +52,6 @@ equals(XBFIRM, true) {
 HEADERS += \
     ABRConfigs.h \
     ABRFactory.h \
-    AICompressor.h \
     CellularPredictive.h \
     IAdaptiveBitrateStreaming.h \
     SRTAdaptiveBitrateStreaming.h \
@@ -67,7 +66,6 @@ HEADERS += \
 
 SOURCES += \
     ABRFactory.cpp \
-    AICompressor.cpp \
     CellularPredictive.cpp \
     IAdaptiveBitrateStreaming.cpp \
     SRTAdaptiveBitrateStreaming.cpp \

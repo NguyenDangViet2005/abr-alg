@@ -31,18 +31,18 @@ public:
     static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 500;
     static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;
 
-    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 800;  
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 350;  
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
     static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  
-    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500;
+    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 500;
  
-    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 1500;
+    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 350;
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
     static constexpr double BW_UTILIZATION_RATIO                    = 0.90;
 
-    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 500;
+    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 1000;
 
     static constexpr int RTT_BASELINE_WARMUP_SAMPLES                = 5;
 

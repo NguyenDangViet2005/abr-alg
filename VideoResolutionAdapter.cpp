@@ -124,14 +124,6 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
             m_currentProfile = getProfileByLevel(nextDownLevel);
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
-
-            qInfo().noquote() << QString("[Resolution] 🟡 Downscale: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps (smoothed: %6)")
-                       .arg(m_currentProfile.label)
-                       .arg(m_currentProfile.width)
-                       .arg(m_currentProfile.height)
-                       .arg(m_currentProfile.fps)
-                       .arg(targetBitrateKbps)
-                       .arg(static_cast<int>(m_smoothedBitrate));
         }
     }
     else if (targetLevel > currentLevel) {
@@ -139,13 +131,6 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
             m_currentProfile = getProfileByLevel(targetLevel);
             m_lastSwitchTimeMs = now;
             m_consecutiveUpgradeCount = 0;
-
-            qInfo().noquote() << QString("[Resolution] 🟢 Startup: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps")
-                       .arg(m_currentProfile.label)
-                       .arg(m_currentProfile.width)
-                       .arg(m_currentProfile.height)
-                       .arg(m_currentProfile.fps)
-                       .arg(targetBitrateKbps);
         }
         else {
             m_consecutiveUpgradeCount++;
@@ -156,14 +141,6 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
                 m_currentProfile = getProfileByLevel(targetLevel);
                 m_lastSwitchTimeMs = now;
                 m_consecutiveUpgradeCount = 0;
-
-                qInfo().noquote() << QString("[Resolution] 🟢 Upgrade: %1 (%2x%3 @%4fps) - Bitrate: %5 kbps (smoothed: %6)")
-                           .arg(m_currentProfile.label)
-                           .arg(m_currentProfile.width)
-                           .arg(m_currentProfile.height)
-                           .arg(m_currentProfile.fps)
-                           .arg(targetBitrateKbps)
-                           .arg(static_cast<int>(m_smoothedBitrate));
             }
         }
     }

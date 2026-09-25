@@ -5,7 +5,6 @@
 #include <QDir>
 #include <QTimer>
 #include "ABRFactory.h"
-#include "AICompressor.h"
 #include "dev/NetworkHandler.h"
 #include "dev/CameraControl.h"
 #include "ABRConfigs.h"
@@ -13,12 +12,10 @@
 XBQoSService::XBQoSService(QObject *parent)
     : QObject(parent)
     , m_abrFactory(nullptr)
-    , m_aiCompressor(nullptr)
     , m_networkHandler(nullptr)
     , m_cameraControl(nullptr)
-    , m_lastDispatchedScale(-1)
-    , m_lastDispatchedFps(-1)
     , m_currentBitrate(0)
+    , m_cameraNeedsSync(false)
     , m_cameraKeepAliveTimer(nullptr)
 {
     m_cameraControl = new CameraControl(this);
@@ -47,17 +44,12 @@ void XBQoSService::setupConnections()
     });
 
     auto handleBitrateChange = [this](unsigned int newBitrate) {
-        if (newBitrate == m_currentBitrate) {
+        if (newBitrate == m_currentBitrate && !m_cameraNeedsSync) {
             return;
         }
-        const bool wasDisabled = (m_currentBitrate == VIDEO_DISABLED_BITRATE_KBPS);
         m_currentBitrate = newBitrate;
 
         if (newBitrate == VIDEO_DISABLED_BITRATE_KBPS) {
-            qInfo().noquote() << "\033[1;31m>>> [BITRATE OUTPUT] ===> [VIDEO DISABLED - 0 kbps] <===\033[0m";
-            if (m_aiCompressor) {
-                m_aiCompressor->handleChangeBitrate(VIDEO_DISABLED_BITRATE_KBPS);
-            }
             dispatchToCameraServer(VIDEO_DISABLED_BITRATE_KBPS);
             if (m_cameraKeepAliveTimer) {
                 m_cameraKeepAliveTimer->stop();
@@ -65,28 +57,9 @@ void XBQoSService::setupConnections()
             return;
         }
 
-        VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
+        m_resolutionAdapter.updateBitrate(newBitrate);
 
-        qInfo().noquote() << QString("\033[1;32m>>> [BITRATE OUTPUT] ===> [%1 kbps] <===\033[0m | Profile: \033[1;36m%2 (%3x%4 @%5fps - Scale %6%)\033[0m <<<")
-                   .arg(newBitrate)
-                   .arg(profile.label)
-                   .arg(profile.width)
-                   .arg(profile.height)
-                   .arg(profile.fps)
-                   .arg(profile.scalePercent);
-
-        if (m_aiCompressor) {
-            m_aiCompressor->handleChangeBitrate(static_cast<int>(newBitrate));
-            if (wasDisabled || profile.scalePercent != m_lastDispatchedScale) {
-                m_lastDispatchedScale = profile.scalePercent;
-                m_aiCompressor->handleChangeScale(profile.scalePercent);
-            }
-            if (wasDisabled || profile.fps != m_lastDispatchedFps) {
-                m_lastDispatchedFps = profile.fps;
-                m_aiCompressor->handleChangeFps(profile.fps);
-            }
-        }
-
+        qInfo().noquote() << QString(">>> [BITRATE OUTPUT] ===> [%1 kbps] dispatched to Camera <<<").arg(newBitrate);
         dispatchToCameraServer(static_cast<int>(newBitrate));
 
         if (m_cameraKeepAliveTimer) {
@@ -110,12 +83,8 @@ void XBQoSService::setupConnections()
             }
         });
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this]() {
-            qInfo().noquote() << "[QoS Recovery] 🚀 Flush stale decoder queue & refresh pipeline after collapse/congestion";
-            if (m_cameraControl) {
+            if (m_cameraControl && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
                 m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
-            }
-            if (m_aiCompressor) {
-                m_aiCompressor->refreshCamera();
             }
         });
     } else if (m_abrFactory) {
@@ -125,20 +94,32 @@ void XBQoSService::setupConnections()
     if (m_abrFactory) {
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+        connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
+            // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi
+            if (m_cameraNeedsSync && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+                m_cameraNeedsSync = false;
+                qInfo().noquote() << QString("[QoS Engine] Camera stream active, resyncing bitrate to %1 kbps").arg(m_currentBitrate);
+                dispatchToCameraServer(static_cast<int>(m_currentBitrate));
+            }
+        });
     }
 
     if (m_cameraControl && m_abrFactory && m_abrFactory->srtAbr()) {
         connect(m_cameraControl, &CameraControl::bitrateReported, this, [this](int requestedKbps, int achievedKbps) {
+            m_cameraNeedsSync = false;
             if (achievedKbps > 0) {
+                if (qAbs(achievedKbps - requestedKbps) > 250) {
+                    qWarning().noquote() << QString("[CameraControl] Note: Camera reported bitrate %1 kbps (differs from target %2 kbps)")
+                                                .arg(achievedKbps).arg(requestedKbps);
+                }
                 m_abrFactory->srtAbr()->handleCameraReportedBitrate(achievedKbps);
-            } else {
-                Q_UNUSED(requestedKbps);
             }
         });
-        connect(m_cameraControl, &CameraControl::bitrateRejected, this, [](int requestedKbps, const QString &reason) {
-            qWarning().noquote() << QString(">>> [QoS] ⚠️ Camera REJECTED command %1 kbps: %2 — ABR will no longer fool itself <<<")
+        connect(m_cameraControl, &CameraControl::bitrateRejected, this, [this](int requestedKbps, const QString &reason) {
+            qWarning().noquote() << QString(">>> [QoS] ⚠️ Camera REJECTED command %1 kbps: %2 — ABR will resync upon connection <<<")
                                         .arg(requestedKbps)
                                         .arg(reason);
+            m_cameraNeedsSync = true;
         });
     }
 }
@@ -158,18 +139,6 @@ void XBQoSService::start()
     m_abrFactory->init();
     m_abrFactory->startCameraSocketAbr();
 
-#if defined(AI_COMPRESSOR_ENABLED) && AI_COMPRESSOR_ENABLED
-    m_aiCompressor = AICompressor::instance();
-#ifdef XBFIRM
-    m_aiCompressor->start(Settings::generalSetting()->aiCompressorDefaultInputPipeline());
-#else
-    m_aiCompressor->start(AI_COMPRESSOR_DEFAULT_INPUT_PIPELINE);
-#endif
-#else
-    m_aiCompressor = nullptr;
-    qInfo() << "[QoS Engine] AI Compressor client disabled (standalone camera mode).";
-#endif
-
     m_networkHandler = new NetworkHandler(this);
 
     setupConnections();
@@ -182,9 +151,6 @@ void XBQoSService::stop()
 {
     if (m_cameraKeepAliveTimer) {
         m_cameraKeepAliveTimer->stop();
-    }
-    if (m_aiCompressor) {
-        m_aiCompressor->stop();
     }
     if (m_networkHandler) {
         m_networkHandler->stop();

@@ -24,7 +24,8 @@ CameraControl::CameraControl(QObject *parent)
 
 void CameraControl::sendAdaptBitrate(int bitrate)
 {
-    if (m_currentReply) {
+    if (m_currentReply && m_currentReply->isRunning()) {
+        m_currentReply->disconnect();
         m_currentReply->abort();
         m_currentReply->deleteLater();
         m_currentReply = nullptr;
@@ -39,9 +40,8 @@ void CameraControl::sendAdaptBitrate(int bitrate)
     payload["bitrate"] = bitrate;
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
-    qInfo().noquote() << QString("[CameraControl] POST %1: %2")
-                             .arg(CAMERA_ADAPT_BITRATE_URL)
-                             .arg(QString::fromUtf8(body));
+    qInfo().noquote() << QString("[CameraControl] 🚀 Sending POST %1 | Payload: %2")
+                             .arg(url.toString(), QString::fromUtf8(body));
 
     QNetworkReply* reply = m_nam->post(request, body);
     m_currentReply = reply;
@@ -50,11 +50,14 @@ void CameraControl::sendAdaptBitrate(int bitrate)
             m_currentReply = nullptr;
         }
 
+        int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
         if (reply->error() != QNetworkReply::NoError) {
             if (reply->error() != QNetworkReply::OperationCanceledError) {
-                qWarning().noquote() << QString("[CameraControl] adapt-bitrate FAILED (%1): %2")
+                qWarning().noquote() << QString("[CameraControl] ❌ adapt-bitrate FAILED (%1): %2 (HTTP %3)")
                                            .arg(url.toString())
-                                           .arg(reply->errorString());
+                                           .arg(reply->errorString())
+                                           .arg(statusCode);
                 emit bitrateRejected(bitrate, reply->errorString());
             }
             reply->deleteLater();
@@ -62,7 +65,8 @@ void CameraControl::sendAdaptBitrate(int bitrate)
         }
 
         const QByteArray respData = reply->readAll();
-        qInfo().noquote() << QString("[CameraControl] Response from camera server: %1")
+        qInfo().noquote() << QString("[CameraControl] 📥 Camera response (HTTP %1): %2")
+                                   .arg(statusCode)
                                    .arg(QString::fromUtf8(respData));
 
         QJsonDocument doc = QJsonDocument::fromJson(respData);
@@ -91,10 +95,8 @@ void CameraControl::sendAdaptBitrate(int bitrate)
                                        .arg(message.isEmpty() ? QString::fromUtf8(respData) : message);
             emit bitrateRejected(bitrate, message.isEmpty() ? QString::fromUtf8(respData) : message);
         } else {
-            qInfo().noquote() << QString(">>> [CameraControl] \033[1;32mSUCCESS: Camera adjusted to [%1 kbps]\033[0m (output: %2) <<<")
-                                       .arg(bitrate)
-                                       .arg(achievedKbps > 0 ? QString("%1 kbps").arg(achievedKbps)
-                                                             : QString("n/a"));
+            qInfo().noquote() << QString(">>> [CameraControl] \033[1;32mSUCCESS: Camera adjusted to [%1 kbps]\033[0m <<<")
+                                       .arg(bitrate);
         }
         emit bitrateReported(bitrate, achievedKbps);
         reply->deleteLater();
@@ -103,8 +105,6 @@ void CameraControl::sendAdaptBitrate(int bitrate)
 
 void CameraControl::requestStreamRefresh(int currentBitrateKbps)
 {
-    qInfo().noquote() << QString("[CameraControl] 🚀 Request stream refresh (re-apply %1 kbps) to flush decoder")
-                                 .arg(currentBitrateKbps);
     sendAdaptBitrate(currentBitrateKbps);
 }
 

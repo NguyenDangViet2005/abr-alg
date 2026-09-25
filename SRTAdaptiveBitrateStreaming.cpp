@@ -418,16 +418,9 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
         if (ratio < 0.25) {
             if (!m_isVideoCollapsed) {
                 m_isVideoCollapsed = true;
-                qWarning().noquote() << QString(">>> [QoS WATCHDOG] ⚠️ CAMERA OUTPUT COLLAPSED: "
-                                                "commanded %1 kbps but output only %2 kbps <<<")
-                                            .arg(m_currentBitrateKbps)
-                                            .arg(m_lastAchievedBitrateKbps);
             }
         } else if (m_isVideoCollapsed) {
             m_isVideoCollapsed = false;
-            qInfo().noquote() << QString(">>> [QoS WATCHDOG] ✅ Camera output recovered: %1 kbps (commanded %2 kbps) <<<")
-                                        .arg(m_lastAchievedBitrateKbps)
-                                        .arg(m_currentBitrateKbps);
         }
     }
 
@@ -449,19 +442,13 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
         videoStateLabel = "ON";
     }
 
-    QString achievedStr = (m_lastAchievedBitrateKbps > 0)
-                              ? QString("%1 kbps").arg(m_lastAchievedBitrateKbps)
-                              : QString("n/a");
-
-    qInfo().noquote() << QString("[QoS] RTT: %1ms | BW: %2 Mbps | Loss: %3 (%4%) | Cmd: %5 | Out: %6 | Video: %7 | State: %8")
+    qInfo().noquote() << QString("[QoS] RTT: %1ms | BW: %2 Mbps | Loss: %3% | Video: %4 | State: %5 --> bitrate: %6")
         .arg(m_latestSmoothedRtt, 0, 'f', 0)
         .arg(m_latestSmoothedBw, 0, 'f', 2)
-        .arg(m_latestDeltaLoss)
         .arg(m_latestSmoothedLossPercent, 0, 'f', 1)
-        .arg(videoStr)
-        .arg(achievedStr)
         .arg(videoStateLabel)
-        .arg(m_latestStatusReason);
+        .arg(m_latestStatusReason)
+        .arg(videoStr);
 }
 
 void SRTAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
@@ -510,16 +497,35 @@ SRTAdaptiveBitrateStreaming::CongestionState SRTAdaptiveBitrateStreaming::classi
     const double rttScale   = useExitThresholds ? 0.88 : 1.0;
     const double inflScale  = useExitThresholds ? 0.85 : 1.0;
 
-    // Vùng 4 (Panic - Sinh tồn chống vỡ hình): Mất gói cao (>= 18%), có packet drop do trễ, hoặc RTT tăng vọt
-    if (lossPercent >= 18.0 * f || (hasLatencyDrops && lossPercent >= 10.0 * f) || (rtt >= 260.0 * rttScale && rttInflation > 160.0 * inflScale)) {
+    const double relInflation = (m_rttMin > 0.0) ? (rttInflation / m_rttMin) : 0.0;
+
+    // Vùng 4 (Panic - Sinh tồn chống vỡ hình): 
+    // Nếu có packet drop do trễ SRT buffer (hasLatencyDrops) hoặc RTT tăng vọt nghiêm trọng:
+    // đây là dấu hiệu sập luồng thực sự cần rơi khẩn cấp.
+    // Nếu RTT rất thấp (<= 25ms) và không có latency drops, SRT ARQ vẫn cứu gói kịp thời trong buffer 2s,
+    // nâng ngưỡng lên 28% để tránh giật sập Panic bởi 1 nhịp retransmission tạm thời.
+    const bool isLowLatencyLink = (rtt <= 25.0 && rttInflation < 10.0 && !hasLatencyDrops);
+    const double panicLossThreshold = isLowLatencyLink ? (28.0 * f) : (18.0 * f);
+
+    if (lossPercent >= panicLossThreshold || 
+        (hasLatencyDrops && lossPercent >= 8.0 * f) || 
+        (rtt >= 260.0 * rttScale && rttInflation > 160.0 * inflScale) ||
+        (rttInflation >= 150.0 * inflScale) ||
+        (m_rttMin > 0.0 && rttInflation >= 20.0 * inflScale && relInflation >= 3.0 * inflScale)) {
         return CongestionState::Panic;
     }
     // Vùng 3 (Severe): Nghẽn nặng (480p SD band: 800 - 1000 kbps)
-    if (lossPercent >= 8.0 * f || (rtt >= 140.0 * rttScale && rttInflation > 60.0 * inflScale)) {
+    if (lossPercent >= 8.0 * f || 
+        (rtt >= 140.0 * rttScale && rttInflation > 60.0 * inflScale) ||
+        (rttInflation >= 60.0 * inflScale) ||
+        (m_rttMin > 0.0 && rttInflation >= 12.0 * inflScale && relInflation >= 1.8 * inflScale)) {
         return CongestionState::Severe;
     }
     // Vùng 2 (Moderate): Nghẽn trung bình (720p HD band: 2000 - 2500 kbps)
-    if (lossPercent >= 2.5 * f || (rtt >= 70.0 * rttScale && rttInflation > 30.0 * inflScale)) {
+    if (lossPercent >= 2.5 * f || 
+        (rtt >= 70.0 * rttScale && rttInflation > 30.0 * inflScale) ||
+        (rttInflation >= 30.0 * inflScale) ||
+        (m_rttMin > 0.0 && rttInflation >= 7.0 * inflScale && relInflation >= 1.0 * inflScale)) {
         return CongestionState::Moderate;
     }
     // Vùng 1 (Clear): Mạng thông suốt, ổn định (1080p Full HD band: 4500 - 6000 kbps)
@@ -537,8 +543,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     if (isStreamRecovering) {
         m_needRecoveryRefresh = false;
         m_isVideoCollapsed = false;
-        qInfo().noquote() << ">>> [QoS RECOVERY] 🚀 Stream RECOVERED after collapse! "
-                             "Purging stale QoS history & emitting immediate Keyframe request <<<";
 
         m_rttHistory.clear();
         m_bwHistory.clear();
@@ -564,13 +568,20 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_rttHistory.append(rawRtt);
         if (m_rttHistory.size() > SLIDING_WINDOW_SIZE) m_rttHistory.removeFirst();
     }
-    if (rawBandwidthMbps > 0.0) {
+    // Lọc giá trị probe ảo từ card mạng LAN (packet-pair artifacts > 150 Mbps)
+    // Trên mạng LAN/Wi-Fi hoặc test shaper, packet pair lọt qua theo wire-speed phần cứng (1GbE/2.5GbE)
+    // dẫn đến probe nhảy vọt 1500-2000 Mbps dù đường truyền thực tế chỉ có vài Mbps.
+    if (rawBandwidthMbps > 0.0 && rawBandwidthMbps <= 150.0) {
         m_bwHistory.append(rawBandwidthMbps);
         if (m_bwHistory.size() > SLIDING_WINDOW_SIZE) m_bwHistory.removeFirst();
     }
 
     double smoothedRtt = (m_rttHistory.isEmpty()) ? rawRtt : calculateMedian(m_rttHistory);
-    double smoothedBw = (m_bwHistory.isEmpty()) ? rawBandwidthMbps : calculateAverage(m_bwHistory);
+    double smoothedBw = (m_bwHistory.isEmpty()) 
+                            ? ((rawBandwidthMbps > 0.0 && rawBandwidthMbps <= 150.0) 
+                                   ? rawBandwidthMbps 
+                                   : 0.0)
+                            : calculateAverage(m_bwHistory);
 
     if (smoothedRtt < MIN_VALID_RTT_MS) {
         smoothedRtt = MIN_VALID_RTT_MS;
@@ -579,7 +590,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     double dt = (m_lastQosPacketTime > 0) ? (ctime - m_lastQosPacketTime) / 1000.0 : 0.25;
     bool isStaleSample = (dt > 2.0);
     if (isStaleSample) {
-        qWarning() << "[BelaCoder-SRT] QoS gap" << dt << "s - holding current bitrate";
         dt = 0.5;
     }
     if (dt < 0.05) dt = 0.05;
@@ -602,8 +612,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
         if (m_rttWarmupHistory.size() >= RTT_BASELINE_WARMUP_SAMPLES) {
             m_rttMinSeeded = true;
-            qInfo() << "[BelaCoder-SRT] RTT baseline seeded:" << m_rttMin << "ms (from"
-                    << m_rttWarmupHistory.size() << "samples)";
         }
     } else {
         m_rttMin *= (1.0 + RTT_BASELINE_DRIFT_PER_SEC * dt);
@@ -641,16 +649,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     const qint64 deltaDropRcv = deltaCounter(rawDropRcvTotal, m_lastDropRcvTotal, m_hasLastDropRcv, dropRcvReset);
     const qint64 deltaRetrans = deltaCounter(rawRetransTotal, m_lastRetransTotal, m_hasLastRetrans, retransReset);
 
-    if (lossReset) {
-        qWarning() << "[BelaCoder-SRT] Loss counter reset detected ("
-                   << m_lastLossTotal << "->" << rawLossTotal << "), resyncing baseline (deltaLoss=0)";
-    }
-    if (dropSndReset || dropRcvReset) {
-        qWarning() << "[BelaCoder-SRT] Drop counter reset detected (snd"
-                   << m_lastDropSndTotal << "->" << rawDropSndTotal << ", rcv"
-                   << m_lastDropRcvTotal << "->" << rawDropRcvTotal << ")";
-    }
-
     m_lastLossTotal = rawLossTotal;
     m_hasLastLoss = true;
     m_lastDropSndTotal = rawDropSndTotal;
@@ -683,13 +681,18 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
     if (deltaFailures == 0) {
         m_consecutiveZeroLossCount++;
-        if (m_consecutiveZeroLossCount >= 4) {
-            m_lossPercentAvg *= 0.60;
+        if (m_consecutiveZeroLossCount >= 3) {
+            m_lossPercentAvg = 0.0;
+        } else if (m_consecutiveZeroLossCount >= 2) {
+            m_lossPercentAvg *= 0.25;
             if (m_lossPercentAvg < 1.0) {
                 m_lossPercentAvg = 0.0;
             }
         } else {
-            m_lossPercentAvg *= 0.88;
+            m_lossPercentAvg *= 0.50;
+            if (m_lossPercentAvg < 1.0) {
+                m_lossPercentAvg = 0.0;
+            }
         }
     } else {
         m_consecutiveZeroLossCount = 0;
@@ -733,11 +736,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     if (state == CongestionState::Panic) {
         if (ctime - m_lastCollapseLogTime > 2000) {
             m_lastCollapseLogTime = ctime;
-            qWarning().noquote() << QString(">>> [STREAM COLLAPSE] ⚠️ LATENCY CEILING BROKEN (SRT Loss: %1%, Failures: %2, Drops: %3) | Stream has collapsed, forcing survival floor %4 kbps! <<<")
-                                        .arg(m_lossPercentAvg, 0, 'f', 1)
-                                        .arg(deltaFailures)
-                                        .arg(deltaDropSnd + deltaDropRcv)
-                                        .arg(MIN_ACTIVE_VIDEO_BITRATE_KBPS);
         }
     }
 
@@ -746,10 +744,34 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
 
     unsigned int bandwidthCapKbps = m_maxBitrateKbps;
-    if (smoothedBw > 0.0 && m_lossPercentAvg < 15.0) {
+
+    // 1. Áp dụng trần từ probe SRT hợp lệ (nếu đo được và <= 150 Mbps)
+    if (smoothedBw > 0.1 && smoothedBw <= 150.0) {
         double capKbps = smoothedBw * 1000.0 * BW_UTILIZATION_RATIO;
-        if (capKbps < static_cast<double>(bandwidthCapKbps)) {
+        if (capKbps >= MIN_ACTIVE_VIDEO_BITRATE_KBPS && capKbps < static_cast<double>(bandwidthCapKbps)) {
             bandwidthCapKbps = static_cast<unsigned int>(capKbps);
+        }
+    }
+
+    // 2. Tính toán trần khả dụng thực tế (Goodput Capacity) dựa trên SendRate và Loss:
+    // Khi có rớt gói (m_lossPercentAvg >= 2%), đường truyền thực tế chỉ tiếp nhận được:
+    // Goodput = SendRate * (1.0 - LossRate)
+    if (m_lossPercentAvg >= 2.0) {
+        double currentRateMbps = (rawSendRateMbps > 0.2) 
+                                     ? rawSendRateMbps 
+                                     : (static_cast<double>(m_currentBitrateKbps) / 1000.0);
+        double lossFraction = qBound(0.0, m_lossPercentAvg / 100.0, 0.95);
+        double goodputMbps = currentRateMbps * (1.0 - lossFraction);
+        // Headroom 85% để đường truyền có khoảng trống xả sạch buffer
+        double safeCapKbps = goodputMbps * 1000.0 * 0.85;
+
+        unsigned int estimatedCap = static_cast<unsigned int>(qMax(static_cast<double>(MIN_ACTIVE_VIDEO_BITRATE_KBPS), safeCapKbps));
+        bandwidthCapKbps = qMin(bandwidthCapKbps, estimatedCap);
+
+        // Cập nhật lại giá trị smoothedBw để phản ánh chính xác băng thông kênh trong log
+        if (smoothedBw > goodputMbps || smoothedBw <= 0.0) {
+            smoothedBw = goodputMbps;
+            m_latestSmoothedBw = smoothedBw;
         }
     }
 
@@ -792,13 +814,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         double remSec = (m_cooldownUntilMs - ctime) / 1000.0;
         m_latestStatusReason = QString("COOLDOWN (Con %1s)").arg(remSec, 0, 'f', 1);
     } else if (state == CongestionState::Clear) {
-        m_latestStatusReason = QString("CLEAR (Loss %1% - 1080p)").arg(m_lossPercentAvg, 0, 'f', 1);
+        m_latestStatusReason = "CLEAR (1080p)";
     } else if (state == CongestionState::Moderate) {
-        m_latestStatusReason = QString("MODERATE (Loss %1% - 720p 2.2M)").arg(m_lossPercentAvg, 0, 'f', 1);
+        m_latestStatusReason = "MODERATE (720p 2.2M)";
     } else if (state == CongestionState::Severe) {
-        m_latestStatusReason = QString("SEVERE (Loss %1% - 480p 1.0M)").arg(m_lossPercentAvg, 0, 'f', 1);
+        m_latestStatusReason = "SEVERE (480p 1.0M)";
     } else {
-        m_latestStatusReason = QString("\033[1;31mPANIC (Loss %1% - 360p 400k)\033[0m").arg(m_lossPercentAvg, 0, 'f', 1);
+        m_latestStatusReason = "\033[1;31mPANIC (360p 400k)\033[0m";
     }
 
     qint64 timeSinceLastChange = ctime - m_lastBitrateChangeTime;
@@ -835,26 +857,25 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             m_wasCongested = false;
             if (ctime - m_lastKeyframeRequestTime >= KEYFRAME_REQUEST_COOLDOWN_MS) {
                 m_lastKeyframeRequestTime = ctime;
-                qInfo().noquote() << QString("[QoS Recovery] Exited congestion (RTT %1ms/base %2ms). "
-                                             "Requesting new Keyframe to flush decoder (cooldown %3s)")
-                                          .arg(smoothedRtt, 0, 'f', 0)
-                                          .arg(m_rttMin, 0, 'f', 0)
-                                          .arg(KEYFRAME_REQUEST_COOLDOWN_MS / 1000);
                 emit requestKeyframe();
-            } else {
-                qDebug().noquote() << QString("[QoS Recovery] Keyframe request blocked by cooldown (%1s remaining)")
-                                          .arg((KEYFRAME_REQUEST_COOLDOWN_MS - (ctime - m_lastKeyframeRequestTime)) / 1000.0, 0, 'f', 1);
             }
         }
 
-        bool isBufferDrained = (rttInflation < 30.0 || smoothedRtt <= m_rttMin * 1.30 + 15.0);
+        bool isBufferDrained = (rttInflation < 20.0 || smoothedRtt <= m_rttMin * 1.30 + 15.0);
 
-        bool cooldownExpired = (ctime >= m_cooldownUntilMs);
+        // Khi mạng hoàn toàn sạch rớt gói (m_lossPercentAvg == 0) và buffer rỗng,
+        // cho phép khôi phục tức thì mà không bị kẹt bởi cooldown nghẽn cũ
+        bool cooldownExpired = (ctime >= m_cooldownUntilMs) || 
+                               (m_lossPercentAvg == 0.0 && isBufferDrained && m_consecutiveZeroLossCount >= 2);
         bool decisionIntervalExpired = (ctime - m_lastBitrateIncrTime >= BITRATE_INCR_DECISION_INTERVAL_MS);
         bool clearStableMet = (ctime - m_clearSinceMs >= CLEAR_STABLE_DURATION_MS);
 
         if (cooldownExpired && decisionIntervalExpired && clearStableMet) {
-            if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= m_lastCongestedBitrate) {
+            // Khi mạng thông suốt và băng thông dồi dào, giải phóng hoặc nới lỏng mạnh trần nghẽn cũ
+            if (smoothedBw >= 10.0 && m_lossPercentAvg == 0.0 && isBufferDrained && (ctime - m_clearSinceMs >= 1000)) {
+                // Đường truyền đã phục hồi mạnh mẽ (> 10 Mbps probe), xóa bỏ ký ức nghẽn cũ
+                m_lastCongestedBitrate = 0;
+            } else if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps + BITRATE_ROUNDING_STEP_KBPS >= m_lastCongestedBitrate) {
                 m_lastCongestedBitrate = qMin(m_lastCongestedBitrate + FAILURE_MEMORY_PROBE_STEP_KBPS,
                                               m_maxBitrateKbps);
             }
@@ -868,9 +889,20 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 unsigned int stepKbps;
                 if (!isBufferDrained) {
                     m_latestStatusReason = QString("CLEAR (Xa buffer - RTT %1ms/Base %2ms)").arg(smoothedRtt, 0, 'f', 0).arg(m_rttMin, 0, 'f', 0);
-                    stepKbps = 150;
+                    stepKbps = 200;
                 } else {
-                    stepKbps = (m_currentBitrateKbps < 2000) ? 800 : 1000;
+                    // TĂNG TỐC KHÔI PHỤC (Fast Video Recovery):
+                    // Khôi phục trải nghiệm hình ảnh sắc nét cho người dùng trong thời gian ngắn nhất
+                    if (m_currentBitrateKbps < 1500) {
+                        stepKbps = 1000; // Nhảy vọt thoát khỏi 360p lên HD 720p ngay lập tức
+                    } else if (m_currentBitrateKbps < 3000) {
+                        stepKbps = 1000; // Bước tiến mạnh lên Full HD 1080p
+                    } else if (m_currentBitrateKbps < 4500) {
+                        stepKbps = 800;  // Tăng tốc trong vùng 1080p
+                    } else {
+                        // Tiệm cận mức max: tăng 500 kbps để mượt mà
+                        stepKbps = (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= m_lastCongestedBitrate * 0.90) ? 300 : 500;
+                    }
                 }
 
                 unsigned int targetBitrate = m_currentBitrateKbps + stepKbps;
@@ -882,6 +914,9 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 m_lastBitrateChangeTime = ctime;
 
                 applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+            } else if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= effectiveMax && (ctime - m_clearSinceMs >= 1000)) {
+                // Nếu đã ổn định 1s ở mức trần cũ mà mạng vẫn hoàn toàn CLEAR (0 loss), nới trần thêm 1000 kbps
+                m_lastCongestedBitrate = qMin(m_lastCongestedBitrate + FAILURE_MEMORY_PROBE_STEP_KBPS, m_maxBitrateKbps);
             }
         }
     }
@@ -889,8 +924,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         if (m_lastCongestionState == CongestionState::Panic && state != CongestionState::Panic) {
             if (ctime - m_lastKeyframeRequestTime >= 3000) {
                 m_lastKeyframeRequestTime = ctime;
-                qInfo().noquote() << QString("[QoS Recovery] Exited Panic state to %1. Requesting new Keyframe to restore live video")
-                                          .arg(state == CongestionState::Moderate ? "Moderate (720p)" : "Severe (480p)");
                 emit requestKeyframe();
             }
         }
@@ -899,36 +932,48 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         // Tránh "Bão I-frame" khi mất gói cao: giãn cooldown lên 4s để không làm nghẽn thêm đường truyền
         if ((m_lossPercentAvg >= 18.0 || state == CongestionState::Panic) && (ctime - m_lastKeyframeRequestTime >= 4000)) {
             m_lastKeyframeRequestTime = ctime;
-            qInfo().noquote() << QString("[QoS Congestion] 🚀 High loss (%1%): requesting Keyframe to restore decoder (cooldown 4s)")
-                                        .arg(m_lossPercentAvg, 0, 'f', 1);
             emit requestKeyframe();
         }
 
         if (m_currentBitrateKbps > targetProfileBitrate) {
             m_clearSinceMs = 0;
             if (timeSinceLastChange >= requiredInterval) {
-                // Giảm bitrate theo từng nấc mượt mà (Smooth Step-down)
-                unsigned int stepDown;
-                if (state == CongestionState::Panic || m_lossPercentAvg >= 18.0) {
-                    // Tình huống khẩn cấp (Loss >= 18% hoặc Panic): hạ dứt khoát 35% mỗi nhịp 250ms để giải phóng kênh truyền, chống vỡ hình
-                    stepDown = qMax(1200u, static_cast<unsigned int>(m_currentBitrateKbps * 0.35));
-                } else if (state == CongestionState::Severe || m_lossPercentAvg >= 8.0) {
-                    // Nghẽn nặng: giảm 20% mỗi nhịp
-                    stepDown = qMax(600u, static_cast<unsigned int>(m_currentBitrateKbps * 0.20));
-                } else {
-                    // Nghẽn trung bình: giảm 15% mỗi nhịp
-                    stepDown = qMax(400u, static_cast<unsigned int>(m_currentBitrateKbps * 0.15));
+                unsigned int targetBitrate = targetProfileBitrate;
+
+                if (state == CongestionState::Panic || m_lossPercentAvg >= 20.0) {
+                    // CẮT GIẢM KHẨN CẤP (Emergency Fallback):
+                    // Khi mất gói cao hoặc Panic, lập tức hạ về mức sàn sinh tồn (targetProfileBitrate, thường là 400 hoặc 250 kbps)
+                    // trong một nhịp duy nhất. Không hạ từng nấc vì camera sẽ tiếp tục bơm dữ liệu lớn
+                    // vào đường truyền đã nghẽn, gây tràn buffer SRT, trễ video lũy kế và làm sập (crash) camera.
+                    targetBitrate = targetProfileBitrate;
+                    m_lastCongestedBitrate = qMin(m_currentBitrateKbps, bandwidthCapKbps);
+                    m_lastCongestedBitrate = (m_lastCongestedBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+                    m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+                    m_lastBitrateChangeTime = ctime;
+                    applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+                    return;
                 }
 
-                unsigned int targetBitrate = targetProfileBitrate;
+                // Giảm bitrate theo từng nấc mượt mà (Smooth Step-down) cho Moderate và Severe
+                unsigned int stepDown;
+                if (state == CongestionState::Severe || m_lossPercentAvg >= 8.0) {
+                    // Nghẽn nặng: giảm 35% mỗi nhịp để giải phóng sớm hàng đợi
+                    stepDown = qMax(1200u, static_cast<unsigned int>(m_currentBitrateKbps * 0.35));
+                } else {
+                    // Nghẽn trung bình: giảm 20% mỗi nhịp
+                    stepDown = qMax(600u, static_cast<unsigned int>(m_currentBitrateKbps * 0.20));
+                }
+
                 if (m_currentBitrateKbps > stepDown && (m_currentBitrateKbps - stepDown) > targetProfileBitrate) {
                     targetBitrate = m_currentBitrateKbps - stepDown;
                 }
 
+                targetBitrate = qMin(targetBitrate, bandwidthCapKbps);
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                 targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
                 m_lastCongestedBitrate = qMax(m_lastCongestedBitrate, m_currentBitrateKbps);
+                m_lastCongestedBitrate = (m_lastCongestedBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
 
                 m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
                 m_lastBitrateChangeTime = ctime;
@@ -944,7 +989,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 unsigned int rampLimit = qMin(targetProfileBitrate,
                                               qMax(bandwidthCapKbps, MIN_ACTIVE_VIDEO_BITRATE_KBPS));
 
-                unsigned int stepUp = 400;
+                unsigned int stepUp = 600;
                 unsigned int targetBitrate = m_currentBitrateKbps + stepUp;
                 targetBitrate = qMin(rampLimit, targetBitrate);
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
