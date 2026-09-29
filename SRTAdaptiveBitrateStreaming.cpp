@@ -871,11 +871,11 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     m_latestStatusReason = QString("CLEAR (Xa buffer - RTT %1ms/Base %2ms)").arg(smoothedRtt, 0, 'f', 0).arg(m_rttMin, 0, 'f', 0);
                     stepKbps = 200;
                 } else {
-                    if (m_currentBitrateKbps < 1500) {
-                        stepKbps = 1000; 
-                    } else if (m_currentBitrateKbps < 3000) {
-                        stepKbps = 1000; 
-                    } else if (m_currentBitrateKbps < 4500) {
+                    if (m_currentBitrateKbps < 800) {
+                        stepKbps = 300; 
+                    } else if (m_currentBitrateKbps < 2000) {
+                        stepKbps = 500; 
+                    } else if (m_currentBitrateKbps < 4000) {
                         stepKbps = 800; 
                     } else {
                         stepKbps = (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= m_lastCongestedBitrate * 0.90) ? 300 : 500;
@@ -886,11 +886,15 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 targetBitrate = qMin(targetBitrate, effectiveMax);
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                 targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
+                if (targetBitrate <= m_currentBitrateKbps && m_currentBitrateKbps < effectiveMax) {
+                    targetBitrate = qMin(m_currentBitrateKbps + BITRATE_ROUNDING_STEP_KBPS, effectiveMax);
+                }
 
-                m_lastBitrateIncrTime = ctime;
-                m_lastBitrateChangeTime = ctime;
-
-                applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+                if (targetBitrate > m_currentBitrateKbps) {
+                    m_lastBitrateIncrTime = ctime;
+                    m_lastBitrateChangeTime = ctime;
+                    applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+                }
             } else if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= effectiveMax && (ctime - m_clearSinceMs >= 1000)) {
                 m_lastCongestedBitrate = qMin(m_lastCongestedBitrate + FAILURE_MEMORY_PROBE_STEP_KBPS, m_maxBitrateKbps);
             }

@@ -34,7 +34,7 @@ public:
     static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 350;  
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
     static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  
-    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 500;
+    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500;
  
     static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 350;
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
@@ -50,7 +50,7 @@ public:
 
     // Latency and Rounding
     static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000;
-    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 10;
+    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 50;
     static constexpr qint64 KEYFRAME_REQUEST_COOLDOWN_MS            = 10000;
 
     static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 3000;
