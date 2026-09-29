@@ -6,8 +6,8 @@ ABRFactory* ABRFactory::_instance = nullptr;
 
 ABRFactory::ABRFactory(QObject *parent)
     : QObject(parent)
-    , _cameraSocketABR(nullptr)
     , _cellularPredictive(nullptr)
+    , _cameraSocketABR(nullptr)
     , _havingSerial(false)
     , _srtAdaptiveBitrateStreaming(nullptr)
     , _currentCloudCamBitrate(-1)
