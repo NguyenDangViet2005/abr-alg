@@ -951,22 +951,31 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
         else if (m_currentBitrateKbps < targetProfileBitrate) {
             m_clearSinceMs = 0;
+
+            // Never ramp up bitrate while remaining in Panic state
+            if (state == CongestionState::Panic) {
+                return;
+            }
+
             bool cooldownExpired = (ctime >= m_cooldownUntilMs);
             bool decisionIntervalExpired = (ctime - m_lastBitrateIncrTime >= BITRATE_INCR_DECISION_INTERVAL_MS);
+            bool lossSafeForRamp = (m_lossPercentAvg < 2.0) || (m_consecutiveZeroLossCount >= 2);
 
-            if (cooldownExpired && decisionIntervalExpired) {
+            if (cooldownExpired && decisionIntervalExpired && lossSafeForRamp) {
                 unsigned int rampLimit = qMin(targetProfileBitrate,
                                               qMax(bandwidthCapKbps, MIN_ACTIVE_VIDEO_BITRATE_KBPS));
 
-                unsigned int stepUp = 600;
+                unsigned int stepUp = (state == CongestionState::Severe) ? 200u : 300u;
                 unsigned int targetBitrate = m_currentBitrateKbps + stepUp;
                 targetBitrate = qMin(rampLimit, targetBitrate);
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                 targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
-                m_lastBitrateIncrTime = ctime;
-                m_lastBitrateChangeTime = ctime;
-                applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+                if (targetBitrate > m_currentBitrateKbps) {
+                    m_lastBitrateIncrTime = ctime;
+                    m_lastBitrateChangeTime = ctime;
+                    applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
+                }
             }
         }
     }
