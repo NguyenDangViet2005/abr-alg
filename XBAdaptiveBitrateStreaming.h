@@ -30,11 +30,11 @@ enum LastAction { ABR_NONE, ABR_INCREASE, ABR_DECREASE };
 
 // 🎨 UX Status for End Users - Reflects streaming quality experience
 enum StreamingQualityStatus {
-    PLAYING_AUTO = 0,        // ABR ổn định, chất lượng phù hợp với mạng, trải nghiệm xem mượt
-    OPTIMIZING = 1,          // ABR đang điều chỉnh chất lượng do mạng dao động
-    POOR_NETWORK = 2,        // Mạng yếu, ABR hạ chất lượng xuống thấp
-    BUFFERING = 3,           // Mạng quá kém, video bị đứng hình, đang chờ dữ liệu
-    LOADING = 4              // ABR recovery/re-evaluation sau gián đoạn
+    PLAYING_AUTO = 0,
+    OPTIMIZING = 1,
+    POOR_NETWORK = 2,
+    BUFFERING = 3,
+    LOADING = 4
 };
 
 class XBAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
@@ -130,7 +130,7 @@ private:
     // UX Status tracking
     StreamingQualityStatus m_currentStatus;
     StreamingQualityStatus m_previousStatus;
-    int m_consecutivePoorConditions;  // Đếm số lần liên tiếp gặp điều kiện kém
+    int m_consecutivePoorConditions;
     qint64 m_lastStatusChangeTime;
 
     // Network data monitoring

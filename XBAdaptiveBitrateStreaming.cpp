@@ -292,7 +292,6 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
     {
         qWarning() << "[ABR] Queued time <" << queuing_delay_ms << "ms";
         quint32 network_delay = tcpi.rtt - tcpi.min_rtt;
-            bool testNetworkDelay = (network_delay < increase_rtt_delay_threshold);
         if (network_delay < increase_rtt_delay_threshold)
         {
             qWarning() << "[ABR] Network delay <" << network_delay << "ms";
@@ -329,12 +328,6 @@ void XBAdaptiveBitrateStreaming::setNewBitrate(unsigned int new_bitrate_kbps)
         return;
     }
 
-    /*// Round to step and bound to valid ranges
-    unsigned int adjusted_bitrate = static_cast<unsigned int>(adjusted_bitrate_raw);
-    adjusted_bitrate = (adjusted_bitrate / BITRATE_STEP_KBPS) * BITRATE_STEP_KBPS;
-    adjusted_bitrate = qBound(MIN_BITRATE_KBPS, adjusted_bitrate, MAX_BITRATE_KBPS); */
-
-    // Testing without rounding
     unsigned int adjusted_bitrate = static_cast<unsigned int>(adjusted_bitrate_raw);
 
     qInfo() << "--- [ABR] BITRATE CHANGE  --- ";

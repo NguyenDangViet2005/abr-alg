@@ -4,6 +4,7 @@
 *.pro.user*
 *.pro.user.*
 .qtcreator/
+.qmake.stash
 build/
 Makefile*
 *.o

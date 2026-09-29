@@ -31,10 +31,7 @@ void ABRFactory::init()
     this->connect(this, &ABRFactory::setCamSockMaxBitrate, this, &ABRFactory::handleSetMaxBitrate);
 }
 
-void ABRFactory::processBitrateAdaptive()
-{
 
-}
 
 void ABRFactory::startCameraSocketAbr()
 {

@@ -59,7 +59,7 @@ void VideoResolutionAdapter::resetToProfile(const VideoProfile &profile)
 }
 
 static int determineTargetLevel(double bitrateKbps, int currentLevel) {
-    if (currentLevel == 0) { // Off -> Khởi động lại
+    if (currentLevel == 0) {
         if (bitrateKbps >= 2500) return 4;
         if (bitrateKbps >= 1400) return 3;
         if (bitrateKbps >= 800)  return 2;
@@ -67,27 +67,27 @@ static int determineTargetLevel(double bitrateKbps, int currentLevel) {
     }
 
     switch (currentLevel) {
-    case 4: // 1080p: Vùng trễ [2100, 2600]
-        if (bitrateKbps < 750)  return 1; // Sập mạng rớt thẳng 360p
-        if (bitrateKbps < 1200) return 2; // Rớt về 480p
-        if (bitrateKbps < 2100) return 3; // Hạ 720p
-        return 4; // Giữ 1080p
-    case 3: // 720p: Vùng trễ [1200, 1500]
-        if (bitrateKbps >= 2600) return 4; // Nâng 1080p
-        if (bitrateKbps < 750)  return 1; // Sập mạng
-        if (bitrateKbps < 1200) return 2; // Hạ 480p
-        return 3; // Giữ 720p
-    case 2: // 480p: Vùng trễ [650, 850]
-        if (bitrateKbps >= 2600) return 4; // Nhảy vọt 1080p
-        if (bitrateKbps >= 1500) return 3; // Nâng 720p
-        if (bitrateKbps < 650)  return 1; // Hạ 360p
-        return 2; // Giữ 480p
+    case 4: // 1080p
+        if (bitrateKbps < 750)  return 1;
+        if (bitrateKbps < 1200) return 2;
+        if (bitrateKbps < 2100) return 3;
+        return 4;
+    case 3: // 720p
+        if (bitrateKbps >= 2600) return 4;
+        if (bitrateKbps < 750)  return 1;
+        if (bitrateKbps < 1200) return 2;
+        return 3;
+    case 2: // 480p
+        if (bitrateKbps >= 2600) return 4;
+        if (bitrateKbps >= 1500) return 3;
+        if (bitrateKbps < 650)  return 1;
+        return 2;
     case 1: // 360p
     default:
         if (bitrateKbps >= 2600) return 4;
         if (bitrateKbps >= 1500) return 3;
         if (bitrateKbps >= 850)  return 2;
-        return 1; // Giữ 360p
+        return 1;
     }
 }
 
@@ -103,11 +103,9 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    // EMA smoothing: làm mịn biến động bitrate đột ngột
     if (m_smoothedBitrate <= 0.0 || m_lastSwitchTimeMs == 0) {
         m_smoothedBitrate = static_cast<double>(targetBitrateKbps);
     } else {
-        // Khi bitrate giảm, dùng alpha nhạy hơn (0.65) để bám sát nhịp giảm và phản ứng kịp thời với nghẽn mạng
         const double alpha = (static_cast<double>(targetBitrateKbps) < m_smoothedBitrate) ? 0.65 : 0.40;
         m_smoothedBitrate = (alpha * static_cast<double>(targetBitrateKbps)) + ((1.0 - alpha) * m_smoothedBitrate);
     }
@@ -119,7 +117,6 @@ VideoProfile VideoResolutionAdapter::updateBitrate(unsigned int targetBitrateKbp
         bool canDownscale = (m_lastSwitchTimeMs == 0 || (now - m_lastSwitchTimeMs >= MIN_DOWNSCALE_COOLDOWN_MS));
 
         if (canDownscale) {
-            // Hạ từng bước một (currentLevel - 1) để bảo đảm chuyển nấc mượt mà (1080p -> 720p -> 480p -> 360p)
             int nextDownLevel = currentLevel - 1;
             m_currentProfile = getProfileByLevel(nextDownLevel);
             m_lastSwitchTimeMs = now;

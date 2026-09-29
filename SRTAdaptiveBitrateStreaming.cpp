@@ -498,12 +498,6 @@ SRTAdaptiveBitrateStreaming::CongestionState SRTAdaptiveBitrateStreaming::classi
     const double inflScale  = useExitThresholds ? 0.85 : 1.0;
 
     const double relInflation = (m_rttMin > 0.0) ? (rttInflation / m_rttMin) : 0.0;
-
-    // Vùng 4 (Panic - Sinh tồn chống vỡ hình): 
-    // Nếu có packet drop do trễ SRT buffer (hasLatencyDrops) hoặc RTT tăng vọt nghiêm trọng:
-    // đây là dấu hiệu sập luồng thực sự cần rơi khẩn cấp.
-    // Nếu RTT rất thấp (<= 25ms) và không có latency drops, SRT ARQ vẫn cứu gói kịp thời trong buffer 2s,
-    // nâng ngưỡng lên 28% để tránh giật sập Panic bởi 1 nhịp retransmission tạm thời.
     const bool isLowLatencyLink = (rtt <= 25.0 && rttInflation < 10.0 && !hasLatencyDrops);
     const double panicLossThreshold = isLowLatencyLink ? (28.0 * f) : (18.0 * f);
 
@@ -514,21 +508,18 @@ SRTAdaptiveBitrateStreaming::CongestionState SRTAdaptiveBitrateStreaming::classi
         (m_rttMin > 0.0 && rttInflation >= 20.0 * inflScale && relInflation >= 3.0 * inflScale)) {
         return CongestionState::Panic;
     }
-    // Vùng 3 (Severe): Nghẽn nặng (480p SD band: 800 - 1000 kbps)
     if (lossPercent >= 8.0 * f || 
         (rtt >= 140.0 * rttScale && rttInflation > 60.0 * inflScale) ||
         (rttInflation >= 60.0 * inflScale) ||
         (m_rttMin > 0.0 && rttInflation >= 12.0 * inflScale && relInflation >= 1.8 * inflScale)) {
         return CongestionState::Severe;
     }
-    // Vùng 2 (Moderate): Nghẽn trung bình (720p HD band: 2000 - 2500 kbps)
     if (lossPercent >= 2.5 * f || 
         (rtt >= 70.0 * rttScale && rttInflation > 30.0 * inflScale) ||
         (rttInflation >= 30.0 * inflScale) ||
         (m_rttMin > 0.0 && rttInflation >= 7.0 * inflScale && relInflation >= 1.0 * inflScale)) {
         return CongestionState::Moderate;
     }
-    // Vùng 1 (Clear): Mạng thông suốt, ổn định (1080p Full HD band: 4500 - 6000 kbps)
     return CongestionState::Clear;
 }
 
@@ -568,9 +559,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_rttHistory.append(rawRtt);
         if (m_rttHistory.size() > SLIDING_WINDOW_SIZE) m_rttHistory.removeFirst();
     }
-    // Lọc giá trị probe ảo từ card mạng LAN (packet-pair artifacts > 150 Mbps)
-    // Trên mạng LAN/Wi-Fi hoặc test shaper, packet pair lọt qua theo wire-speed phần cứng (1GbE/2.5GbE)
-    // dẫn đến probe nhảy vọt 1500-2000 Mbps dù đường truyền thực tế chỉ có vài Mbps.
     if (rawBandwidthMbps > 0.0 && rawBandwidthMbps <= 150.0) {
         m_bwHistory.append(rawBandwidthMbps);
         if (m_bwHistory.size() > SLIDING_WINDOW_SIZE) m_bwHistory.removeFirst();
@@ -753,22 +741,17 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
     }
 
-    // 2. Tính toán trần khả dụng thực tế (Goodput Capacity) dựa trên SendRate và Loss:
-    // Khi có rớt gói (m_lossPercentAvg >= 2%), đường truyền thực tế chỉ tiếp nhận được:
-    // Goodput = SendRate * (1.0 - LossRate)
     if (m_lossPercentAvg >= 2.0) {
         double currentRateMbps = (rawSendRateMbps > 0.2) 
                                      ? rawSendRateMbps 
                                      : (static_cast<double>(m_currentBitrateKbps) / 1000.0);
         double lossFraction = qBound(0.0, m_lossPercentAvg / 100.0, 0.95);
         double goodputMbps = currentRateMbps * (1.0 - lossFraction);
-        // Headroom 85% để đường truyền có khoảng trống xả sạch buffer
         double safeCapKbps = goodputMbps * 1000.0 * 0.85;
 
         unsigned int estimatedCap = static_cast<unsigned int>(qMax(static_cast<double>(MIN_ACTIVE_VIDEO_BITRATE_KBPS), safeCapKbps));
         bandwidthCapKbps = qMin(bandwidthCapKbps, estimatedCap);
 
-        // Cập nhật lại giá trị smoothedBw để phản ánh chính xác băng thông kênh trong log
         if (smoothedBw > goodputMbps || smoothedBw <= 0.0) {
             smoothedBw = goodputMbps;
             m_latestSmoothedBw = smoothedBw;
@@ -863,17 +846,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
         bool isBufferDrained = (rttInflation < 20.0 || smoothedRtt <= m_rttMin * 1.30 + 15.0);
 
-        // Khi mạng hoàn toàn sạch rớt gói (m_lossPercentAvg == 0) và buffer rỗng,
-        // cho phép khôi phục tức thì mà không bị kẹt bởi cooldown nghẽn cũ
         bool cooldownExpired = (ctime >= m_cooldownUntilMs) || 
                                (m_lossPercentAvg == 0.0 && isBufferDrained && m_consecutiveZeroLossCount >= 2);
         bool decisionIntervalExpired = (ctime - m_lastBitrateIncrTime >= BITRATE_INCR_DECISION_INTERVAL_MS);
         bool clearStableMet = (ctime - m_clearSinceMs >= CLEAR_STABLE_DURATION_MS);
 
         if (cooldownExpired && decisionIntervalExpired && clearStableMet) {
-            // Khi mạng thông suốt và băng thông dồi dào, giải phóng hoặc nới lỏng mạnh trần nghẽn cũ
             if (smoothedBw >= 10.0 && m_lossPercentAvg == 0.0 && isBufferDrained && (ctime - m_clearSinceMs >= 1000)) {
-                // Đường truyền đã phục hồi mạnh mẽ (> 10 Mbps probe), xóa bỏ ký ức nghẽn cũ
                 m_lastCongestedBitrate = 0;
             } else if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps + BITRATE_ROUNDING_STEP_KBPS >= m_lastCongestedBitrate) {
                 m_lastCongestedBitrate = qMin(m_lastCongestedBitrate + FAILURE_MEMORY_PROBE_STEP_KBPS,
@@ -891,16 +870,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     m_latestStatusReason = QString("CLEAR (Xa buffer - RTT %1ms/Base %2ms)").arg(smoothedRtt, 0, 'f', 0).arg(m_rttMin, 0, 'f', 0);
                     stepKbps = 200;
                 } else {
-                    // TĂNG TỐC KHÔI PHỤC (Fast Video Recovery):
-                    // Khôi phục trải nghiệm hình ảnh sắc nét cho người dùng trong thời gian ngắn nhất
                     if (m_currentBitrateKbps < 1500) {
-                        stepKbps = 1000; // Nhảy vọt thoát khỏi 360p lên HD 720p ngay lập tức
+                        stepKbps = 1000; 
                     } else if (m_currentBitrateKbps < 3000) {
-                        stepKbps = 1000; // Bước tiến mạnh lên Full HD 1080p
+                        stepKbps = 1000; 
                     } else if (m_currentBitrateKbps < 4500) {
-                        stepKbps = 800;  // Tăng tốc trong vùng 1080p
+                        stepKbps = 800; 
                     } else {
-                        // Tiệm cận mức max: tăng 500 kbps để mượt mà
                         stepKbps = (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= m_lastCongestedBitrate * 0.90) ? 300 : 500;
                     }
                 }
@@ -915,7 +891,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
                 applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
             } else if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= effectiveMax && (ctime - m_clearSinceMs >= 1000)) {
-                // Nếu đã ổn định 1s ở mức trần cũ mà mạng vẫn hoàn toàn CLEAR (0 loss), nới trần thêm 1000 kbps
                 m_lastCongestedBitrate = qMin(m_lastCongestedBitrate + FAILURE_MEMORY_PROBE_STEP_KBPS, m_maxBitrateKbps);
             }
         }
@@ -929,7 +904,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
         m_wasCongested = true;
 
-        // Tránh "Bão I-frame" khi mất gói cao: giãn cooldown lên 4s để không làm nghẽn thêm đường truyền
         if ((m_lossPercentAvg >= 18.0 || state == CongestionState::Panic) && (ctime - m_lastKeyframeRequestTime >= 4000)) {
             m_lastKeyframeRequestTime = ctime;
             emit requestKeyframe();
@@ -941,10 +915,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 unsigned int targetBitrate = targetProfileBitrate;
 
                 if (state == CongestionState::Panic || m_lossPercentAvg >= 20.0) {
-                    // CẮT GIẢM KHẨN CẤP (Emergency Fallback):
-                    // Khi mất gói cao hoặc Panic, lập tức hạ về mức sàn sinh tồn (targetProfileBitrate, thường là 400 hoặc 250 kbps)
-                    // trong một nhịp duy nhất. Không hạ từng nấc vì camera sẽ tiếp tục bơm dữ liệu lớn
-                    // vào đường truyền đã nghẽn, gây tràn buffer SRT, trễ video lũy kế và làm sập (crash) camera.
                     targetBitrate = targetProfileBitrate;
                     m_lastCongestedBitrate = qMin(m_currentBitrateKbps, bandwidthCapKbps);
                     m_lastCongestedBitrate = (m_lastCongestedBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -954,13 +924,10 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     return;
                 }
 
-                // Giảm bitrate theo từng nấc mượt mà (Smooth Step-down) cho Moderate và Severe
                 unsigned int stepDown;
                 if (state == CongestionState::Severe || m_lossPercentAvg >= 8.0) {
-                    // Nghẽn nặng: giảm 35% mỗi nhịp để giải phóng sớm hàng đợi
                     stepDown = qMax(1200u, static_cast<unsigned int>(m_currentBitrateKbps * 0.35));
                 } else {
-                    // Nghẽn trung bình: giảm 20% mỗi nhịp
                     stepDown = qMax(600u, static_cast<unsigned int>(m_currentBitrateKbps * 0.20));
                 }
 

@@ -56,10 +56,10 @@ public:
     static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 3000;
 
     enum class CongestionState {
-        Clear = 0,      // Vùng 1: Tối ưu / Bình thường (1080p @ 4500-6000 kbps)
-        Moderate,       // Vùng 2: Nghẽn trung bình (720p @ 2000-3000 kbps)
-        Severe,         // Vùng 3: Nghẽn nặng (480p @ 800-1200 kbps)
-        Panic           // Vùng 4: Nguy cấp / Sinh tồn (360p @ 250-400 kbps)
+        Clear = 0,     
+        Moderate,     
+        Severe,         
+        Panic           
     };
 
     enum class C2Quality {
