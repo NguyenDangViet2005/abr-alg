@@ -848,8 +848,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
         bool isBufferDrained = (rttInflation < 20.0 || smoothedRtt <= m_rttMin * 1.30 + 15.0);
 
-        bool cooldownExpired = (ctime >= m_cooldownUntilMs) || 
-                               (m_lossPercentAvg == 0.0 && isBufferDrained && m_consecutiveZeroLossCount >= 2);
+        bool cooldownExpired = (ctime >= m_cooldownUntilMs);
         bool decisionIntervalExpired = (ctime - m_lastBitrateIncrTime >= BITRATE_INCR_DECISION_INTERVAL_MS);
         bool clearStableMet = (ctime - m_clearSinceMs >= CLEAR_STABLE_DURATION_MS);
 
@@ -917,7 +916,10 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 unsigned int targetBitrate = targetProfileBitrate;
 
                 if (state == CongestionState::Panic || m_lossPercentAvg >= 20.0) {
-                    targetBitrate = targetProfileBitrate;
+                    targetBitrate = qMin(targetProfileBitrate, bandwidthCapKbps);
+                    targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+                    targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
+
                     m_lastCongestedBitrate = qMin(m_currentBitrateKbps, bandwidthCapKbps);
                     m_lastCongestedBitrate = (m_lastCongestedBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                     m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
