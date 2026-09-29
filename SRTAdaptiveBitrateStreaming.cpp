@@ -8,7 +8,7 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     : IAdaptiveBitrateStreaming(parent)
     , m_isRunning(false)
     , m_isConnected(false)
-    , m_currentBitrateKbps(DEFAULT_INITIAL_BITRATE_KBPS)
+    , m_currentBitrateKbps(0)
     , m_minBitrateKbps(DEFAULT_MIN_BITRATE_KBPS)
     , m_maxBitrateKbps(DEFAULT_MAX_BITRATE_KBPS)
     , m_srtLatencyMs(DEFAULT_SRT_LATENCY_MS)
@@ -71,6 +71,7 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
 void SRTAdaptiveBitrateStreaming::start()
 {
     m_isRunning = true;
+    m_currentBitrateKbps = 0;
     m_rttHistory.clear();
     m_bwHistory.clear();
     m_rttWarmupHistory.clear();
@@ -505,19 +506,19 @@ SRTAdaptiveBitrateStreaming::CongestionState SRTAdaptiveBitrateStreaming::classi
         (hasLatencyDrops && lossPercent >= 8.0 * f) || 
         (rtt >= 260.0 * rttScale && rttInflation > 160.0 * inflScale) ||
         (rttInflation >= 150.0 * inflScale) ||
-        (m_rttMin > 0.0 && rttInflation >= 20.0 * inflScale && relInflation >= 3.0 * inflScale)) {
+        (rtt >= 200.0 * rttScale && rttInflation >= 100.0 * inflScale && relInflation >= 3.0 * inflScale)) {
         return CongestionState::Panic;
     }
     if (lossPercent >= 8.0 * f || 
         (rtt >= 140.0 * rttScale && rttInflation > 60.0 * inflScale) ||
-        (rttInflation >= 60.0 * inflScale) ||
-        (m_rttMin > 0.0 && rttInflation >= 12.0 * inflScale && relInflation >= 1.8 * inflScale)) {
+        (rttInflation >= 90.0 * inflScale) ||
+        (rtt >= 120.0 * rttScale && rttInflation >= 50.0 * inflScale && relInflation >= 2.0 * inflScale)) {
         return CongestionState::Severe;
     }
     if (lossPercent >= 2.5 * f || 
         (rtt >= 70.0 * rttScale && rttInflation > 30.0 * inflScale) ||
         (rttInflation >= 30.0 * inflScale) ||
-        (m_rttMin > 0.0 && rttInflation >= 7.0 * inflScale && relInflation >= 1.0 * inflScale)) {
+        (m_rttMin > 0.0 && rttInflation >= 20.0 * inflScale && relInflation >= 1.5 * inflScale)) {
         return CongestionState::Moderate;
     }
     return CongestionState::Clear;
@@ -787,6 +788,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_isBootstrapped = true;
         m_lastBitrateChangeTime = ctime;
         m_lastBitrateIncrTime = ctime;
+        m_currentBitrateKbps = 0;
 
         applyNewBitrate(calculatedInitialBitrate, smoothedRtt, smoothedBw, deltaLoss);
         return;
