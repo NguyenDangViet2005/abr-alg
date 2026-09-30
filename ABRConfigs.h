@@ -1,14 +1,7 @@
 #ifndef ABRCONFIGS_H
 #define ABRCONFIGS_H
 
-// Standalone configs used when XBFIRM == false (no dependency on xbfirm/settings).
-// Migrated from GeneralConfigs.h + defaults from GeneralSetting.cpp.
-
-// ── GeneralConfigs subset ──
-#define SERVER_UDP_WEBAPP 3010
-#define ID_MODEM_DATA_ABR_CPA "49"
-
-// ── SRT QoS UDP listener (app mode, XBFIRM == false) ──
+// ── SRT QoS UDP listener ──
 // UDP port for receiving QoS connection stats from an external XBSRTFactory.
 #define SRT_ABR_QOS_UDP_PORT 12345
 
@@ -17,26 +10,10 @@
 #define CAMERA_ADAPT_BITRATE_PORT 4002
 #define CAMERA_ADAPT_BITRATE_PATH "/api/camera/adapt-bitrate"
 
-// ── ABR defaults (fallback when GeneralSetting/Settings is unavailable) ──
-// Sourced from GeneralSetting.cpp _setting->value(..., default).
-#define ABR_DEFAULT_JITTER_STABLE_THRESHOLD   15.0f
-#define ABR_DEFAULT_STABLE_THRESHOLD          50.0f
-#define ABR_DEFAULT_STABLE_AFTER_DECREASE     20.0f
-#define ABR_DEFAULT_QUEUE_DELAY_LOW_AFTER_DECREASE 20.0f
-#define ABR_DEFAULT_TELEMETRY_STABLE_TIMEOUT  3000.0f
-#define ABR_DEFAULT_TELEMETRY_KICK_BITRATE    500u
-#define ABR_DEFAULT_BITRATE_INCREASE_COOLDOWN 2000LL
+// ── ABR defaults ──
 #define ABR_DEFAULT_MAX_ABR_BITRATE           6000
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
-
-
-
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
 #define VIDEO_DISABLED_BITRATE_KBPS           0
-
-// ── SRT / RF QoS Server Settings (Port 12345) ──
-#define QOS_SERVER_DEFAULT_HOST               "127.0.0.1"
-#define QOS_SERVER_DEFAULT_PORT               12345
-#define QOS_SERVER_POLL_INTERVAL_MS           250
 
 #endif // ABRCONFIGS_H

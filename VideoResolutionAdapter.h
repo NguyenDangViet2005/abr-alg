@@ -12,13 +12,6 @@ struct VideoProfile {
     int scalePercent;
     QString name;
     QString label;
-
-    bool operator==(const VideoProfile &other) const {
-        return width == other.width && height == other.height && fps == other.fps;
-    }
-    bool operator!=(const VideoProfile &other) const {
-        return !(*this == other);
-    }
 };
 
 class VideoResolutionAdapter {
@@ -27,18 +20,11 @@ public:
 
     VideoProfile updateBitrate(unsigned int targetBitrateKbps);
 
-    VideoProfile currentProfile() const { return m_currentProfile; }
-
-    void reset();
-    void resetToProfile(const VideoProfile &profile);
-
     static VideoProfile profile1080p();
     static VideoProfile profile720p();
     static VideoProfile profile480p();
     static VideoProfile profile360p();
     static VideoProfile profileOff() { return VideoProfile{0, 0, 0, 0, "OFF", "OFF (Stream Disabled)"}; }
-
-    double smoothedBitrate() const { return m_smoothedBitrate; }
 
 private:
     VideoProfile m_currentProfile;

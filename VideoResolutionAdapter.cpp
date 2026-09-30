@@ -42,21 +42,7 @@ VideoResolutionAdapter::VideoResolutionAdapter()
 {
 }
 
-void VideoResolutionAdapter::reset()
-{
-    m_currentProfile = profile360p();
-    m_smoothedBitrate = 1000.0;
-    m_lastSwitchTimeMs = 0;
-    m_consecutiveUpgradeCount = 0;
-}
 
-void VideoResolutionAdapter::resetToProfile(const VideoProfile &profile)
-{
-    m_currentProfile = profile;
-    m_smoothedBitrate = (profile.height >= 1080) ? 3500.0 : ((profile.height >= 720) ? 2000.0 : ((profile.height >= 480) ? 1000.0 : 450.0));
-    m_lastSwitchTimeMs = QDateTime::currentMSecsSinceEpoch();
-    m_consecutiveUpgradeCount = 0;
-}
 
 static int determineTargetLevel(double bitrateKbps, int currentLevel) {
     if (currentLevel == 0) {

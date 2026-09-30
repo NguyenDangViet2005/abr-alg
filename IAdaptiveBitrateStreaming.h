@@ -12,16 +12,15 @@ public:
     virtual void start() = 0;
     virtual void stop() = 0;
     virtual void reset(int bitrateKbps) = 0;
-public slots:
-    virtual void handleSerialStatus(bool isConnected) = 0;
-    virtual void handleSetMaxAbrBitrate(int maxBitrate) = 0;
+    virtual bool isTrafficActive() const { return true; }
+
 signals:
     void bitrateChanged(unsigned int new_bitrate_kbps);
-    void onStatus(int status);  // Emits StreamingQualityStatus for UX
+    void onStatus(int status);
     void videoStreamEnableChanged(bool isEnabled);
     void c2PriorityChanged(int priorityLevel, const QString &priorityName);
-    void requestStartConnectionStats();
     void requestKeyframe();
+    void trafficActiveChanged(bool isActive);
 };
 
 #endif // IADAPTIVEBITRATESTREAMING_H

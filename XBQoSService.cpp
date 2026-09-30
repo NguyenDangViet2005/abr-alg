@@ -38,7 +38,10 @@ void XBQoSService::setupConnections()
     m_cameraKeepAliveTimer = new QTimer(this);
     m_cameraKeepAliveTimer->setInterval(3000);
     connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this]() {
-        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+        const bool isTrafficActive = (m_abrFactory && m_abrFactory->srtAbr())
+                                         ? m_abrFactory->srtAbr()->isTrafficActive()
+                                         : true;
+        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && isTrafficActive) {
             dispatchToCameraServer(static_cast<int>(m_currentBitrate));
         }
     });
@@ -58,8 +61,7 @@ void XBQoSService::setupConnections()
         }
 
         VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
-
-        qInfo().noquote() << QString(">>> [BITRATE OUTPUT] ===> [%1 kbps] (%2) dispatched to Camera <<<").arg(newBitrate).arg(profile.name);
+        Q_UNUSED(profile);
         dispatchToCameraServer(static_cast<int>(newBitrate));
 
         if (m_cameraKeepAliveTimer) {
@@ -69,6 +71,16 @@ void XBQoSService::setupConnections()
 
     if (m_abrFactory && m_abrFactory->srtAbr()) {
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::bitrateChanged, this, handleBitrateChange);
+        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::trafficActiveChanged, this, [this](bool isActive) {
+            if (isActive) {
+                if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+                    qInfo().noquote() << QString("[QoS Engine] Video traffic resumed! Resyncing camera to %1 kbps").arg(m_currentBitrate);
+                    dispatchToCameraServer(static_cast<int>(m_currentBitrate));
+                }
+            } else {
+                qInfo().noquote() << "[QoS Engine] Video traffic idle / Camera off, pausing keep-alive updates.";
+            }
+        });
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::videoStreamEnableChanged, this, [](bool isEnabled) {
             if (!isEnabled) {
                 qWarning().noquote() << "[C2 Priority] STRICT_CUTOFF: video disabled";
@@ -87,8 +99,6 @@ void XBQoSService::setupConnections()
                 m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
             }
         });
-    } else if (m_abrFactory) {
-        connect(m_abrFactory, &ABRFactory::onCamSockBitrateChanged, this, handleBitrateChange);
     }
 
     if (m_abrFactory) {
@@ -154,5 +164,8 @@ void XBQoSService::stop()
     }
     if (m_networkHandler) {
         m_networkHandler->stop();
+    }
+    if (m_abrFactory) {
+        m_abrFactory->stopCameraSocketAbr();
     }
 }

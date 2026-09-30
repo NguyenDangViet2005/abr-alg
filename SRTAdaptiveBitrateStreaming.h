@@ -9,13 +9,7 @@
 #include <QtMath>
 #include "IAdaptiveBitrateStreaming.h"
 #include "SRTPeerStat.h"
-
-#ifndef VIDEO_DISABLED_BITRATE_KBPS
-#define VIDEO_DISABLED_BITRATE_KBPS 0
-#endif
-#ifndef ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF
-#define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF false
-#endif
+#include "ABRConfigs.h"
 
 class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
@@ -27,33 +21,32 @@ public:
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
     static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 250;
 
-    static constexpr unsigned int BITRATE_INCR_MIN_KBPS             = 50;
-    static constexpr unsigned int BITRATE_INCR_MAX_STEP_KBPS        = 500;
-    static constexpr unsigned int BITRATE_DECR_MIN_KBPS             = 100;
-
-    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 350;  
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 500;  
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
     static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  
     static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500;
  
-    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 350;
+    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 500;
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
     static constexpr double BW_UTILIZATION_RATIO                    = 0.90;
 
-    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 1000;
+    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 100;
+    static constexpr qint64 FAILURE_MEMORY_PROBE_INTERVAL_MS        = 10000;
+    static constexpr qint64 FAILURE_MEMORY_RETENTION_MS             = 30000;
 
     static constexpr int RTT_BASELINE_WARMUP_SAMPLES                = 5;
 
     static constexpr double RTT_BASELINE_DRIFT_PER_SEC              = 0.002;
 
-    // Latency and Rounding
-    static constexpr int DEFAULT_SRT_LATENCY_MS                     = 2000;
     static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 50;
     static constexpr qint64 KEYFRAME_REQUEST_COOLDOWN_MS            = 10000;
+    static constexpr qint64 KEYFRAME_IMMUNITY_DURATION_MS           = 800;
+    static constexpr qint64 MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE      = 20;
 
     static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 3000;
+    static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS                 = 2500;
 
     enum class CongestionState {
         Clear = 0,     
@@ -83,29 +76,16 @@ public:
     void stop() override;
     void reset(int bitrateKbps) override;
     void setMaxAbrBitrate(unsigned int newMaxAbrBitrate) override;
-    void setSrtLatency(int latencyMs);
-    void setC2StrictVideoCutoff(bool strict);
-    bool isC2StrictVideoCutoff() const { return m_isStrictVideoCutoff; }
-
-    unsigned int currentBitrate() const { return m_currentBitrateKbps; }
-    CongestionState congestionState() const { return m_lastCongestionState; }
-    C2Quality c2Quality() const { return m_c2Quality; }
-    C2PriorityLevel c2Priority() const { return m_c2Priority; }
-    bool isVideoEnabled() const { return m_isVideoEnabled; }
-    bool isRunning() const { return m_isRunning; }
-    bool isVideoCollapsed() const { return m_isVideoCollapsed; }
+    bool isTrafficActive() const override { return !m_isTrafficIdle; }
 
 public slots:
-    void handleSerialStatus(bool isConnected) override;
-    void handleSetMaxAbrBitrate(int maxBitrate) override;
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);
-    void handleQosControllingConnection(const QVector<SRTPeerStat> &peers);
     void handleC2ConnectionStats(const QVector<SRTPeerStat> &peers);
     void onHeartbeatTimeout();
     void handleCameraReportedBitrate(int achievedKbps);
 
 private:
-    CongestionState classifyCongestion(double lossPercent, double rtt, double rttInflation, bool useExitThresholds, bool hasLatencyDrops = false) const;
+    CongestionState classifyCongestion(double lossPercent, double rtt, double rttInflation, bool useExitThresholds, bool hasLatencyDrops = false, bool isKeyframeBurst = false) const;
 
     void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps,
                        int rawLossTotal, qint64 rawSentTotal = 0,
@@ -114,19 +94,16 @@ private:
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
 
     void evaluateC2Quality();
-    QString c2QualityToString(C2Quality q) const;
     QString c2PriorityToString(C2PriorityLevel p) const;
 
     double calculateMedian(QVector<double> list);
     double calculateAverage(const QVector<double> &list);
 
     bool m_isRunning;
-    bool m_isConnected;
 
     unsigned int m_currentBitrateKbps;
     unsigned int m_minBitrateKbps;
     unsigned int m_maxBitrateKbps;
-    int m_srtLatencyMs;
 
     // C2 Telemetry & Priority State
     C2Quality m_c2Quality;
@@ -156,6 +133,7 @@ private:
     int m_consecutiveZeroLossCount;
     qint64 m_clearSinceMs;
     unsigned int m_lastCongestedBitrate;
+    qint64 m_lastProbeTime;
 
     QTimer *m_heartbeatTimer;
     double m_latestSmoothedRtt;
@@ -182,6 +160,8 @@ private:
     qint64 m_lastKeyframeRequestTime;
 
     qint64 m_lastCameraQosTime;
+    qint64 m_lastActiveTrafficTime;
+    bool m_isTrafficIdle;
     bool m_isVideoCollapsed;
     bool m_needRecoveryRefresh;
     qint64 m_lastCollapseLogTime;
