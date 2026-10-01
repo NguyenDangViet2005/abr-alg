@@ -36,7 +36,7 @@ void XBQoSService::printStartupBanner()
 void XBQoSService::setupConnections()
 {
     m_cameraKeepAliveTimer = new QTimer(this);
-    m_cameraKeepAliveTimer->setInterval(3000);
+    m_cameraKeepAliveTimer->setInterval(5000);
     connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this]() {
         const bool isTrafficActive = (m_abrFactory && m_abrFactory->srtAbr())
                                          ? m_abrFactory->srtAbr()->isTrafficActive()
@@ -61,7 +61,8 @@ void XBQoSService::setupConnections()
         }
 
         VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
-        Q_UNUSED(profile);
+        qInfo().noquote() << QString(">>> [BITRATE OUTPUT] ===> [%1 kbps] (%2) dispatched to Camera <<<")
+                                 .arg(newBitrate).arg(profile.name);
         dispatchToCameraServer(static_cast<int>(newBitrate));
 
         if (m_cameraKeepAliveTimer) {

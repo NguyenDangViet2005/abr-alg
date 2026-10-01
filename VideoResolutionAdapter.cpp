@@ -17,20 +17,26 @@ VideoProfile VideoResolutionAdapter::profile360p() {
     return VideoProfile{640, 360, 20, 33, "360p", "360p (Low Survival)"};
 }
 
+VideoProfile VideoResolutionAdapter::profile240p() {
+    return VideoProfile{426, 240, 10, 22, "240p", "240p (Survival Mode)"};
+}
+
 static int getProfileLevel(const VideoProfile &p) {
-    if (p.height >= 1080) return 4;
-    if (p.height >= 720)  return 3;
-    if (p.height >= 480)  return 2;
-    if (p.height >= 360)  return 1;
+    if (p.height >= 1080) return 5;
+    if (p.height >= 720)  return 4;
+    if (p.height >= 480)  return 3;
+    if (p.height >= 360)  return 2;
+    if (p.height >= 240)  return 1;
     return 0; // OFF (Stream Disabled)
 }
 
 static VideoProfile getProfileByLevel(int level) {
     switch (level) {
-    case 4: return VideoResolutionAdapter::profile1080p();
-    case 3: return VideoResolutionAdapter::profile720p();
-    case 2: return VideoResolutionAdapter::profile480p();
-    default: return VideoResolutionAdapter::profile360p();
+    case 5: return VideoResolutionAdapter::profile1080p();
+    case 4: return VideoResolutionAdapter::profile720p();
+    case 3: return VideoResolutionAdapter::profile480p();
+    case 2: return VideoResolutionAdapter::profile360p();
+    default: return VideoResolutionAdapter::profile240p();
     }
 }
 
@@ -46,33 +52,44 @@ VideoResolutionAdapter::VideoResolutionAdapter()
 
 static int determineTargetLevel(double bitrateKbps, int currentLevel) {
     if (currentLevel == 0) {
-        if (bitrateKbps >= 2500) return 4;
-        if (bitrateKbps >= 1400) return 3;
-        if (bitrateKbps >= 800)  return 2;
+        if (bitrateKbps >= 2500) return 5;
+        if (bitrateKbps >= 1400) return 4;
+        if (bitrateKbps >= 800)  return 3;
+        if (bitrateKbps >= 250)  return 2;
         return 1;
     }
 
     switch (currentLevel) {
-    case 4: // 1080p
-        if (bitrateKbps < 750)  return 1;
-        if (bitrateKbps < 1200) return 2;
-        if (bitrateKbps < 2100) return 3;
+    case 5: // 1080p
+        if (bitrateKbps < 200)  return 1;
+        if (bitrateKbps < 750)  return 2;
+        if (bitrateKbps < 1200) return 3;
+        if (bitrateKbps < 2100) return 4;
+        return 5;
+    case 4: // 720p
+        if (bitrateKbps >= 2600) return 5;
+        if (bitrateKbps < 200)  return 1;
+        if (bitrateKbps < 750)  return 2;
+        if (bitrateKbps < 1200) return 3;
         return 4;
-    case 3: // 720p
-        if (bitrateKbps >= 2600) return 4;
-        if (bitrateKbps < 750)  return 1;
-        if (bitrateKbps < 1200) return 2;
+    case 3: // 480p
+        if (bitrateKbps >= 2600) return 5;
+        if (bitrateKbps >= 1500) return 4;
+        if (bitrateKbps < 200)  return 1;
+        if (bitrateKbps < 650)  return 2;
         return 3;
-    case 2: // 480p
-        if (bitrateKbps >= 2600) return 4;
-        if (bitrateKbps >= 1500) return 3;
-        if (bitrateKbps < 650)  return 1;
+    case 2: // 360p
+        if (bitrateKbps >= 2600) return 5;
+        if (bitrateKbps >= 1500) return 4;
+        if (bitrateKbps >= 850)  return 3;
+        if (bitrateKbps < 200)  return 1;
         return 2;
-    case 1: // 360p
+    case 1: // 240p
     default:
-        if (bitrateKbps >= 2600) return 4;
-        if (bitrateKbps >= 1500) return 3;
-        if (bitrateKbps >= 850)  return 2;
+        if (bitrateKbps >= 2600) return 5;
+        if (bitrateKbps >= 1500) return 4;
+        if (bitrateKbps >= 850)  return 3;
+        if (bitrateKbps >= 300)  return 2;
         return 1;
     }
 }

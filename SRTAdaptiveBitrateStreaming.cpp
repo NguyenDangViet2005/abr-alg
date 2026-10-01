@@ -895,10 +895,9 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
         m_wasCongested = true;
 
-        if ((m_lossPercentAvg >= 18.0 || state == CongestionState::Panic) && (ctime - m_lastKeyframeRequestTime >= 4000)) {
-            m_lastKeyframeRequestTime = ctime;
-            emit requestKeyframe();
-        }
+        // Lưu ý: Không bắn requestKeyframe định kỳ khi đang kẹt ở trạng thái Panic / Loss >= 18%
+        // để tránh "Keyframe Storm" nhồi I-frame liên tục làm nghẽn chết luồng ở mức bitrate sàn.
+        // Keyframe chỉ phát 1 lần khi bắt đầu hồi phục thoát khỏi Panic (ở khối if dòng 890 phía trên).
 
         if (m_currentBitrateKbps > targetProfileBitrate) {
             m_clearSinceMs = 0;
