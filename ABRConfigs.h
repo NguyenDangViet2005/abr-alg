@@ -5,6 +5,12 @@
 // UDP port for receiving QoS connection stats from an external XBSRTFactory.
 #define SRT_ABR_QOS_UDP_PORT 12345
 
+// ── Router telemetry UDP listener ──
+// UDP port for the router's RAW per-interface metrics (id 60, ConnType rows).
+// Same wire shape as XBFirmServerListener's shared telemetry port: 2-byte id,
+// then one connType byte, then a '#'-separated payload.
+#define ROUTER_TELEMETRY_UDP_PORT 12346
+
 // ── CameraControl (camera adapt-bitrate API) ──
 #define CAMERA_ADAPT_BITRATE_HOST "127.0.0.1"
 #define CAMERA_ADAPT_BITRATE_PORT 4002

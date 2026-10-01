@@ -15,9 +15,11 @@ HEADERS += \
     VideoResolutionAdapter.h \
     XBQoSService.h \
     dev/CameraControl.h \
-    dev/NetworkHandler.h
+    dev/NetworkHandler.h \
+    dev/RouterNetworkHandler.h
 
 SOURCES += \
+    dev/RouterNetworkHandler.cpp \
     main.cpp \
     ABRFactory.cpp \
     IAdaptiveBitrateStreaming.cpp \

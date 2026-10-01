@@ -6,6 +6,7 @@
 #include <QTimer>
 #include "ABRFactory.h"
 #include "dev/NetworkHandler.h"
+#include "dev/RouterNetworkHandler.h"
 #include "dev/CameraControl.h"
 #include "ABRConfigs.h"
 
@@ -13,6 +14,7 @@ XBQoSService::XBQoSService(QObject *parent)
     : QObject(parent)
     , m_abrFactory(nullptr)
     , m_networkHandler(nullptr)
+    , m_routerNetworkHandler(nullptr)
     , m_cameraControl(nullptr)
     , m_currentBitrate(0)
     , m_cameraNeedsSync(false)
@@ -150,11 +152,17 @@ void XBQoSService::start()
     m_abrFactory->startCameraSocketAbr();
 
     m_networkHandler = new NetworkHandler(this);
+    m_routerNetworkHandler = new RouterNetworkHandler(this);
 
     setupConnections();
 
     m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
     qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT;
+
+    // RouterNetworkHandler logs its own bind result (success or errorString),
+    // so no service-level "listening" line here to avoid claiming success on a
+    // failed bind.
+    m_routerNetworkHandler->start(ROUTER_TELEMETRY_UDP_PORT);
 }
 
 void XBQoSService::stop()
@@ -164,6 +172,9 @@ void XBQoSService::stop()
     }
     if (m_networkHandler) {
         m_networkHandler->stop();
+    }
+    if (m_routerNetworkHandler) {
+        m_routerNetworkHandler->stop();
     }
     if (m_abrFactory) {
         m_abrFactory->stopCameraSocketAbr();
