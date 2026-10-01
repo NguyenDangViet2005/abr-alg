@@ -601,7 +601,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
     const int deltaLoss = static_cast<int>(deltaLossRaw);
 
-    const bool hasActiveTraffic = (deltaSent > 0 || rawSendRateMbps >= 0.05);
+    const bool hasActiveTraffic = (deltaSent > 0 || rawSendRateMbps >= 0.02);
     if (hasActiveTraffic) {
         m_lastActiveTrafficTime = ctime;
         if (m_isTrafficIdle) {
@@ -785,7 +785,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     } else if (state == CongestionState::Severe) {
         m_latestStatusReason = "SEVERE (480p 1.0M)";
     } else {
-        m_latestStatusReason = "\033[1;31mPANIC (360p 250k)\033[0m";
+        m_latestStatusReason = "\033[1;31mPANIC (Survival 50k)\033[0m";
     }
 
     qint64 timeSinceLastChange = ctime - m_lastBitrateChangeTime;
@@ -860,6 +860,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= static_cast<unsigned int>(m_lastCongestedBitrate * 0.70)) {
                     // Cận kề trần tắc nghẽn: tăng từng bước nhỏ 100 kbps để không vọt quá năng lực đường truyền
                     stepKbps = 100;
+                } else if (m_currentBitrateKbps < 250) {
+                    stepKbps = 50;
                 } else if (m_currentBitrateKbps < 800) {
                     stepKbps = 200; 
                 } else if (m_currentBitrateKbps < 2000) {
@@ -972,7 +974,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     rampLimit = qMin(rampLimit, m_lastCongestedBitrate);
                 }
 
-                unsigned int stepUp = (state == CongestionState::Severe) ? 200u : 300u;
+                unsigned int stepUp = (m_currentBitrateKbps < 250) ? 50u : ((state == CongestionState::Severe) ? 200u : 300u);
                 unsigned int targetBitrate = m_currentBitrateKbps + stepUp;
                 targetBitrate = qMin(rampLimit, targetBitrate);
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;

@@ -19,7 +19,7 @@ public:
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
-    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 250;
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 50;
 
     static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 500;  
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
