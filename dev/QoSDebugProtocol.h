@@ -30,7 +30,12 @@
 //
 // See plans/reports/brainstorm-261002-1345-qos-debug-sender-dashboard.md §3.
 
-constexpr quint16 QS_MAGIC   = 0x5153; // 'Q' 'S'
+// Wire magic: the two ASCII bytes 'Q','S' = 0x51 0x53 at offset 0. Written and
+// read RAW, never as a u16 — a little-endian u16 write of 0x5153 emits
+// 0x53 0x51 ('S','Q') and every reader (spec, dashboard parser, server) would
+// reject it. The bug is invisible to a C++ round-trip (writer and reader agree
+// with each other) and only a cross-language fixture catches it.
+constexpr char QS_MAGIC_BYTES[2] = { 'Q', 'S' };
 constexpr quint8  QS_VERSION = 1;
 
 // Datagram header size: magic(2) + version(1) + type(1) + payloadLen(2).

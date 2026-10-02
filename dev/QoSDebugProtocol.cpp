@@ -67,7 +67,7 @@ QByteArray buildQsDatagram(quint8 recordType, const QByteArray &payload)
     out.reserve(QS_HEADER_SIZE + payload.size());
     QDataStream ds(&out, QIODevice::WriteOnly);
     configureQsStream(ds);
-    ds << QS_MAGIC;                       // u16 LE
+    ds.writeRawData(QS_MAGIC_BYTES, 2);   // raw 'Q','S' — NOT a u16 (LE would swap)
     ds << QS_VERSION;                     // u8
     ds << recordType;                     // u8
     ds << static_cast<quint16>(payload.size()); // u16 LE
@@ -78,11 +78,9 @@ QByteArray buildQsDatagram(quint8 recordType, const QByteArray &payload)
 bool isQsDatagram(const QByteArray &buf)
 {
     if (buf.size() < QS_HEADER_SIZE) return false;
-    QDataStream ds(buf);
-    configureQsStream(ds);
-    quint16 magic = 0;
-    ds >> magic;
-    return ds.status() == QDataStream::Ok && magic == QS_MAGIC;
+    // Read the magic RAW too, so the check matches the writer byte-for-byte
+    // regardless of stream byte order.
+    return buf.at(0) == QS_MAGIC_BYTES[0] && buf.at(1) == QS_MAGIC_BYTES[1];
 }
 
 quint8 qsRecordType(const QByteArray &datagram)
