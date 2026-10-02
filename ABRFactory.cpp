@@ -57,6 +57,10 @@ void ABRFactory::startRouterAbr(const QStringList &ifaces, bool isC2Configured)
         _routerAbrs.insert(name, abr);
         connect(abr, &XBAdaptiveBitrateStreaming::bitrateProposed,
                 this, &ABRFactory::handleRouterAbrBitrate);
+        // Relay the full decision (with branch/reason/maxAbr) out of the
+        // factory, so a tap does not need the instance map.
+        connect(abr, &XBAdaptiveBitrateStreaming::decisionMade,
+                this, &ABRFactory::routerAbrDecision);
     }
     qInfo().nospace() << "ABRFactory: router ABR started for " << _routerAbrs.size() << " ifaces";
 }

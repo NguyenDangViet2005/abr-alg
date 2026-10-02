@@ -141,6 +141,11 @@ void XBQoSService::setupConnections()
                     m_qosDebug, &QoSDebugSender::handleRouterRow);
             connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
                     m_qosDebug, &QoSDebugSender::handleTick);
+            // The ABR decision is computed by the factory, so the channel taps
+            // the factory's relay rather than each per-interface instance. This
+            // is what fills abrBranch/abrReason/maxAbr in every SAMPLE.
+            connect(m_abrFactory, &ABRFactory::routerAbrDecision,
+                    m_qosDebug, &QoSDebugSender::handleAbrDecision);
         }
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi

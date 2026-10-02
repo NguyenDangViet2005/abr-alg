@@ -47,12 +47,21 @@ signals:
     // the wrapper returns before emitting. `0` means pause.
     void bitrateProposed(const QString &iface, unsigned int kbps);
 
+    // The FULL decision for this tick: the proposal plus the branch/reason that
+    // produced it and the C2 mode + ceiling it was made against. The QS debug
+    // channel taps this so a sample carries the decision beside its inputs —
+    // bitrateProposed alone loses the WHY. Ints, not the enums, so a plain
+    // QObject::connect (no qRegisterMetaType) carries it to another object.
+    // Emitted every computable tick, even when the bitrate holds.
+    void decisionMade(const QString &iface, int kbps, int c2Mode,
+                      int branch, int reason, int maxAbr);
+
     // PART B — a reset is warranted. No executor exists (XBQoSService owns no
     // video socket), so this is detect + emit only; see report §6c.
     void requestStreamReset(const QString &iface, const QString &reason);
 
 private:
-    int     processQoS();
+    AbrDecision processQoS();
     C2Mode  c2ModeForThisTick();
     bool    hasFreshVideoRow() const;
     void    updateStuckObservation(double queuingDelayMs, int emittedBitrate);
@@ -78,6 +87,9 @@ private:
     int  m_bitrate        = ABR_MIN_BITRATE_KBPS;
     int  m_notUsableTicks = 0;
     int  m_lastEmitted    = -1;       // -1 = nothing emitted yet
+    // C2 mode resolved by the last processQoS(), so handleRouterTick can publish
+    // it with the decision without recomputing (which would read a moved clock).
+    C2Mode m_lastC2Mode   = C2Mode::NEVER_SEEN;
 
     // ── Part B: stuck detection ──
     bool   m_wasPrimary  = false;

@@ -17,11 +17,18 @@ int clampHalve(int bitrate, int maxAbr) { return clampBitrate(bitrate / 2, maxAb
 int clampMul(int bitrate, double f, int maxAbr) { return clampBitrate(static_cast<int>(bitrate * f), maxAbr); }
 int clampAdd(int bitrate, int step, int maxAbr) { return clampBitrate(bitrate + step, maxAbr); }
 
+// A decision with its branch/reason attached, so each return below reads as the
+// verdict it is rather than a bare number a later reader has to re-derive.
+AbrDecision verdict(int kbps, AbrBranch branch, AbrReason reason)
+{
+    return AbrDecision{ kbps, branch, reason };
+}
+
 } // namespace
 
-int decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
-                  C2Mode c2Mode, int bitrate, int notUsableTicks,
-                  qint64 sinceLastChangeMs, int maxAbr)
+AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
+                          C2Mode c2Mode, int bitrate, int notUsableTicks,
+                          qint64 sinceLastChangeMs, int maxAbr)
 {
     // v1 reads only the C2 MODE (present/stale/never-seen/delay-only); the C2
     // row's own metrics are not consumed yet. Kept as a parameter so the
@@ -33,16 +40,20 @@ int decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
     // for the first two ticks (a single dropped UDP row must not stop video),
     // then pause.
     if (!v.isConnected || !v.isMptcp) {
-        if (notUsableTicks + 1 >= ABR_PAUSE_AFTER_TICKS) return QOS_PAUSE;
-        return (bitrate > ABR_MIN_BITRATE_KBPS) ? bitrate : ABR_MIN_BITRATE_KBPS;
+        if (notUsableTicks + 1 >= ABR_PAUSE_AFTER_TICKS)
+            return verdict(QOS_PAUSE, AbrBranch::PAUSE, AbrReason::LINK_DEAD);
+        return verdict((bitrate > ABR_MIN_BITRATE_KBPS) ? bitrate : ABR_MIN_BITRATE_KBPS,
+                       AbrBranch::HOLD, AbrReason::LINK_DEAD);
     }
 
     // Connected + mptcp but the router's own `usable` is false (no sample yet).
     // "Cannot measure" — do not emit, do not touch state.
-    if (!v.usable) return QOS_NOT_AVAILABLE;
+    if (!v.usable)
+        return verdict(QOS_NOT_AVAILABLE, AbrBranch::NOT_AVAILABLE, AbrReason::NOT_USABLE);
 
     // ── KTO gate: retransmit >= 2 pushed score to the floor ──────────────
-    if (v.score <= 1.0) return clampHalve(bitrate, maxAbr);
+    if (v.score <= 1.0)
+        return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::KTO);
 
     // ── DECREASE (checked before INCREASE) ───────────────────────────────
     // A tick raises OR lowers, never both — the if/elif order below is what
@@ -58,10 +69,15 @@ int decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
     // gentle backoff to a hard halve. The two loss tiers below both halve for
     // now; they stay separate so a stronger response (drop-to-MIN) has a home
     // when tuned. Report §7 lists qdelay>400 as ×0.8, which this restores.
-    if (v.lossRatePct > ABR_LOSS_SEVERE_PCT)   return clampHalve(bitrate, maxAbr);
-    if (v.lossRatePct > ABR_LOSS_HIGH_PCT)     return clampHalve(bitrate, maxAbr);
-    if (v.queuingDelayMs > ABR_QDELAY_HIGH_MS) return clampMul(bitrate, ABR_QDELAY_GAIN, maxAbr);
-    if (v.trend == TREND_RAPID_DECREASE)       return clampMul(bitrate, ABR_TREND_RAPID_DEC_GAIN, maxAbr);
+    if (v.lossRatePct > ABR_LOSS_SEVERE_PCT)
+        return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::LOSS_HIGH);
+    if (v.lossRatePct > ABR_LOSS_HIGH_PCT)
+        return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::LOSS_HIGH);
+    if (v.queuingDelayMs > ABR_QDELAY_HIGH_MS)
+        return verdict(clampMul(bitrate, ABR_QDELAY_GAIN, maxAbr), AbrBranch::MUL, AbrReason::QDELAY_400);
+    if (v.trend == TREND_RAPID_DECREASE)
+        return verdict(clampMul(bitrate, ABR_TREND_RAPID_DEC_GAIN, maxAbr),
+                       AbrBranch::MUL, AbrReason::TREND_RAPID_DEC);
 
     // ── INCREASE ─────────────────────────────────────────────────────────
     // Permitted only when C2 gives a reference (FRESH) or C2 is not deployed
@@ -77,7 +93,15 @@ int decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
         && bitrate < maxAbr
         && linkClean
         && sinceLastChangeMs >= ABR_UP_COOLDOWN_MS)
-        return clampAdd(bitrate, ABR_UP_STEP_KBPS, maxAbr);
+        return verdict(clampAdd(bitrate, ABR_UP_STEP_KBPS, maxAbr), AbrBranch::UP, AbrReason::COOLDOWN_OK);
 
-    return bitrate;   // HOLD — a positive value, distinct from NOT_AVAILABLE
+    // HOLD — a positive value, distinct from NOT_AVAILABLE. A hold is the
+    // steady state, so its reason is NONE unless a gate definitively withheld
+    // the ramp: a withheld C2 reference (STALE) or a score below the ramp floor
+    // (SCORE_LOW). Naming any other gate here would be a guess the wire enum
+    // does not back, so it stays NONE.
+    AbrReason holdReason = AbrReason::NONE;
+    if (!c2AllowsUp && c2Mode == C2Mode::STALE) holdReason = AbrReason::STALE;
+    else if (c2AllowsUp && v.score < ABR_SCORE_UP_MIN) holdReason = AbrReason::SCORE_LOW;
+    return verdict(bitrate, AbrBranch::HOLD, holdReason);
 }

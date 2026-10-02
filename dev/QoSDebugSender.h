@@ -64,11 +64,12 @@ public slots:
     // — publish it.
     void handleTick(const QString &primaryInterface);
 
-    // ABR decision hook. No caller in v1 (the ABR engine is not wired to this
-    // channel yet) — the slot exists so the caller lands without reshaping this
-    // class. Until it is called, samples carry abrBranch=NOT_AVAILABLE.
+    // ABR decision hook — connected to XBAdaptiveBitrateStreaming::decisionMade
+    // (see XBQoSService::setupConnections). Stores the latest decision per
+    // interface so the next SAMPLE carries the branch/reason/maxAbr beside the
+    // inputs. Until the first decision arrives, samples say NOT_AVAILABLE.
     void handleAbrDecision(const QString &iface, int kbps, int c2Mode,
-                           int branch, int reason);
+                           int branch, int reason, int maxAbr);
 
     // A discrete event (route switch, pause, stuck-reset request, …).
     void handleEvent(const QString &iface, quint8 type, const QString &detail);
@@ -84,6 +85,7 @@ private:
         int c2Mode = 0;
         int branch = static_cast<int>(QS_BR_NOT_AVAILABLE);
         int reason = static_cast<int>(QS_R_NONE);
+        int maxAbrKbps = 0;
         bool present = false;
     };
 

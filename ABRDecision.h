@@ -32,6 +32,53 @@ enum class C2Mode : int {
 constexpr int QOS_NOT_AVAILABLE = -1;
 constexpr int QOS_PAUSE         = 0;
 
+// ── Branch / reason (report §3.1) ───────────────────────────────────────────
+//
+// WHY the bitrate moved this tick. Values are the QS WIRE values (see
+// dev/QoSDebugProtocol.h), so a decision can be published verbatim with no
+// translation table — and the wire header aliases these names back, keeping a
+// single definition site. Adding a value means editing only this enum.
+//
+// HOLD is the steady state; NOT_AVAILABLE means "cannot decide" and never
+// reaches a consumer as a bitrate. TO_STUCK_OBSERVE / RESET_REQUEST belong to
+// the Part B stuck path, emitted as events rather than as a tick's branch.
+enum class AbrBranch : int {
+    HOLD             = 0,
+    UP               = 1,
+    HALVE            = 2,
+    MUL              = 3,
+    PAUSE            = 4,
+    NOT_AVAILABLE    = 5,
+    TO_STUCK_OBSERVE = 6,
+    RESET_REQUEST    = 7
+};
+
+enum class AbrReason : int {
+    NONE            = 0,
+    KTO             = 1,
+    LOSS_HIGH       = 2,
+    QDELAY_400      = 3,
+    QDELAY_5        = 4,
+    TREND_RAPID_DEC = 5,
+    LINK_DEAD       = 6,
+    NOT_USABLE      = 7,
+    STALE           = 8,
+    COOLDOWN_OK     = 9,
+    C2_BLOCK_UP     = 10,
+    SCORE_LOW       = 11,
+    STUCK_OBSERVE   = 12,
+    RESET_STUCK     = 13
+};
+
+// What decideBitrate returns: the bitrate AND the branch/reason that produced
+// it, so a consumer (the QS debug channel) publishes the decision beside the
+// inputs it was made from. `kbps` keeps the old int contract — -1, 0, or >0.
+struct AbrDecision {
+    int       kbps   = QOS_NOT_AVAILABLE;
+    AbrBranch branch = AbrBranch::NOT_AVAILABLE;
+    AbrReason reason = AbrReason::NONE;
+};
+
 // Thresholds (report §7). Named here so the test and the code share one source.
 constexpr double ABR_LOSS_HIGH_PCT    = 0.8;
 constexpr double ABR_LOSS_SEVERE_PCT  = 5.0;
@@ -80,8 +127,12 @@ constexpr int TREND_RAPID_DECREASE = 4;
 //   notUsableTicks : consecutive ticks the link has been down BEFORE this tick
 //   sinceLastChangeMs : ms since the last bitrate change
 //   maxAbr         : ceiling
-int decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
-                  C2Mode c2Mode, int bitrate, int notUsableTicks,
-                  qint64 sinceLastChangeMs, int maxAbr);
+//
+// Returns the proposed bitrate together with the branch/reason that produced
+// it. Only the kbps field is the "answer"; branch/reason exist so the QS debug
+// channel can publish the decision beside its inputs.
+AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
+                          C2Mode c2Mode, int bitrate, int notUsableTicks,
+                          qint64 sinceLastChangeMs, int maxAbr);
 
 #endif // ABRDECISION_H

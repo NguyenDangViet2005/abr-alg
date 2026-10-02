@@ -284,7 +284,7 @@ QsSample QoSDebugSender::buildSample(const QString &iface) const
     s.notUsableTicks = 0;
 
     s.bitrateKbps       = abr.bitrateKbps;
-    s.maxAbrKbps        = 0;   // filled by the ABR engine when wired
+    s.maxAbrKbps        = abr.maxAbrKbps;
     s.sinceLastChangeMs = 0;
 
     s.video.score  = v.score;
@@ -319,7 +319,7 @@ void QoSDebugSender::emitSample(const QString &iface, const QString &primaryIfac
 // ── ABR decision hook ───────────────────────────────────────────────────────
 
 void QoSDebugSender::handleAbrDecision(const QString &iface, int kbps, int c2Mode,
-                                       int branch, int reason)
+                                       int branch, int reason, int maxAbr)
 {
     AbrState &st = m_decision[iface];
     st.present = true;
@@ -327,6 +327,7 @@ void QoSDebugSender::handleAbrDecision(const QString &iface, int kbps, int c2Mod
     st.c2Mode = c2Mode;
     st.branch = branch;
     st.reason = reason;
+    st.maxAbrKbps = maxAbr;
 }
 
 void QoSDebugSender::handleEvent(const QString &iface, quint8 type, const QString &detail)

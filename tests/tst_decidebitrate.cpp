@@ -18,13 +18,17 @@
 
 static int g_failures = 0;
 
-static void expectEq(int got, int want, const char *what)
+// decideBitrate returns AbrDecision (kbps + branch + reason). These tests assert
+// on the kbps field — the branch/reason are exercised implicitly and checked by
+// the QS encoder test on the wire side. Taking the struct here keeps every call
+// site below unchanged.
+static void expectEq(AbrDecision got, int want, const char *what)
 {
-    if (got != want) {
+    if (got.kbps != want) {
         ++g_failures;
-        qWarning().nospace() << "FAIL " << what << ": got " << got << ", want " << want;
+        qWarning().nospace() << "FAIL " << what << ": got " << got.kbps << ", want " << want;
     } else {
-        qInfo().nospace() << "ok   " << what << " = " << got;
+        qInfo().nospace() << "ok   " << what << " = " << got.kbps;
     }
 }
 

@@ -6,6 +6,7 @@
 #include <QVector>
 #include <QPair>
 #include <QtGlobal>
+#include "../ABRDecision.h"   // AbrBranch / AbrReason — the wire values' home
 
 // Wire format "QS" — the debug channel from XBQoSService to qos-dashboard.
 //
@@ -47,34 +48,39 @@ enum QsRecordType : quint8 {
     QS_CONFIG = 3
 };
 
-// Why the bitrate moved this tick (§3.1). `NONE` is the v1 default: the ABR
-// engine is not wired to this channel yet.
+// Why the bitrate moved this tick (§3.1).
+//
+// The values now live in ABRDecision.h (AbrBranch / AbrReason) so the DECIDER
+// and the WIRE share one definition — the reason a branch was taken is computed
+// where the decision is made, not reconstructed later. These QS_* names are
+// aliases kept for the encoder, the decoder and the tests, which read the wire
+// vocabulary. `ABR_NOT_AVAILABLE` is the pre-wiring default (no decision yet).
 enum QsAbrBranch : quint8 {
-    QS_BR_HOLD           = 0,
-    QS_BR_UP             = 1,
-    QS_BR_HALVE          = 2,
-    QS_BR_MUL            = 3,
-    QS_BR_PAUSE          = 4,
-    QS_BR_NOT_AVAILABLE  = 5,
-    QS_BR_TO_STUCK_OBSERVE = 6,
-    QS_BR_RESET_REQUEST  = 7
+    QS_BR_HOLD             = static_cast<quint8>(AbrBranch::HOLD),
+    QS_BR_UP               = static_cast<quint8>(AbrBranch::UP),
+    QS_BR_HALVE            = static_cast<quint8>(AbrBranch::HALVE),
+    QS_BR_MUL              = static_cast<quint8>(AbrBranch::MUL),
+    QS_BR_PAUSE            = static_cast<quint8>(AbrBranch::PAUSE),
+    QS_BR_NOT_AVAILABLE    = static_cast<quint8>(AbrBranch::NOT_AVAILABLE),
+    QS_BR_TO_STUCK_OBSERVE = static_cast<quint8>(AbrBranch::TO_STUCK_OBSERVE),
+    QS_BR_RESET_REQUEST    = static_cast<quint8>(AbrBranch::RESET_REQUEST)
 };
 
 enum QsAbrReason : quint8 {
-    QS_R_NONE          = 0,
-    QS_R_KTO           = 1,
-    QS_R_LOSS_HIGH     = 2,
-    QS_R_QDELAY_400    = 3,
-    QS_R_QDELAY_5      = 4,
-    QS_R_TREND_RAPID_DEC = 5,
-    QS_R_LINK_DEAD     = 6,
-    QS_R_NOT_USABLE    = 7,
-    QS_R_STALE         = 8,
-    QS_R_COOLDOWN_OK   = 9,
-    QS_R_C2_BLOCK_UP   = 10,
-    QS_R_SCORE_LOW     = 11,
-    QS_R_STUCK_OBSERVE = 12,
-    QS_R_RESET_STUCK   = 13
+    QS_R_NONE            = static_cast<quint8>(AbrReason::NONE),
+    QS_R_KTO             = static_cast<quint8>(AbrReason::KTO),
+    QS_R_LOSS_HIGH       = static_cast<quint8>(AbrReason::LOSS_HIGH),
+    QS_R_QDELAY_400      = static_cast<quint8>(AbrReason::QDELAY_400),
+    QS_R_QDELAY_5        = static_cast<quint8>(AbrReason::QDELAY_5),
+    QS_R_TREND_RAPID_DEC = static_cast<quint8>(AbrReason::TREND_RAPID_DEC),
+    QS_R_LINK_DEAD       = static_cast<quint8>(AbrReason::LINK_DEAD),
+    QS_R_NOT_USABLE      = static_cast<quint8>(AbrReason::NOT_USABLE),
+    QS_R_STALE           = static_cast<quint8>(AbrReason::STALE),
+    QS_R_COOLDOWN_OK     = static_cast<quint8>(AbrReason::COOLDOWN_OK),
+    QS_R_C2_BLOCK_UP     = static_cast<quint8>(AbrReason::C2_BLOCK_UP),
+    QS_R_SCORE_LOW       = static_cast<quint8>(AbrReason::SCORE_LOW),
+    QS_R_STUCK_OBSERVE   = static_cast<quint8>(AbrReason::STUCK_OBSERVE),
+    QS_R_RESET_STUCK     = static_cast<quint8>(AbrReason::RESET_STUCK)
 };
 
 enum QsEventType : quint8 {

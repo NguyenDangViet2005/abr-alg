@@ -59,6 +59,12 @@ signals:
     void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);
     void onC2TelemetryData(const QVector<SRTPeerStat> &peers);
 
+    // Relay of a per-interface router-ABR decision (XBAdaptiveBitrateStreaming::
+    // decisionMade), so a consumer can tap the decision without holding a
+    // pointer to every instance. The QS debug channel connects here.
+    void routerAbrDecision(const QString &iface, int kbps, int c2Mode,
+                           int branch, int reason, int maxAbr);
+
 private:
     static ABRFactory* _instance;
     SRTAdaptiveBitrateStreaming* _srtAdaptiveBitrateStreaming;

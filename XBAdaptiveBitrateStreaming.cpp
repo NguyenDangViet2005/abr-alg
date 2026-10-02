@@ -84,7 +84,7 @@ C2Mode XBAdaptiveBitrateStreaming::c2ModeForThisTick()
     return C2Mode::NEVER_SEEN;                          // declared present, never seen
 }
 
-int XBAdaptiveBitrateStreaming::processQoS()
+AbrDecision XBAdaptiveBitrateStreaming::processQoS()
 {
     // ── freshness guard (§6b) ────────────────────────────────────────────
     // No new VIDEO row since the last computation → recomputing would act on
@@ -99,7 +99,7 @@ int XBAdaptiveBitrateStreaming::processQoS()
                                  << "ms — holding bitrate " << m_bitrate << "kbps, not computing";
             m_staleWarned = true;
         }
-        return QOS_NOT_AVAILABLE;
+        return AbrDecision{ QOS_NOT_AVAILABLE, AbrBranch::NOT_AVAILABLE, AbrReason::STALE };
     }
     m_staleWarned = false;
 
@@ -111,6 +111,7 @@ int XBAdaptiveBitrateStreaming::processQoS()
     // reads the pre-update value; C2 must use the same pre-update value.
     const C2Mode c2Mode = c2ModeForThisTick();
     m_lastComputeMs = m_clock.elapsed();
+    m_lastC2Mode = c2Mode;   // published with the decision in handleRouterTick
 
     // C2 declared present but never seen → warn once, after a grace period, so
     // a slow C2 subflow at startup is not mistaken for a misconfiguration.
@@ -132,11 +133,12 @@ int XBAdaptiveBitrateStreaming::processQoS()
     const int ticksBefore = m_notUsableTicks;
     m_notUsableTicks = linkDown ? m_notUsableTicks + 1 : 0;
 
-    const int b = decideBitrate(m_video, m_c2, c2Mode, m_bitrate,
-                                ticksBefore, sinceLastChangeMs, m_maxAbr);
+    const AbrDecision d = decideBitrate(m_video, m_c2, c2Mode, m_bitrate,
+                                        ticksBefore, sinceLastChangeMs, m_maxAbr);
+    const int b = d.kbps;
 
     // ── state update ─────────────────────────────────────────────────────
-    if (b == QOS_NOT_AVAILABLE) return QOS_NOT_AVAILABLE;   // -1: leave state alone
+    if (b == QOS_NOT_AVAILABLE) return d;   // -1: leave state alone
 
     if (b != m_bitrate) m_lastChangeMs = m_clock.elapsed();
     m_bitrate = b;
@@ -151,7 +153,7 @@ int XBAdaptiveBitrateStreaming::processQoS()
                        << " loss=" << QString::number(m_video.lossRatePct, 'f', 3)
                        << " -> " << b << "kbps";
 
-    return b;
+    return d;
 }
 
 void XBAdaptiveBitrateStreaming::updateStuckObservation(double queuingDelayMs, int emittedBitrate)
@@ -234,8 +236,17 @@ void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterfac
     }
     m_wasPrimary = isPrimary;
 
-    const int b = processQoS();
-    if (b == QOS_NOT_AVAILABLE) return;   // -1: cannot decide → do not emit
+    const AbrDecision d = processQoS();
+    if (d.kbps == QOS_NOT_AVAILABLE) return;   // -1: cannot decide → do not emit
+
+    // The full decision goes out EVERY computable tick, holds included: the QS
+    // channel wants the verdict beside its inputs on each sample, not only when
+    // the bitrate moves. bitrateProposed keeps its deadband below — a consumer
+    // acting on the video only cares when the number changes.
+    emit decisionMade(m_iface, d.kbps, static_cast<int>(m_lastC2Mode),
+                      static_cast<int>(d.branch), static_cast<int>(d.reason), m_maxAbr);
+
+    const int b = d.kbps;
     if (b == m_lastEmitted) return;       // deadband at the emit layer
 
     m_lastEmitted = b;
