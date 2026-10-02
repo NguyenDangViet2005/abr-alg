@@ -106,6 +106,17 @@ void XBQoSService::setupConnections()
     if (m_abrFactory) {
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+
+        // Router telemetry (UDP 12346). Logged only for now — see
+        // ABRFactory::handleRouterRow. Deliberately NOT feeding
+        // SRTAdaptiveBitrateStreaming: the 12345 QoS path already owns that
+        // input, and merging a second source into it before the two have been
+        // read side by side would change ABR behaviour with nothing to
+        // compare against.
+        connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow,
+                m_abrFactory, &ABRFactory::handleRouterRow);
+        connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
+                m_abrFactory, &ABRFactory::handleRouterTick);
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi
             if (m_cameraNeedsSync && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {

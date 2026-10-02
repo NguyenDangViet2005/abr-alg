@@ -10,6 +10,7 @@ HEADERS += \
     ABRConfigs.h \
     ABRFactory.h \
     IAdaptiveBitrateStreaming.h \
+    RouterInterfaceStat.h \
     SRTAdaptiveBitrateStreaming.h \
     SRTPeerStat.h \
     VideoResolutionAdapter.h \

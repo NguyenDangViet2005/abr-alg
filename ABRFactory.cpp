@@ -44,6 +44,39 @@ void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
     emit onC2TelemetryData(peers);
 }
 
+void ABRFactory::handleRouterRow(const RouterInterfaceStat &row)
+{
+    // Router's view, not XBSRTFactory's. Units are the router's own and are
+    // printed rather than normalised — `lossRatePct` is a PERCENT while the SRT
+    // side reports packet counts, and `throughputKbps` is kbps while the SRT
+    // side reports Mbps. Normalising would hide the discrepancy this line
+    // exists to expose.
+    const char *label = (row.connType == ConnType::VIDEO) ? "VIDEO" : "C2   ";
+
+    qDebug().nospace()
+        << "[ROUTER] " << label
+        << " if="      << row.interfaceName
+        << " prio="    << row.priority
+        << " act="     << row.isActivated
+        << " conn="    << row.isConnected
+        << " mptcp="   << row.isMptcp
+        << " usable="  << row.usable
+        << " score="   << QString::number(row.score, 'f', 2)
+        << " trend="   << row.trend
+        << " thr="     << QString::number(row.throughputKbps, 'f', 2) << "kbps"
+        << " loss="    << QString::number(row.lossRatePct, 'f', 4) << "%"
+        << " rtt="     << QString::number(row.rttMs, 'f', 2) << "ms"
+        << " minRtt="  << QString::number(row.minRttMs, 'f', 2) << "ms"
+        << " qdelay="  << QString::number(row.queuingDelayMs, 'f', 2) << "ms"
+        << " jitter="  << QString::number(row.jitterMs, 'f', 2) << "ms"
+        << (row.parseFailed ? "  [PARSE FAILURES]" : "");
+}
+
+void ABRFactory::handleRouterTick(const QString &primaryInterface)
+{
+    qDebug().nospace() << "[ROUTER][TICK] primary=" << primaryInterface;
+}
+
 void ABRFactory::stopCameraSocketAbr()
 {
     qDebug() << "ABRFactory: Stop SRT ABR";

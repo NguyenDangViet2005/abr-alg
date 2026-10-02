@@ -5,10 +5,27 @@
 
 // Wire shape (shared with XBFirm's telemetry port):
 //   byte 0..1 = datagram id, "60" for the router's per-interface metrics
-//   byte 2    = ConnType (row kind), see enum in the header
+//   byte 2    = ConnType (row kind), see RouterInterfaceStat.h
 //   byte 3..  = payload, '#'-separated
 static const int DATAGRAM_ID_LEN = 2;
 static const char ROUTER_ID[] = "60";
+
+// The router sends ALL of its telemetry to one destination from one socket:
+// TelemetryModule::sendLoop() emits 550, optionally 560, then 600/601/602 on
+// the same _sockfd with the same _servAddr. So these two ids arrive on 12346 as
+// well and are EXPECTED here — they are the router being healthy, not a
+// misdirected sender.
+//
+// They are dropped deliberately: 550/560 are the legacy 10-field video stub
+// (TelemetryModule::formatVideoData), not per-interface rows, and nothing on
+// this port consumes them. Dropping them is fine; dropping them SILENTLY is
+// not, so each is counted and reported once per window rather than per packet.
+static const char SPECTRUM_STUB_ID[]  = "55";   // 550
+static const char SPECTRUM_STUB2_ID[] = "56";   // 560
+
+// A 1 Hz router makes this at most one line per window. Not a rate limiter in
+// the flood-control sense — there is simply nothing here worth logging 2x/s.
+static const int UNKNOWN_ID_LOG_INTERVAL_SEC = 10;
 
 // VIDEO / C2 rows carry exactly this many fields, positionally:
 static const int ROW_FIELD_COUNT = 14;
@@ -18,6 +35,39 @@ static const char *const ROW_FIELD_NAMES[ROW_FIELD_COUNT] = {
     "throughputKbps", "lossRatePct", "rttMs",      "minRttMs",
     "queuingDelayMs", "jitterMs"
 };
+
+// Parse one numeric field, reporting a conversion failure rather than
+// silently yielding 0.
+//
+// QString::toInt()/toDouble() return 0 and discard the reason, so a field the
+// router sent as "abc" or "1569,76" (a locale decimal comma) would become a
+// plausible 0.00. The `ok` out-param is the only way to tell those apart, and
+// the offending TEXT is printed because the two cases mean different things.
+static int parseIntField(const QStringList &fields, int index, bool *anyFailure)
+{
+    bool ok = false;
+    const QString raw = fields.at(index);
+    const int value = raw.toInt(&ok);
+    if (!ok) {
+        qWarning().nospace() << "[ROUTER][PARSE] field " << index << " ('" << raw
+                             << "') unparsable as int — treated as 0";
+        *anyFailure = true;
+    }
+    return value;
+}
+
+static double parseDoubleField(const QStringList &fields, int index, bool *anyFailure)
+{
+    bool ok = false;
+    const QString raw = fields.at(index);
+    const double value = raw.toDouble(&ok);
+    if (!ok) {
+        qWarning().nospace() << "[ROUTER][PARSE] field " << index << " ('" << raw
+                             << "') unparsable as double — treated as 0";
+        *anyFailure = true;
+    }
+    return value;
+}
 
 RouterNetworkHandler::RouterNetworkHandler(QObject *parent)
     : QObject(parent)
@@ -62,10 +112,11 @@ void RouterNetworkHandler::handleUdpReadyRead()
 
 void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddress &sender, quint16 senderPort)
 {
-    qDebug() << "--> [RouterNetworkHandler] parseDatagram() called with data size=" << data.size()
-             << " from " << sender.toString() << ":" << senderPort;
     const int minLen = DATAGRAM_ID_LEN + 1;   // id + connType byte
     if (data.size() < minLen) {
+        // A datagram this short cannot be dispatched at all. Without this line a
+        // truncated send would be indistinguishable from "the router never sent
+        // it" — the exact ambiguity that made the id-60 path invisible before.
         qWarning().nospace() << "[ROUTER][RX] datagram too short (" << data.size()
                              << " bytes, need >= " << minLen << ") from "
                              << sender.toString() << ":" << senderPort
@@ -75,10 +126,35 @@ void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddr
 
     const QByteArray id = data.left(DATAGRAM_ID_LEN);
     if (id != ROUTER_ID) {
-        // The port is dedicated to router telemetry; any other id means a
-        // misdirected sender and is logged rather than silently dropped.
-        qDebug().nospace() << "[ROUTER][RX] ignored id=" << QString::fromLatin1(id)
-                           << " from " << sender.toString() << ":" << senderPort;
+        // Two distinct cases, and they must not read the same in the log:
+        //
+        //  550/560 — the router's own legacy video stub, expected on this port
+        //            because the router sends every telemetry id to one
+        //            destination from one socket. Nothing here consumes it, so
+        //            it is ignored — but silently ignoring it is exactly the
+        //            failure this project already spent days chasing, so it is
+        //            still named once per window.
+        //
+        //  anything else — a foreign sender on a port that takes datagrams
+        //            from anyone on the segment. Warned, not ignored.
+        const bool isRouterStub = (id == SPECTRUM_STUB_ID || id == SPECTRUM_STUB2_ID);
+        if (isRouterStub) {
+            if (_lastStubLog.isValid() && _lastStubLog.elapsed() < UNKNOWN_ID_LOG_INTERVAL_SEC * 1000) {
+                return;
+            }
+            _lastStubLog.restart();
+            qDebug().nospace() << "[ROUTER][RX] id=" << QString::fromLatin1(id)
+                               << " is the router's legacy video stub, not a per-interface row"
+                               << " — ignoring (logged at most once per "
+                               << UNKNOWN_ID_LOG_INTERVAL_SEC << "s)"
+                               << " from " << sender.toString() << ":" << senderPort;
+            return;
+        }
+
+        qWarning().nospace() << "[ROUTER][RX] unexpected id=" << QString::fromLatin1(id)
+                             << " on the telemetry port from "
+                             << sender.toString() << ":" << senderPort
+                             << " raw=" << QString::fromLatin1(data);
         return;
     }
 
@@ -104,10 +180,20 @@ void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddr
                        << " raw=" << payload;
 
     if (connType == ConnType::PRIMARY) {
-        logPrimary(fields);
-    } else {
-        logRowFields(connType, fields);
+        // PRIMARY's payload is a NAME, not a metric row — its arity is
+        // legitimately 1, so it never goes through emitRow's 14-field path.
+        const QString primary = fields.value(0, QStringLiteral("-"));
+        if (fields.size() != 1) {
+            qWarning().nospace() << "[ROUTER][RX] PRIMARY expected 1 field, got "
+                                 << fields.size() << " — using '" << primary << "'";
+        }
+        qDebug().nospace() << "[ROUTER][RX]   primaryInterface=" << primary;
+        emit onRouterTick(primary);
+        return;
     }
+
+    logRowFields(connType, fields);
+    emitRow(connType, fields);
 }
 
 void RouterNetworkHandler::logRowFields(ConnType connType, const QStringList &fields)
@@ -123,10 +209,45 @@ void RouterNetworkHandler::logRowFields(ConnType connType, const QStringList &fi
     }
 }
 
-void RouterNetworkHandler::logPrimary(const QStringList &fields)
+void RouterNetworkHandler::emitRow(ConnType connType, const QStringList &fields)
 {
-    if (fields.size() != 1) {
-        qWarning().nospace() << "[ROUTER][RX] PRIMARY expected 1 field, got " << fields.size();
+    // A short row is still emitted, with the missing fields left at their
+    // defaults and parseFailed set. Dropping it instead would make a
+    // systematically truncated stream look like an idle one.
+    if (fields.size() < ROW_FIELD_COUNT) {
+        qWarning().nospace() << "[ROUTER][RX] connType=" << static_cast<int>(connType)
+                             << " short row (" << fields.size() << "/" << ROW_FIELD_COUNT
+                             << ") — emitting partial, will not be acted on";
     }
-    qDebug().nospace() << "[ROUTER][RX]   primaryInterface=" << fields.value(0, "-");
+
+    RouterInterfaceStat row;
+    row.connType = connType;
+    row.interfaceName = fields.value(0);
+
+    // Anything short of a full row cannot be trusted positionally: field 5 of a
+    // 6-field row is not necessarily `usable`. Emit the identity and the flag,
+    // leave the numbers at 0, and let the consumer skip it.
+    if (fields.size() < ROW_FIELD_COUNT) {
+        row.parseFailed = true;
+        emit onRouterRow(row);
+        return;
+    }
+
+    bool failed = false;
+    row.priority       = parseIntField(fields, 1, &failed);
+    row.isActivated    = parseIntField(fields, 2, &failed) != 0;
+    row.isConnected    = parseIntField(fields, 3, &failed) != 0;
+    row.isMptcp        = parseIntField(fields, 4, &failed) != 0;
+    row.usable         = parseIntField(fields, 5, &failed) != 0;
+    row.score          = parseDoubleField(fields, 6, &failed);
+    row.trend          = parseIntField(fields, 7, &failed);
+    row.throughputKbps = parseDoubleField(fields, 8, &failed);
+    row.lossRatePct    = parseDoubleField(fields, 9, &failed);
+    row.rttMs          = parseDoubleField(fields, 10, &failed);
+    row.minRttMs       = parseDoubleField(fields, 11, &failed);
+    row.queuingDelayMs = parseDoubleField(fields, 12, &failed);
+    row.jitterMs       = parseDoubleField(fields, 13, &failed);
+    row.parseFailed    = failed;
+
+    emit onRouterRow(row);
 }
