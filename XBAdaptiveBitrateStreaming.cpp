@@ -102,9 +102,15 @@ int XBAdaptiveBitrateStreaming::processQoS()
         return QOS_NOT_AVAILABLE;
     }
     m_staleWarned = false;
-    m_lastComputeMs = m_clock.elapsed();
 
+    // Resolve C2 freshness BEFORE stamping m_lastComputeMs. C2 rows always
+    // arrive before the 602 tick marker, so m_lastC2Ms is older than "now";
+    // if we stamped first, `m_lastC2Ms > m_lastComputeMs` could never hold and
+    // FRESH would be unreachable — every tick would resolve STALE and the ramp
+    // would be permanently blocked. The video guard above works only because it
+    // reads the pre-update value; C2 must use the same pre-update value.
     const C2Mode c2Mode = c2ModeForThisTick();
+    m_lastComputeMs = m_clock.elapsed();
 
     // C2 declared present but never seen → warn once, after a grace period, so
     // a slow C2 subflow at startup is not mistaken for a misconfiguration.
@@ -117,13 +123,21 @@ int XBAdaptiveBitrateStreaming::processQoS()
 
     const qint64 sinceLastChangeMs = m_clock.elapsed() - m_lastChangeMs;
 
+    // Count consecutive link-down ticks from the LINK STATE, not from the
+    // returned bitrate. Driving it from `b == QOS_PAUSE` deadlocks: the core
+    // needs notUsableTicks+1 >= ABR_PAUSE_AFTER_TICKS to RETURN pause, but a
+    // down link returns hold (positive), so the counter would reset to 0 every
+    // tick and PAUSE could never fire — the video would never stop.
+    const bool linkDown = !(m_video.isConnected && m_video.isMptcp);
+    const int ticksBefore = m_notUsableTicks;
+    m_notUsableTicks = linkDown ? m_notUsableTicks + 1 : 0;
+
     const int b = decideBitrate(m_video, m_c2, c2Mode, m_bitrate,
-                                m_notUsableTicks, sinceLastChangeMs, m_maxAbr);
+                                ticksBefore, sinceLastChangeMs, m_maxAbr);
 
     // ── state update ─────────────────────────────────────────────────────
     if (b == QOS_NOT_AVAILABLE) return QOS_NOT_AVAILABLE;   // -1: leave state alone
 
-    m_notUsableTicks = (b == QOS_PAUSE) ? m_notUsableTicks + 1 : 0;
     if (b != m_bitrate) m_lastChangeMs = m_clock.elapsed();
     m_bitrate = b;
 

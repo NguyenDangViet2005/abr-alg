@@ -194,6 +194,18 @@ int main()
                  "TREND_DECREASE blocks INCREASE (trend<=STABLE gate)");
     }
 
+    // ── unknown C2 blocks INCREASE but NEVER blocks DECREASE ─────────────
+    // The other half of the C2 contract: STALE/NEVER_SEEN withhold the
+    // reference (so no ramp) but must still let a loss/qdelay backoff through.
+    {
+        RouterInterfaceStat v = healthyVideo();
+        v.lossRatePct = 1.0;      // > 0.8 -> halve
+        expectEq(decideBitrate(v, c, C2Mode::STALE, CUR, 0, 9999, MAX_ABR), CUR / 2,
+                 "STALE still DECREASES on loss");
+        expectEq(decideBitrate(v, c, C2Mode::NEVER_SEEN, CUR, 0, 9999, MAX_ABR), CUR / 2,
+                 "NEVER_SEEN still DECREASES on loss");
+    }
+
     // ── hold ─────────────────────────────────────────────────────────────
     {
         RouterInterfaceStat v = healthyVideo();
