@@ -45,23 +45,16 @@ QString readStr16(QDataStream &ds)
     return QString::fromUtf8(buf);
 }
 
-// One QDataStream configured for the QS contract: little-endian, single
-// precision floats. A default QDataStream is BIG-endian, so this is not
-// optional — forgetting it is the exact bug the format was designed to avoid.
-QDataStream makeWriter(QByteArray &out)
+// Configure a QDataStream for the QS contract: little-endian, single-precision
+// floats. A default QDataStream is BIG-endian, so this is not optional —
+// forgetting it is the exact bug the format was designed to avoid.
+//
+// Configured IN PLACE rather than returned: QDataStream is non-copyable and
+// non-movable in Qt5 (Q_DISABLE_COPY), so a by-value factory does not compile.
+void configureQsStream(QDataStream &ds)
 {
-    QDataStream ds(&out, QIODevice::WriteOnly);
     ds.setByteOrder(QDataStream::LittleEndian);
     ds.setFloatingPointPrecision(QDataStream::SinglePrecision);
-    return ds;
-}
-
-QDataStream makeReader(const QByteArray &in)
-{
-    QDataStream ds(in);
-    ds.setByteOrder(QDataStream::LittleEndian);
-    ds.setFloatingPointPrecision(QDataStream::SinglePrecision);
-    return ds;
 }
 
 } // namespace
@@ -72,7 +65,8 @@ QByteArray buildQsDatagram(quint8 recordType, const QByteArray &payload)
 {
     QByteArray out;
     out.reserve(QS_HEADER_SIZE + payload.size());
-    QDataStream ds = makeWriter(out);
+    QDataStream ds(&out, QIODevice::WriteOnly);
+    configureQsStream(ds);
     ds << QS_MAGIC;                       // u16 LE
     ds << QS_VERSION;                     // u8
     ds << recordType;                     // u8
@@ -84,7 +78,8 @@ QByteArray buildQsDatagram(quint8 recordType, const QByteArray &payload)
 bool isQsDatagram(const QByteArray &buf)
 {
     if (buf.size() < QS_HEADER_SIZE) return false;
-    QDataStream ds = makeReader(buf);
+    QDataStream ds(buf);
+    configureQsStream(ds);
     quint16 magic = 0;
     ds >> magic;
     return ds.status() == QDataStream::Ok && magic == QS_MAGIC;
@@ -101,7 +96,8 @@ quint8 qsRecordType(const QByteArray &datagram)
 QByteArray encodeQsSample(const QsSample &s)
 {
     QByteArray out;
-    QDataStream ds = makeWriter(out);
+    QDataStream ds(&out, QIODevice::WriteOnly);
+    configureQsStream(ds);
 
     ds << s.timestampMs;                   // i64
     ds << s.tickSeq;                       // u32
@@ -151,7 +147,8 @@ QByteArray encodeQsSample(const QsSample &s)
 
 bool decodeQsSample(const QByteArray &payload, QsSample &s)
 {
-    QDataStream ds = makeReader(payload);
+    QDataStream ds(payload);
+    configureQsStream(ds);
 
     ds >> s.timestampMs;
     ds >> s.tickSeq;
@@ -189,7 +186,8 @@ bool decodeQsSample(const QByteArray &payload, QsSample &s)
 QByteArray encodeQsEvent(const QsEvent &e)
 {
     QByteArray out;
-    QDataStream ds = makeWriter(out);
+    QDataStream ds(&out, QIODevice::WriteOnly);
+    configureQsStream(ds);
     ds << e.timestampMs;
     writeStr8(ds, e.iface);
     ds << e.eventType;
@@ -199,7 +197,8 @@ QByteArray encodeQsEvent(const QsEvent &e)
 
 bool decodeQsEvent(const QByteArray &payload, QsEvent &e)
 {
-    QDataStream ds = makeReader(payload);
+    QDataStream ds(payload);
+    configureQsStream(ds);
     ds >> e.timestampMs;
     e.iface = readStr8(ds);
     ds >> e.eventType;
@@ -212,7 +211,8 @@ bool decodeQsEvent(const QByteArray &payload, QsEvent &e)
 QByteArray encodeQsConfig(const QsConfig &c)
 {
     QByteArray out;
-    QDataStream ds = makeWriter(out);
+    QDataStream ds(&out, QIODevice::WriteOnly);
+    configureQsStream(ds);
     writeStr8(ds, c.appVersion);
     ds << static_cast<quint8>(c.ifaces.size());
     for (const auto &pair : c.ifaces) {
@@ -226,7 +226,8 @@ QByteArray encodeQsConfig(const QsConfig &c)
 
 bool decodeQsConfig(const QByteArray &payload, QsConfig &c)
 {
-    QDataStream ds = makeReader(payload);
+    QDataStream ds(payload);
+    configureQsStream(ds);
     c.appVersion = readStr8(ds);
     quint8 count = 0;
     ds >> count;
