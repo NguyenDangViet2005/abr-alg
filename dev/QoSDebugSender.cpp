@@ -346,21 +346,43 @@ void QoSDebugSender::emitConfig()
 
 void QoSDebugSender::writeRecord(quint8 recordType, const QByteArray &datagram)
 {
-    // UDP
+    // UDP — log at the send boundary, the only place that proves a record LEFT
+    // the socket. logSample()/logEvent() run BEFORE the `m_enabled` guard, so a
+    // "[QS] ..." line in the log proves the record was BUILT, never that it was
+    // sent. This line prints the resolved host:port, byte count and wire magic
+    // for every record, so "dashboard sees nothing" splits cleanly into
+    // "never sent" vs "sent but not received" (wrong host / firewall / not bound).
     if (m_udp && m_udp->isOpen()) {
         const qint64 n = m_udp->writeDatagram(datagram, m_host, m_port);
+        const QString magic = datagram.size() >= 2
+            ? QString("%1 %2")
+                  .arg(static_cast<quint8>(datagram.at(0)), 2, 16, QChar('0'))
+                  .arg(static_cast<quint8>(datagram.at(1)), 2, 16, QChar('0'))
+            : QStringLiteral("--");
         if (n < 0) {
+            qWarning().nospace() << "[QSDBG] UDP send FAILED -> " << m_host.toString()
+                                 << ":" << m_port << " type=" << recordType
+                                 << " bytes=" << datagram.size()
+                                 << " magic=" << magic
+                                 << " err=" << m_udp->errorString();
             if (m_dropLog.elapsed() >= DROP_LOG_INTERVAL_MS) {
                 m_dropLog.restart();
-                qWarning().nospace() << "[QSDBG] UDP send failed: " << m_udp->errorString();
                 emit onDropped(recordType, static_cast<quint16>(datagram.size()));
             }
+        } else {
+            qDebug().nospace() << "[QSDBG] UDP sent " << n << " bytes -> "
+                               << m_host.toString() << ":" << m_port
+                               << " type=" << recordType << " magic=" << magic;
         }
-    } else if (m_udp == nullptr) {
-        // enabled but startUdp never ran — caller bug, warn once per window
+    } else {
+        // Covers BOTH m_udp==nullptr (startUdp never ran) AND a socket that
+        // exists but is not open — the second was previously a silent drop.
         if (m_dropLog.elapsed() >= DROP_LOG_INTERVAL_MS) {
             m_dropLog.restart();
-            qWarning().noquote() << "[QSDBG] enabled but UDP socket not started";
+            qWarning().nospace() << "[QSDBG] UDP NOT sent (socket "
+                                 << (m_udp ? "not open" : "null") << ") -> "
+                                 << m_host.toString() << ":" << m_port
+                                 << " type=" << recordType << " bytes=" << datagram.size();
             emit onDropped(recordType, static_cast<quint16>(datagram.size()));
         }
     }
