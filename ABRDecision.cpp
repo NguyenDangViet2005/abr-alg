@@ -23,6 +23,11 @@ int decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                   C2Mode c2Mode, int bitrate, int notUsableTicks,
                   qint64 sinceLastChangeMs, int maxAbr)
 {
+    // v1 reads only the C2 MODE (present/stale/never-seen/delay-only); the C2
+    // row's own metrics are not consumed yet. Kept as a parameter so the
+    // SELF/NETWORK severity split has its input the moment it is wired.
+    Q_UNUSED(c);
+
     // ── Hard gate: link is down ──────────────────────────────────────────
     // A down link is a definitive verdict, so it overrides everything. Hold
     // for the first two ticks (a single dropped UDP row must not stop video),

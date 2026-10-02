@@ -129,11 +129,6 @@ void ABRFactory::handleRouterAbrBitrate(const QString &iface, unsigned int kbps)
     // v1: log only. Nothing is wired to CameraControl.
 }
 
-void ABRFactory::handleRouterAbrStatus(const QString &iface, int status)
-{
-    qInfo().nospace() << "[ABR][STATUS] if=" << iface << " status=" << status;
-}
-
 void ABRFactory::stopCameraSocketAbr()
 {
     qDebug() << "ABRFactory: Stop SRT ABR";
