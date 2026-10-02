@@ -47,10 +47,6 @@ signals:
     // the wrapper returns before emitting. `0` means pause.
     void bitrateProposed(const QString &iface, unsigned int kbps);
 
-    // The interface's proposal when it is NOT the primary (kept for logging /
-    // future failover; nothing consumes it yet).
-    void statusChanged(const QString &iface, int status);
-
     // PART B — a reset is warranted. No executor exists (XBQoSService owns no
     // video socket), so this is detect + emit only; see report §6c.
     void requestStreamReset(const QString &iface, const QString &reason);
@@ -88,6 +84,7 @@ private:
     bool   m_observing   = false;
     double m_obsQdelay0  = 0.0;
     int    m_obsTicks    = 0;
+    qint64 m_lastResetMs = 0;         // 0 = never emitted a reset
 };
 
 #endif // XBADAPTIVEBITRATESTREAMING_H

@@ -166,9 +166,13 @@ void XBAdaptiveBitrateStreaming::updateStuckObservation(double queuingDelayMs, i
     //       may still be pushing the old interface's high bitrate), or
     //   (b) overdrive: measured throughput is far below what we are asking for.
     // Both only START a watch; the reset decision is made after the window.
+    // The ratio is a DIVISOR: we are overdriving when the link delivers less
+    // than 1/ABR_OVERDRIVE_RATIO of the target (can't sustain ~62% of it).
+    // Written as a multiply it was true in normal operation — load ≈ bitrate
+    // is always < 1.6×bitrate — so the watch re-armed every tick forever.
     const bool overdrive = (m_bitrate > ABR_MIN_BITRATE_KBPS)
                            && (m_video.throughputKbps > 0.0)
-                           && (m_video.throughputKbps < m_bitrate * ABR_OVERDRIVE_RATIO);
+                           && (m_video.throughputKbps < m_bitrate / ABR_OVERDRIVE_RATIO);
     if (!m_observing && overdrive) {
         m_observing = true;
         m_obsQdelay0 = queuingDelayMs;
@@ -197,11 +201,19 @@ void XBAdaptiveBitrateStreaming::updateStuckObservation(double queuingDelayMs, i
 
     // Window elapsed with qdelay still high and undrained → stuck.
     if (queuingDelayMs > ABR_STUCK_QDELAY_HIGH_MS) {
-        qWarning().nospace() << "[ABR][" << m_iface
-                             << "] STUCK — qdelay " << queuingDelayMs
-                             << "ms undrained after " << m_obsTicks
-                             << " ticks at lowered bitrate → requestStreamReset";
-        emit requestStreamReset(m_iface, QStringLiteral("stuck"));
+        // Reset is destructive; rate-limit so a genuinely stuck link emits at
+        // most once per cooldown instead of re-firing every ~5 ticks. The
+        // executor (CameraControl) owns the real reset policy — this is only a
+        // guard against a signal storm from the detector.
+        const qint64 sinceResetMs = m_clock.elapsed() - m_lastResetMs;
+        if (m_lastResetMs == 0 || sinceResetMs >= ABR_RESET_COOLDOWN_MS) {
+            qWarning().nospace() << "[ABR][" << m_iface
+                                 << "] STUCK — qdelay " << queuingDelayMs
+                                 << "ms undrained after " << m_obsTicks
+                                 << " ticks at lowered bitrate → requestStreamReset";
+            m_lastResetMs = m_clock.elapsed();
+            emit requestStreamReset(m_iface, QStringLiteral("stuck"));
+        }
     }
     m_observing = false;
     m_obsTicks = 0;

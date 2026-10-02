@@ -52,10 +52,11 @@ constexpr qint64 ABR_STALE_WARN_MS  = 5000;   // per-flow silence -> warn, hold
 constexpr qint64 ABR_C2_GRACE_MS    = 5000;   // declared-present C2 grace period
 
 // Part B — stuck detection (report §6c).
-constexpr double ABR_OVERDRIVE_RATIO    = 1.6;   // throughput < bitrate * ratio
+constexpr double ABR_OVERDRIVE_RATIO    = 1.6;   // throughput < bitrate / ratio
 constexpr double ABR_STUCK_QDELAY_HIGH_MS = 400.0;
 constexpr int    ABR_STUCK_OBSERVE_TICKS = 5;
 constexpr double ABR_STUCK_DRAIN_DROP_PCT = 0.30;
+constexpr qint64 ABR_RESET_COOLDOWN_MS  = 30000; // min gap between reset emits
 
 // Trend wire values, matching the router's Trend enum (src/TcpData.h). Local
 // copy: XBQoSService is a separate binary and must not include across repos.

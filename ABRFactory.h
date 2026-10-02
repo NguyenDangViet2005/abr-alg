@@ -55,9 +55,6 @@ public slots:
     // proposal is effective; the others are logged as spare (future failover).
     void handleRouterAbrBitrate(const QString &iface, unsigned int kbps);
 
-    // Instance status line (currently informational).
-    void handleRouterAbrStatus(const QString &iface, int status);
-
 signals:
     void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);
     void onC2TelemetryData(const QVector<SRTPeerStat> &peers);

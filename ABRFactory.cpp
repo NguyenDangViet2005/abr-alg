@@ -57,8 +57,6 @@ void ABRFactory::startRouterAbr(const QStringList &ifaces, bool isC2Configured)
         _routerAbrs.insert(name, abr);
         connect(abr, &XBAdaptiveBitrateStreaming::bitrateProposed,
                 this, &ABRFactory::handleRouterAbrBitrate);
-        connect(abr, &XBAdaptiveBitrateStreaming::statusChanged,
-                this, &ABRFactory::handleRouterAbrStatus);
     }
     qInfo().nospace() << "ABRFactory: router ABR started for " << _routerAbrs.size() << " ifaces";
 }
@@ -112,7 +110,13 @@ void ABRFactory::handleRouterTick(const QString &primaryInterface)
 {
     qDebug().nospace() << "[ROUTER][TICK] primary=" << primaryInterface;
     _primaryIface = primaryInterface;
-    for (auto *abr : qAsConst(_routerAbrs)) {
+    // Snapshot the instances before fanning out. handleRouterTick can emit
+    // requestStreamReset, and a consumer that reacts synchronously by calling
+    // stopRouterAbr()/startRouterAbr() would mutate _routerAbrs mid-iteration
+    // (qDeleteAll/insert during range-for = UB). Safe today only because no
+    // consumer is connected yet; the copy makes it safe regardless.
+    const QList<XBAdaptiveBitrateStreaming *> abrs = _routerAbrs.values();
+    for (auto *abr : abrs) {
         abr->handleRouterTick(primaryInterface);
     }
 }
