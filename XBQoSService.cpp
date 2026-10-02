@@ -8,6 +8,7 @@
 #include "dev/NetworkHandler.h"
 #include "dev/RouterNetworkHandler.h"
 #include "dev/CameraControl.h"
+#include "dev/QoSDebugSender.h"
 #include "ABRConfigs.h"
 
 XBQoSService::XBQoSService(QObject *parent)
@@ -16,6 +17,7 @@ XBQoSService::XBQoSService(QObject *parent)
     , m_networkHandler(nullptr)
     , m_routerNetworkHandler(nullptr)
     , m_cameraControl(nullptr)
+    , m_qosDebug(nullptr)
     , m_currentBitrate(0)
     , m_cameraNeedsSync(false)
     , m_cameraKeepAliveTimer(nullptr)
@@ -26,6 +28,21 @@ XBQoSService::XBQoSService(QObject *parent)
 XBQoSService::~XBQoSService()
 {
     stop();
+}
+
+void XBQoSService::setRouterAbrInterfaces(const QStringList &ifaces, bool isC2Configured)
+{
+    m_routerAbrIfaces = ifaces;
+    m_isC2Configured = isC2Configured;
+}
+
+void XBQoSService::setQosDebug(bool enabled, const QString &host, quint16 port,
+                               const QString &logDir)
+{
+    m_qosDebugEnabled = enabled;
+    m_qosDebugHost = host;
+    m_qosDebugPort = port;
+    m_qosDebugLogDir = logDir;
 }
 
 void XBQoSService::printStartupBanner()
@@ -107,16 +124,24 @@ void XBQoSService::setupConnections()
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
 
-        // Router telemetry (UDP 12346). Logged only for now — see
-        // ABRFactory::handleRouterRow. Deliberately NOT feeding
-        // SRTAdaptiveBitrateStreaming: the 12345 QoS path already owns that
-        // input, and merging a second source into it before the two have been
-        // read side by side would change ABR behaviour with nothing to
-        // compare against.
+        // Router telemetry (UDP 12346). Routed to the per-interface ABR
+        // instances (ABRFactory::handleRouterRow → XBAdaptiveBitrateStreaming).
+        // Deliberately SEPARATE from the 12345 SRT QoS path below: they
+        // describe different things (router's own per-interface view vs.
+        // XBSRTFactory's measurement of the SRT stream) and must not be merged.
         connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow,
                 m_abrFactory, &ABRFactory::handleRouterRow);
         connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
                 m_abrFactory, &ABRFactory::handleRouterTick);
+
+        // QoS debug channel taps the SAME signals. It only reads, so the tap
+        // order relative to the factory does not matter.
+        if (m_qosDebug) {
+            connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow,
+                    m_qosDebug, &QoSDebugSender::handleRouterRow);
+            connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
+                    m_qosDebug, &QoSDebugSender::handleTick);
+        }
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi
             if (m_cameraNeedsSync && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
@@ -162,8 +187,25 @@ void XBQoSService::start()
     m_abrFactory->init();
     m_abrFactory->startCameraSocketAbr();
 
+    // Per-interface router ABR. Declared list comes from main.cpp (see
+    // setRouterAbrInterfaces) — the router's config.ini `interfaces=` is a
+    // SEPARATE list and is never regenerated; a mismatch surfaces as the
+    // "unknown iface" warning in ABRFactory::handleRouterRow (report risk #5).
+    if (!m_routerAbrIfaces.isEmpty()) {
+        m_abrFactory->startRouterAbr(m_routerAbrIfaces, m_isC2Configured);
+    } else {
+        qWarning().noquote() << "[QoS Engine] No router ABR interfaces declared — "
+                                "per-interface ABR disabled (router rows will be logged only).";
+    }
+
     m_networkHandler = new NetworkHandler(this);
     m_routerNetworkHandler = new RouterNetworkHandler(this);
+
+    // Created BEFORE setupConnections so the tap connects to a live object.
+    // The debug channel is harmless when disabled: it logs but never opens a
+    // socket or file.
+    m_qosDebug = new QoSDebugSender(this);
+    m_qosDebug->setEnabled(m_qosDebugEnabled);
 
     setupConnections();
 
@@ -174,6 +216,22 @@ void XBQoSService::start()
     // so no service-level "listening" line here to avoid claiming success on a
     // failed bind.
     m_routerNetworkHandler->start(ROUTER_TELEMETRY_UDP_PORT);
+
+    // Activate the debug channel's I/O (if enabled) and announce the topology.
+    if (m_qosDebugEnabled) {
+        m_qosDebug->startUdp(m_qosDebugHost, m_qosDebugPort);
+        m_qosDebug->startFileLog(m_qosDebugLogDir);
+        QVector<QPair<QString, quint8>> topo;
+        topo.reserve(m_routerAbrIfaces.size());
+        for (const QString &name : m_routerAbrIfaces) {
+            topo.append({ name, 1 });   // priority filled by the router's own rows
+        }
+        m_qosDebug->setTopology(topo, QString(), m_qosDebugPort);
+        m_qosDebug->emitConfig();
+    } else {
+        qInfo().noquote() << "[QoS Engine] QoS debug channel disabled "
+                             "(qDebug only, no UDP/file). Enable with --qos-debug.";
+    }
 }
 
 void XBQoSService::stop()
@@ -187,7 +245,12 @@ void XBQoSService::stop()
     if (m_routerNetworkHandler) {
         m_routerNetworkHandler->stop();
     }
+    if (m_qosDebug) {
+        m_qosDebug->stopFileLog();
+        m_qosDebug->stopUdp();
+    }
     if (m_abrFactory) {
+        m_abrFactory->stopRouterAbr();
         m_abrFactory->stopCameraSocketAbr();
     }
 }

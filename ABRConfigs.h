@@ -22,4 +22,11 @@
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
 #define VIDEO_DISABLED_BITRATE_KBPS           0
 
+// ── QoS debug channel (QoSDebugSender) — default OFF ──
+// Dashboard's UDP port (see qos-dashboard/server.js UDP_PORT). Disabled by
+// default so the rig pays no IO cost unless --qos-debug is passed.
+#define QOS_DEBUG_DEFAULT_HOST  "192.168.25.193"
+#define QOS_DEBUG_DEFAULT_PORT  9999
+#define QOS_DEBUG_DEFAULT_DIR   "/tmp/xbqos-debug"
+
 #endif // ABRCONFIGS_H
