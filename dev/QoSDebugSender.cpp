@@ -73,6 +73,11 @@ const char *eventText(int e)
 // 8 seconds, chosen to match the drop-log cadence elsewhere in the service.
 constexpr qint64 DROP_LOG_INTERVAL_MS = 8000;
 
+// Build token: printed by startUdp() so a log PROVES which revision is running.
+// Bump on every change to the QS send path. If a log's "[QSDBG] UDP →" line has
+// no build=... tag, or a stale one, the binary predates the fix.
+constexpr char QSDBG_BUILD_TAG[] = "noisopen-2026-10-02";
+
 } // namespace
 
 QoSDebugSender::QoSDebugSender(QObject *parent)
@@ -115,7 +120,13 @@ bool QoSDebugSender::startUdp(const QString &host, quint16 port)
     }
     m_port = port;
     m_udp = new QUdpSocket(this);
-    qInfo().nospace() << "[QSDBG] UDP → " << host << ":" << port;
+    // No bind()/connectToHost() on purpose. A plain UDP sender is not "open" by
+    // QIODevice semantics (isOpen() == false) because nothing called open() —
+    // gating the send on isOpen() would silently drop every record. writeDatagram
+    // on an unbound socket is valid: the kernel assigns an ephemeral port and
+    // sends. The build tag below proves which revision produced this log.
+    qInfo().nospace() << "[QSDBG] UDP → " << host << ":" << port
+                      << " build=" << QSDBG_BUILD_TAG;
     return true;
 }
 
@@ -352,7 +363,12 @@ void QoSDebugSender::writeRecord(quint8 recordType, const QByteArray &datagram)
     // sent. This line prints the resolved host:port, byte count and wire magic
     // for every record, so "dashboard sees nothing" splits cleanly into
     // "never sent" vs "sent but not received" (wrong host / firewall / not bound).
-    if (m_udp && m_udp->isOpen()) {
+    //
+    // Guard on m_udp alone, NOT isOpen(): a fresh QUdpSocket that never called
+    // bind()/connectToHost() has openMode==NotOpen, so isOpen() is false and
+    // gating on it dropped every record silently. writeDatagram() on an unbound
+    // socket is valid and auto-binds an ephemeral source port.
+    if (m_udp) {
         const qint64 n = m_udp->writeDatagram(datagram, m_host, m_port);
         const QString magic = datagram.size() >= 2
             ? QString("%1 %2")
@@ -360,6 +376,9 @@ void QoSDebugSender::writeRecord(quint8 recordType, const QByteArray &datagram)
                   .arg(static_cast<quint8>(datagram.at(1)), 2, 16, QChar('0'))
             : QStringLiteral("--");
         if (n < 0) {
+            // qInfo, not qDebug: the "UDP →" proof line is qInfo, so the send
+            // result must match its visibility or a suppressed qDebug would
+            // make a working send look like a silent drop again.
             qWarning().nospace() << "[QSDBG] UDP send FAILED -> " << m_host.toString()
                                  << ":" << m_port << " type=" << recordType
                                  << " bytes=" << datagram.size()
@@ -370,17 +389,15 @@ void QoSDebugSender::writeRecord(quint8 recordType, const QByteArray &datagram)
                 emit onDropped(recordType, static_cast<quint16>(datagram.size()));
             }
         } else {
-            qDebug().nospace() << "[QSDBG] UDP sent " << n << " bytes -> "
-                               << m_host.toString() << ":" << m_port
-                               << " type=" << recordType << " magic=" << magic;
+            qInfo().nospace() << "[QSDBG] UDP sent " << n << " bytes -> "
+                              << m_host.toString() << ":" << m_port
+                              << " type=" << recordType << " magic=" << magic;
         }
     } else {
-        // Covers BOTH m_udp==nullptr (startUdp never ran) AND a socket that
-        // exists but is not open — the second was previously a silent drop.
+        // m_udp == nullptr: startUdp never ran. Warn once per window.
         if (m_dropLog.elapsed() >= DROP_LOG_INTERVAL_MS) {
             m_dropLog.restart();
-            qWarning().nospace() << "[QSDBG] UDP NOT sent (socket "
-                                 << (m_udp ? "not open" : "null") << ") -> "
+            qWarning().nospace() << "[QSDBG] UDP NOT sent (socket null) -> "
                                  << m_host.toString() << ":" << m_port
                                  << " type=" << recordType << " bytes=" << datagram.size();
             emit onDropped(recordType, static_cast<quint16>(datagram.size()));
