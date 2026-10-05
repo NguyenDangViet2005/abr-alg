@@ -28,7 +28,8 @@ AbrDecision verdict(int kbps, AbrBranch branch, AbrReason reason)
 
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                           C2Mode c2Mode, int bitrate, int notUsableTicks,
-                          int c2LossTicks, qint64 sinceLastChangeMs, int maxAbr)
+                          int c2LossTicks, int qdelayHighTicks,
+                          qint64 sinceLastChangeMs, int maxAbr)
 {
     // ── Hard gate: link is down ──────────────────────────────────────────
     // A down link is a definitive verdict, so it overrides everything. Hold
@@ -87,7 +88,13 @@ AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceSta
         return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::LOSS_HIGH);
     if (v.lossRatePct > ABR_LOSS_HIGH_PCT)
         return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::LOSS_HIGH);
-    if (v.queuingDelayMs > ABR_QDELAY_HIGH_MS)
+    // Debounced like the link-down and C2-loss gates: one spike is noise (a
+    // Little's Law artifact at low throughput, a scheduling hiccup), three in a
+    // row is bufferbloat. The counter is counted by the caller so the core sees
+    // "before this tick"; the decrease is otherwise immediate, unlike the
+    // increase which waits out ABR_UP_COOLDOWN_MS.
+    if (v.queuingDelayMs > ABR_QDELAY_HIGH_MS
+        && qdelayHighTicks + 1 >= ABR_QDELAY_DEC_TICKS)
         return verdict(clampMul(bitrate, ABR_QDELAY_GAIN, maxAbr), AbrBranch::MUL, AbrReason::QDELAY_400);
     if (v.trend == TREND_RAPID_DECREASE)
         return verdict(clampMul(bitrate, ABR_TREND_RAPID_DEC_GAIN, maxAbr),

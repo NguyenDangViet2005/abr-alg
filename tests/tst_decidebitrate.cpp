@@ -64,6 +64,11 @@ static RouterInterfaceStat cleanC2()
 
 static const int MAX_ABR = 6000;
 static const int CUR = 1000;
+// Default "prior consecutive qdelay-over-threshold ticks" for the ~34 calls
+// that are not testing the qdelay debounce. Set to ABR_QDELAY_DEC_TICKS so a
+// row whose qdelay is over the threshold still fires the ×0.8 on the first tick
+// that reaches the debounce, keeping the pre-debounce expectations intact.
+static const int QHIGH_TICKS = ABR_QDELAY_DEC_TICKS;
 
 int main()
 {
@@ -73,17 +78,17 @@ int main()
     {
         RouterInterfaceStat v = healthyVideo();
         v.isConnected = false;
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "down link, tick 0 -> hold");
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 1, 0, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 1, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "down link, tick 1 -> hold");
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 2, 0, 9999, MAX_ABR), QOS_PAUSE,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 2, 0, QHIGH_TICKS, 9999, MAX_ABR), QOS_PAUSE,
                  "down link, tick 2 -> PAUSE");
     }
     {
         RouterInterfaceStat v = healthyVideo();
         v.isMptcp = false;
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 2, 0, 9999, MAX_ABR), QOS_PAUSE,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 2, 0, QHIGH_TICKS, 9999, MAX_ABR), QOS_PAUSE,
                  "no mptcp, tick 2 -> PAUSE");
     }
 
@@ -91,7 +96,7 @@ int main()
     {
         RouterInterfaceStat v = healthyVideo();
         v.usable = false;
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR), QOS_NOT_AVAILABLE,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), QOS_NOT_AVAILABLE,
                  "!usable -> NOT_AVAILABLE (-1)");
     }
 
@@ -99,7 +104,7 @@ int main()
     {
         RouterInterfaceStat v = healthyVideo();
         v.score = 1.0;
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR), CUR / 2,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR / 2,
                  "score<=1 -> halve");
     }
 
@@ -107,25 +112,36 @@ int main()
     {
         RouterInterfaceStat v = healthyVideo();
         v.lossRatePct = 6.0;      // > 5 -> severe
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR), CUR / 2,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR / 2,
                  "loss>5 -> halve");
     }
     {
         RouterInterfaceStat v = healthyVideo();
         v.lossRatePct = 1.0;      // > 0.8, < 5
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR), CUR / 2,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR / 2,
                  "loss in (0.8,5) -> halve");
     }
     {
+        // Debounced: the first ABR_QDELAY_DEC_TICKS-1 over-threshold ticks HOLD;
+        // only the one that reaches the debounce fires the ×0.8. This is the
+        // 2026-10-05 fix — one spike used to ratchet the bitrate down.
         RouterInterfaceStat v = healthyVideo();
         v.queuingDelayMs = 500.0; // > 400
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR),
-                 static_cast<int>(CUR * ABR_QDELAY_GAIN), "qdelay>400 -> x0.8");
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 0, 9999, MAX_ABR), CUR,
+                 "qdelay>400 tick 0 -> hold (debounce not met)");
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 1, 9999, MAX_ABR), CUR,
+                 "qdelay>400 tick 1 -> hold (debounce not met)");
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 2, 9999, MAX_ABR),
+                 static_cast<int>(CUR * ABR_QDELAY_GAIN), "qdelay>400 tick 2 -> x0.8");
+        // Below the debounce length (the default QHIGH_TICKS) a single spike
+        // cannot move the bitrate at all.
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR),
+                 static_cast<int>(CUR * ABR_QDELAY_GAIN), "qdelay>400 at debounce -> x0.8");
     }
     {
         RouterInterfaceStat v = healthyVideo();
         v.trend = TREND_RAPID_DECREASE;   // clean loss/qdelay
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR),
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR),
                  static_cast<int>(CUR * ABR_TREND_RAPID_DEC_GAIN), "rapid-decrease -> x0.85");
     }
 
@@ -134,53 +150,66 @@ int main()
         RouterInterfaceStat v = healthyVideo();
         v.isConnected = false;
         // CUR above MIN; the same call at a tiny bitrate must still be 0.
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, 100, 2, 0, 9999, MAX_ABR), QOS_PAUSE,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, 100, 2, 0, QHIGH_TICKS, 9999, MAX_ABR), QOS_PAUSE,
                  "PAUSE not clamped to MIN");
     }
 
     // ── increase gate ────────────────────────────────────────────────────
     {
         RouterInterfaceStat v = healthyVideo();
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 3000, MAX_ABR), CUR + ABR_UP_STEP_KBPS,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR + ABR_UP_STEP_KBPS,
                  "clean + FRESH + cooldown -> +100");
-        expectEq(decideBitrate(v, c, C2Mode::DELAY_ONLY, CUR, 0, 0, 3000, MAX_ABR), CUR + ABR_UP_STEP_KBPS,
+        expectEq(decideBitrate(v, c, C2Mode::DELAY_ONLY, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR + ABR_UP_STEP_KBPS,
                  "clean + DELAY_ONLY -> +100");
-        expectEq(decideBitrate(v, c, C2Mode::STALE, CUR, 0, 0, 3000, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::STALE, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
                  "STALE blocks INCREASE");
-        expectEq(decideBitrate(v, c, C2Mode::NEVER_SEEN, CUR, 0, 0, 3000, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::NEVER_SEEN, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
                  "NEVER_SEEN blocks INCREASE");
         // Cooldown gate: everything else permits the ramp, but only 1999ms
         // have passed — the 2000ms cooldown alone must hold.
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 1999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 1999, MAX_ABR), CUR,
                  "clean + FRESH but within cooldown -> hold");
+    }
+
+    // ── score floor for the ramp (ABR_SCORE_UP_MIN, lowered to 65) ────────
+    {
+        // 70 is below the OLD 85 floor but above the new 65: a stable, lightly
+        // queued link must now climb. This pins the 2026-10-05 threshold change.
+        RouterInterfaceStat v = healthyVideo();
+        v.score = 70.0;
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR + ABR_UP_STEP_KBPS,
+                 "score 70 (>= new floor 65) -> +100");
+        v.score = 60.0;   // below the floor -> hold
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
+                 "score 60 (< floor) -> hold (SCORE_LOW)");
     }
 
     // ── linkClean sub-conditions gate the ramp (each must hold alone) ────
     {
         RouterInterfaceStat v = healthyVideo();
         v.queuingDelayMs = 150.0;   // >= ABR_QDELAY_LOW_MS (100), < 400
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 3000, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
                  "qdelay 150 (>= LOW) blocks INCREASE");
     }
     {
         RouterInterfaceStat v = healthyVideo();
         v.rttMs = 90.0;             // rtt - minRtt = 70 >= 50
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 3000, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
                  "rtt inflation >= 50 blocks INCREASE");
     }
     {
         RouterInterfaceStat v = healthyVideo();
         v.jitterMs = 20.0;          // >= 15
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 3000, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
                  "jitter >= 15 blocks INCREASE");
     }
 
     // ── ceiling / floor clamping ─────────────────────────────────────────
     {
         RouterInterfaceStat v = healthyVideo();
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, MAX_ABR, 0, 0, 3000, MAX_ABR), MAX_ABR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, MAX_ABR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), MAX_ABR,
                  "at maxAbr -> hold (no overshoot)");
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, MAX_ABR - 50, 0, 0, 3000, MAX_ABR), MAX_ABR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, MAX_ABR - 50, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), MAX_ABR,
                  "+100 step clamps to maxAbr");
     }
     {
@@ -189,9 +218,9 @@ int main()
         // floor (300/2 = 150). To exercise the floor the halve must land below
         // it: 15/2 = 7 < 10.
         v.lossRatePct = 1.0;        // > 0.8 -> halve
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, 15, 0, 0, 3000, MAX_ABR), ABR_MIN_BITRATE_KBPS,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, 15, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), ABR_MIN_BITRATE_KBPS,
                  "halve below MIN -> floors at 10");
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, 300, 0, 0, 3000, MAX_ABR), 150,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, 300, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), 150,
                  "halve above MIN -> 150, not floored");
     }
 
@@ -199,7 +228,7 @@ int main()
     {
         RouterInterfaceStat v = healthyVideo();
         v.trend = TREND_DECREASE;
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 3000, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
                  "TREND_DECREASE blocks INCREASE (trend<=STABLE gate)");
     }
 
@@ -209,9 +238,9 @@ int main()
     {
         RouterInterfaceStat v = healthyVideo();
         v.lossRatePct = 1.0;      // > 0.8 -> halve
-        expectEq(decideBitrate(v, c, C2Mode::STALE, CUR, 0, 0, 9999, MAX_ABR), CUR / 2,
+        expectEq(decideBitrate(v, c, C2Mode::STALE, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR / 2,
                  "STALE still DECREASES on loss");
-        expectEq(decideBitrate(v, c, C2Mode::NEVER_SEEN, CUR, 0, 0, 9999, MAX_ABR), CUR / 2,
+        expectEq(decideBitrate(v, c, C2Mode::NEVER_SEEN, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR / 2,
                  "NEVER_SEEN still DECREASES on loss");
     }
 
@@ -225,16 +254,16 @@ int main()
         cLossy.lossRatePct = 12.0;   // > ABR_C2_LOSS_PAUSE_PCT (10)
         RouterInterfaceStat v = healthyVideo();
         // Ticks 0 and 1: still below the debounce -> HOLD (positive, video runs).
-        expectEq(decideBitrate(v, cLossy, C2Mode::FRESH, CUR, 0, 0, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, cLossy, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "C2 loss tick 0 -> hold (debounce not met)");
-        expectEq(decideBitrate(v, cLossy, C2Mode::FRESH, CUR, 0, 1, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, cLossy, C2Mode::FRESH, CUR, 0, 1, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "C2 loss tick 1 -> hold (debounce not met)");
-        expectEq(decideBitrate(v, cLossy, C2Mode::FRESH, CUR, 0, 2, 9999, MAX_ABR), QOS_PAUSE,
+        expectEq(decideBitrate(v, cLossy, C2Mode::FRESH, CUR, 0, 2, QHIGH_TICKS, 9999, MAX_ABR), QOS_PAUSE,
                  "C2 loss tick 2 -> PAUSE (3 in a row)");
         // At the threshold exactly is NOT above it -> no pause.
         RouterInterfaceStat cAt = cleanC2();
         cAt.lossRatePct = ABR_C2_LOSS_PAUSE_PCT;
-        expectEq(decideBitrate(v, cAt, C2Mode::FRESH, CUR, 0, 5, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, cAt, C2Mode::FRESH, CUR, 0, 5, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "C2 loss == threshold -> hold (strictly greater)");
     }
     // A STALE/NEVER_SEEN C2 is "unknown", not "lossy": it must NOT pause, even
@@ -243,11 +272,11 @@ int main()
         RouterInterfaceStat cLossy = cleanC2();
         cLossy.lossRatePct = 50.0;
         RouterInterfaceStat v = healthyVideo();
-        expectEq(decideBitrate(v, cLossy, C2Mode::STALE, CUR, 0, 9, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, cLossy, C2Mode::STALE, CUR, 0, 9, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "STALE C2 lossy -> hold (unknown is not lossy)");
-        expectEq(decideBitrate(v, cLossy, C2Mode::NEVER_SEEN, CUR, 0, 9, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, cLossy, C2Mode::NEVER_SEEN, CUR, 0, 9, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "NEVER_SEEN C2 lossy -> hold (unknown is not lossy)");
-        expectEq(decideBitrate(v, cLossy, C2Mode::DELAY_ONLY, CUR, 0, 9, 9999, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, cLossy, C2Mode::DELAY_ONLY, CUR, 0, 9, QHIGH_TICKS, 9999, MAX_ABR), CUR,
                  "DELAY_ONLY (C2 absent) -> hold (no reference to judge)");
     }
 
@@ -255,7 +284,7 @@ int main()
     {
         RouterInterfaceStat v = healthyVideo();
         v.score = 50.0;   // below the ramp gate, above KTO, no loss/qdelay
-        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, 3000, MAX_ABR), CUR,
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, 0, 0, QHIGH_TICKS, 3000, MAX_ABR), CUR,
                  "low score, no loss -> hold");
     }
 

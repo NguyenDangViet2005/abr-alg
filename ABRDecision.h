@@ -95,7 +95,13 @@ constexpr double ABR_QDELAY_HIGH_MS   = 400.0;
 constexpr double ABR_QDELAY_LOW_MS    = 100.0;
 constexpr double ABR_RTT_INFLATION_MS = 50.0;
 constexpr double ABR_JITTER_HIGH_MS   = 15.0;
-constexpr double ABR_SCORE_UP_MIN     = 85.0;
+// Minimum VIDEO score to permit INCREASE. Lowered 85 -> 65 (2026-10-05): a
+// healthy link carrying a standing ~50ms queue sits at score ~75 (the RTT term
+// wRTT*(rtt-minRtt) alone costs ~25), so 85 held the ramp shut on links that
+// were merely a little loaded, not broken. The 65 floor still blocks the ramp
+// on a genuinely degraded link (score < 65 = loss/RTT penalties compounding)
+// while letting a stable, lightly-queued link climb.
+constexpr double ABR_SCORE_UP_MIN     = 65.0;
 constexpr int    ABR_UP_STEP_KBPS     = 100;
 constexpr qint64 ABR_UP_COOLDOWN_MS   = 2000;
 constexpr int    ABR_MIN_BITRATE_KBPS = 10;
@@ -121,6 +127,13 @@ constexpr int    ABR_PAUSE_AFTER_TICKS = 3;
 // path — i.e. it waits out ABR_UP_COOLDOWN_MS from the pause, exactly as a
 // link-dead pause does. It does not jump straight back to the pre-pause rate.
 constexpr int    ABR_C2_LOSS_PAUSE_TICKS = 3;
+// Consecutive qdelay>ABR_QDELAY_HIGH_MS ticks before the ×0.8 backoff fires.
+// The decrease path was UNDEBOUNCED: a single spike halved the bitrate
+// instantly while the increase path waits out ABR_UP_COOLDOWN_MS (2000ms). That
+// asymmetry let one noisy sample ratchet the bitrate down 250->200->160->128.
+// Three consecutive ticks is the same cadence as the link-down and C2-loss
+// pauses, so every "act on the wire" gate settles alike; a success clears it.
+constexpr int    ABR_QDELAY_DEC_TICKS   = 3;
 constexpr double ABR_QDELAY_GAIN        = 0.8;
 constexpr double ABR_TREND_RAPID_DEC_GAIN = 0.85;
 
@@ -158,6 +171,9 @@ constexpr int TREND_RAPID_DECREASE = 4;
 //   bitrate        : current bitrate BEFORE this tick
 //   notUsableTicks : consecutive ticks the link has been down BEFORE this tick
 //   c2LossTicks    : consecutive C2-lossy ticks BEFORE this tick (FRESH only)
+//   qdelayHighTicks: consecutive ticks v.queuingDelayMs > ABR_QDELAY_HIGH_MS
+//                    BEFORE this tick. Debounces the ×0.8 backoff so one spike
+//                    cannot ratchet the bitrate down (see ABR_QDELAY_DEC_TICKS).
 //   sinceLastChangeMs : ms since the last bitrate change
 //   maxAbr         : ceiling
 //
@@ -166,6 +182,7 @@ constexpr int TREND_RAPID_DECREASE = 4;
 // channel can publish the decision beside its inputs.
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                           C2Mode c2Mode, int bitrate, int notUsableTicks,
-                          int c2LossTicks, qint64 sinceLastChangeMs, int maxAbr);
+                          int c2LossTicks, int qdelayHighTicks,
+                          qint64 sinceLastChangeMs, int maxAbr);
 
 #endif // ABRDECISION_H

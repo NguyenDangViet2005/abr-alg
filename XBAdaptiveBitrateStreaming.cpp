@@ -38,6 +38,7 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_bitrate = (bitrateKbps > 0) ? bitrateKbps : ABR_INITIAL_BITRATE_KBPS;
     m_notUsableTicks = 0;
     m_c2LossTicks = 0;
+    m_qdelayHighTicks = 0;
     m_lastEmitted = -1;
     m_lastChangeMs = m_clock.elapsed();
     m_observing = false;
@@ -143,8 +144,16 @@ AbrDecision XBAdaptiveBitrateStreaming::processQoS()
     const bool c2Lossy = (c2Mode == C2Mode::FRESH && m_c2.lossRatePct > ABR_C2_LOSS_PAUSE_PCT);
     m_c2LossTicks = c2Lossy ? m_c2LossTicks + 1 : 0;
 
+    // Count consecutive VIDEO-qdelay-over-threshold ticks, same "before this
+    // tick" discipline: the core must see N in a row so a single spike cannot
+    // trigger the ×0.8 backoff.
+    const int qdelayHighTicksBefore = m_qdelayHighTicks;
+    const bool qdelayHigh = (m_video.queuingDelayMs > ABR_QDELAY_HIGH_MS);
+    m_qdelayHighTicks = qdelayHigh ? m_qdelayHighTicks + 1 : 0;
+
     const AbrDecision d = decideBitrate(m_video, m_c2, c2Mode, m_bitrate,
                                         ticksBefore, c2LossTicksBefore,
+                                        qdelayHighTicksBefore,
                                         sinceLastChangeMs, m_maxAbr);
     const int b = d.kbps;
 
