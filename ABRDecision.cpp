@@ -29,7 +29,7 @@ AbrDecision verdict(int kbps, AbrBranch branch, AbrReason reason)
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                           C2Mode c2Mode, int bitrate, int notUsableTicks,
                           int c2LossTicks, int qdelayHighTicks,
-                          qint64 sinceLastChangeMs, int maxAbr)
+                          bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr)
 {
     // ── Hard gate: link is down ──────────────────────────────────────────
     // A down link is a definitive verdict, so it overrides everything. Hold
@@ -113,6 +113,7 @@ AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceSta
         && v.trend <= TREND_STABLE          // improving/stable, NOT decreasing
         && bitrate < maxAbr
         && linkClean
+        && !cameraCollapsed                 // camera not delivering what we ask
         && sinceLastChangeMs >= ABR_UP_COOLDOWN_MS)
         return verdict(clampAdd(bitrate, ABR_UP_STEP_KBPS, maxAbr), AbrBranch::UP, AbrReason::COOLDOWN_OK);
 

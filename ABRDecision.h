@@ -137,6 +137,15 @@ constexpr int    ABR_QDELAY_DEC_TICKS   = 3;
 constexpr double ABR_QDELAY_GAIN        = 0.8;
 constexpr double ABR_TREND_RAPID_DEC_GAIN = 0.85;
 
+// Camera-collapse gate. When the camera reports an achieved bitrate far below
+// what we asked for (achieved/requested < this ratio), the camera is not
+// delivering the video we requested — asking for MORE would only widen the gap,
+// so INCREASE is blocked until the camera catches up. Mirrors the SRT engine's
+// own collapse rule (SRTAdaptiveBitrateStreaming.cpp:360-370, same 0.25). This
+// is a CLOSED-LOOP signal: the router ABR is otherwise open-loop (it never knew
+// whether the camera accepted the ask), and this is the one fact that closes it.
+constexpr double ABR_CAMERA_COLLAPSE_RATIO = 0.25;
+
 // Freshness / staleness guards (report §6b). Untuned — v1 is log-only.
 constexpr qint64 ABR_STALE_WARN_MS  = 5000;   // per-flow silence -> warn, hold
 constexpr qint64 ABR_C2_GRACE_MS    = 5000;   // declared-present C2 grace period
@@ -174,6 +183,10 @@ constexpr int TREND_RAPID_DECREASE = 4;
 //   qdelayHighTicks: consecutive ticks v.queuingDelayMs > ABR_QDELAY_HIGH_MS
 //                    BEFORE this tick. Debounces the ×0.8 backoff so one spike
 //                    cannot ratchet the bitrate down (see ABR_QDELAY_DEC_TICKS).
+//   cameraCollapsed: the camera's last reported achieved bitrate is far below
+//                    what we asked (achieved/requested < ABR_CAMERA_COLLAPSE_RATIO).
+//                    Blocks INCREASE only — a DECREASE must still pass, since
+//                    lowering is exactly what a collapsed camera needs.
 //   sinceLastChangeMs : ms since the last bitrate change
 //   maxAbr         : ceiling
 //
@@ -183,6 +196,6 @@ constexpr int TREND_RAPID_DECREASE = 4;
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                           C2Mode c2Mode, int bitrate, int notUsableTicks,
                           int c2LossTicks, int qdelayHighTicks,
-                          qint64 sinceLastChangeMs, int maxAbr);
+                          bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr);
 
 #endif // ABRDECISION_H

@@ -42,6 +42,12 @@ public slots:
     // End-of-tick marker (row 602). Runs the stateful wrapper around the core.
     void handleRouterTick(const QString &primaryInterface);
 
+    // The camera's report of what it actually achieved for the last request.
+    // Closes the loop: the router ABR is otherwise open-loop, so this is the one
+    // fact that tells it whether the camera accepted the ask. `achievedKbps <= 0`
+    // (camera did not report) is ignored — it must NOT read as "collapsed".
+    void handleCameraReportedBitrate(int achievedKbps);
+
 signals:
     // The proposal for this interface. `-1` (NOT_AVAILABLE) is never emitted —
     // the wrapper returns before emitting. `0` means pause.
@@ -97,6 +103,14 @@ private:
     // the bitrate down.
     int  m_qdelayHighTicks = 0;
     int  m_lastEmitted    = -1;       // -1 = nothing emitted yet
+
+    // ── Camera closed loop ──
+    // Last achieved bitrate the camera reported for a request. 0 = nothing
+    // reported yet (or reset), which must NOT read as "collapsed".
+    int  m_lastAchievedKbps = 0;
+    // achieved/requested below ABR_CAMERA_COLLAPSE_RATIO on the last report.
+    // Blocks INCREASE (never a DECREASE). Recomputed on every camera report.
+    bool m_cameraCollapsed  = false;
     // C2 mode resolved by the last processQoS(), so handleRouterTick can publish
     // it with the decision without recomputing (which would read a moved clock).
     C2Mode m_lastC2Mode   = C2Mode::NEVER_SEEN;

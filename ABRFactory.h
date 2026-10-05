@@ -53,11 +53,23 @@ public slots:
 
     // A per-interface router-ABR proposal. Only the PRIMARY interface's
     // proposal is effective; the others are logged as spare (future failover).
+    // The effective one is relayed on routerAbrEffectiveBitrate, which is what
+    // drives the camera — no longer log-only.
     void handleRouterAbrBitrate(const QString &iface, unsigned int kbps);
+
+    // The camera's report of what it actually achieved for a request. Routed to
+    // the PRIMARY interface's instance (it owns the camera). Closes the loop.
+    void handleCameraReportedBitrate(int achievedKbps);
 
 signals:
     void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);
     void onC2TelemetryData(const QVector<SRTPeerStat> &peers);
+
+    // The bitrate the PRIMARY interface wants, for the camera. Distinct from
+    // routerAbrDecision (which carries EVERY instance's decision for the debug
+    // channel): this carries only the effective one, so a consumer driving the
+    // camera cannot act on a spare interface's proposal.
+    void routerAbrEffectiveBitrate(int kbps);
 
     // Relay of a per-interface router-ABR decision (XBAdaptiveBitrateStreaming::
     // decisionMade), so a consumer can tap the decision without holding a

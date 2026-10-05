@@ -57,10 +57,13 @@ void XBQoSService::setupConnections()
     m_cameraKeepAliveTimer = new QTimer(this);
     m_cameraKeepAliveTimer->setInterval(3000);
     connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this]() {
-        const bool isTrafficActive = (m_abrFactory && m_abrFactory->srtAbr())
-                                         ? m_abrFactory->srtAbr()->isTrafficActive()
-                                         : true;
-        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && isTrafficActive) {
+        // The timer's own running state IS the traffic gate: handleBitrateChange
+        // starts it on a live bitrate and stops it on PAUSE. It used to also
+        // read srtAbr()->isTrafficActive(), but the SRT engine is inert
+        // (m_isTrafficIdle defaults true and only a 12345 QoS packet clears it),
+        // so that read was permanently false and silently disabled the
+        // keep-alive — the router now owns the camera, so drop it.
+        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
             dispatchToCameraServer(static_cast<int>(m_currentBitrate));
         }
     });
@@ -88,8 +91,20 @@ void XBQoSService::setupConnections()
         }
     };
 
+    // ── Who owns the camera ──────────────────────────────────────────────
+    // The per-interface ROUTER ABR drives the camera; the SRT engine is inert
+    // (its 12345 path is unused) and must not overwrite the router's decision.
+    // A flag, not a deletion: re-enabling SRT is flipping this one line, and the
+    // SRT object stays alive as an observer (its signals still fire and log).
+    constexpr bool ROUTER_ABR_OWNS_CAMERA = true;
+
     if (m_abrFactory && m_abrFactory->srtAbr()) {
-        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::bitrateChanged, this, handleBitrateChange);
+        if (!ROUTER_ABR_OWNS_CAMERA) {
+            connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::bitrateChanged, this, handleBitrateChange);
+        } else {
+            qInfo().noquote() << "[QoS Engine] ROUTER_ABR_OWNS_CAMERA: SRT engine's "
+                                 "bitrateChanged is NOT wired to the camera.";
+        }
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::trafficActiveChanged, this, [this](bool isActive) {
             if (isActive) {
                 if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
@@ -121,6 +136,13 @@ void XBQoSService::setupConnections()
     }
 
     if (m_abrFactory) {
+        // ── Router ABR → camera ──────────────────────────────────────────
+        // The per-interface router ABR's EFFECTIVE (primary) proposal is the
+        // one thing that drives the camera. It replaces the SRT bitrateChanged
+        // connect above (guarded off by ROUTER_ABR_OWNS_CAMERA). Carries only
+        // the primary's number — a spare interface's proposal never lands here.
+        connect(m_abrFactory, &ABRFactory::routerAbrEffectiveBitrate, this, handleBitrateChange);
+
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
 
@@ -157,7 +179,7 @@ void XBQoSService::setupConnections()
         });
     }
 
-    if (m_cameraControl && m_abrFactory && m_abrFactory->srtAbr()) {
+    if (m_cameraControl && m_abrFactory) {
         connect(m_cameraControl, &CameraControl::bitrateReported, this, [this](int requestedKbps, int achievedKbps) {
             m_cameraNeedsSync = false;
             if (achievedKbps > 0) {
@@ -165,7 +187,12 @@ void XBQoSService::setupConnections()
                     qWarning().noquote() << QString("[CameraControl] Note: Camera reported bitrate %1 kbps (differs from target %2 kbps)")
                                                 .arg(achievedKbps).arg(requestedKbps);
                 }
-                m_abrFactory->srtAbr()->handleCameraReportedBitrate(achievedKbps);
+                // Closed loop: the camera's achieved value feeds the PRIMARY
+                // interface's instance (the one that owns the camera), so its
+                // collapse verdict gates the next INCREASE. Routed through the
+                // factory, not srtAbr(): the SRT engine no longer drives the
+                // camera, so its collapse verdict would be meaningless.
+                m_abrFactory->handleCameraReportedBitrate(achievedKbps);
             }
         });
         connect(m_cameraControl, &CameraControl::bitrateRejected, this, [this](int requestedKbps, const QString &reason) {

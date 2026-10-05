@@ -29,6 +29,13 @@ XBAdaptiveBitrateStreaming::XBAdaptiveBitrateStreaming(const QString &iface,
 void XBAdaptiveBitrateStreaming::setMaxAbrBitrate(unsigned int newMaxAbrBitrate)
 {
     m_maxAbr = static_cast<int>(newMaxAbrBitrate);
+    // A ceiling below the CURRENT bitrate would otherwise be violated on every
+    // HOLD: the INCREASE gate requires `bitrate < maxAbr`, so a bitrate already
+    // above the ceiling can never be raised OR lowered by the ramp — HOLD
+    // returns it unchanged. Pull the current value down to the new ceiling now.
+    // (ABR_INITIAL_BITRATE_KBPS is 250, so this only bites when a caller sets a
+    // ceiling under the current ask; with the default 3000 it is a no-op.)
+    if (m_bitrate > m_maxAbr) m_bitrate = m_maxAbr;
 }
 
 void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
@@ -36,9 +43,16 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     // Internal state reset only — NOT a socket reset. Mirrors the base
     // contract; the socket-reset path is a separate, unimplemented signal.
     m_bitrate = (bitrateKbps > 0) ? bitrateKbps : ABR_INITIAL_BITRATE_KBPS;
+    // Same ceiling rule as setMaxAbrBitrate: a restore must not land above the
+    // configured max, or HOLD would keep it there.
+    if (m_bitrate > m_maxAbr) m_bitrate = m_maxAbr;
     m_notUsableTicks = 0;
     m_c2LossTicks = 0;
     m_qdelayHighTicks = 0;
+    // The camera's last report belongs to the OLD stream; a reset starts a new
+    // one, so a stale achieved value must not survive it.
+    m_lastAchievedKbps = 0;
+    m_cameraCollapsed = false;
     m_lastEmitted = -1;
     m_lastChangeMs = m_clock.elapsed();
     m_observing = false;
@@ -71,6 +85,28 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
         m_lastC2Ms = m_clock.elapsed();
         m_c2EverSeen = true;
     }
+}
+
+void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
+{
+    // A non-positive report means the camera said nothing (or reported 0 for an
+    // unpaused stream) — it is NOT evidence of collapse. 0/requested would read
+    // as ratio 0 < 0.25 and wrongly block the ramp, so ignore it entirely and
+    // leave the previous verdict standing. Mirrors SRT's guard
+    // (SRTAdaptiveBitrateStreaming.cpp:402).
+    if (achievedKbps <= 0) return;
+    if (m_bitrate <= 0) return;
+
+    m_lastAchievedKbps = achievedKbps;
+    const double ratio = static_cast<double>(achievedKbps) / static_cast<double>(m_bitrate);
+    const bool collapsed = (ratio < ABR_CAMERA_COLLAPSE_RATIO);
+    if (collapsed != m_cameraCollapsed) {
+        qWarning().nospace() << "[ABR][" << m_iface << "] camera "
+                             << (collapsed ? "COLLAPSED" : "recovered")
+                             << " (asked=" << m_bitrate << "kbps achieved=" << achievedKbps
+                             << "kbps ratio=" << QString::number(ratio, 'f', 2) << ")";
+    }
+    m_cameraCollapsed = collapsed;
 }
 
 bool XBAdaptiveBitrateStreaming::hasFreshVideoRow() const
@@ -154,6 +190,7 @@ AbrDecision XBAdaptiveBitrateStreaming::processQoS()
     const AbrDecision d = decideBitrate(m_video, m_c2, c2Mode, m_bitrate,
                                         ticksBefore, c2LossTicksBefore,
                                         qdelayHighTicksBefore,
+                                        m_cameraCollapsed,
                                         sinceLastChangeMs, m_maxAbr);
     const int b = d.kbps;
 

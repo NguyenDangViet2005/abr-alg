@@ -17,7 +17,11 @@
 #define CAMERA_ADAPT_BITRATE_PATH "/api/camera/adapt-bitrate"
 
 // ── ABR defaults ──
-#define ABR_DEFAULT_MAX_ABR_BITRATE           6000
+// Ceiling on any proposed bitrate. SHARED by both ABR engines — the SRT/camera
+// socket one (ABRFactory::startCameraSocketAbr) and the router-telemetry one
+// (ABRFactory::startRouterAbr) — so this single value caps both. Lowered
+// 6000 -> 3000 (2026-10-05) to keep the video below the link's real capacity.
+#define ABR_DEFAULT_MAX_ABR_BITRATE           3000
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
 #define VIDEO_DISABLED_BITRATE_KBPS           0
