@@ -55,11 +55,21 @@ int main(int argc, char *argv[])
     // XBQoSService has no config file of its own; this line IS the config.
     // Adding an interface is one entry here — nothing else changes.
     //
-    // isC2Configured=true mirrors the router's `c2Port=6974` (set = C2
-    // deployed). It is a GLOBAL fact — whether C2 exists at all — NOT "this
-    // link's C2 subflow is alive". That per-link state is what the C2 4-state
-    // machine (FRESH/STALE/NEVER_SEEN/DELAY_ONLY) resolves per tick.
-    qosService.setRouterAbrInterfaces({"eth1"}, /*isC2Configured=*/ true);
+    // isC2Configured mirrors the router's `c2Port=6974` (set = C2 deployed). It
+    // is a GLOBAL fact — whether C2 exists at all — NOT "this link's C2 subflow
+    // is alive". That per-link state is what the C2 4-state machine
+    // (FRESH/STALE/NEVER_SEEN/DELAY_ONLY) resolves per tick.
+    //
+    // TEMPORARY SWITCH: false takes C2 out of the ABR computation entirely.
+    // Nothing auto-detects the router's c2Port — this line IS the switch, and
+    // it was hardcoded true while the router (config.ini c2Port=6974) was
+    // already emitting 601 rows, so C2 was being read despite "not enabled".
+    // At false the 4-state machine resolves DELAY_ONLY every tick, so
+    // decideBitrate never reads the C2 row: no C2-loss pause, no C2 block-up,
+    // no C2 anything. The ramp is unaffected (DELAY_ONLY allows up, same as
+    // FRESH). Flip back to true once C2 is actually deployed.
+    constexpr bool C2_DEPLOYED = false;
+    qosService.setRouterAbrInterfaces({"eth1"}, C2_DEPLOYED);
 
     qosService.setQosDebug(cli.isSet(optQosDebug),
                            cli.value(optHost),
