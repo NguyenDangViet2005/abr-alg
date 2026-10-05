@@ -25,7 +25,10 @@
 // ── QoS debug channel (QoSDebugSender) — default OFF ──
 // Dashboard's UDP port (see qos-dashboard/server.js UDP_PORT). Disabled by
 // default so the rig pays no IO cost unless --qos-debug is passed.
-#define QOS_DEBUG_DEFAULT_HOST  "192.168.25.193"
+// This host is only the FALLBACK: --qos-debug-host (main.cpp) overrides it at
+// runtime. The dashboard binds 0.0.0.0:9999, so it answers on whichever box it
+// runs — the host here is where that box lives, not a dashboard-side setting.
+#define QOS_DEBUG_DEFAULT_HOST  "192.168.25.197"
 #define QOS_DEBUG_DEFAULT_PORT  9999
 #define QOS_DEBUG_DEFAULT_DIR   "/tmp/xbqos-debug"
 
