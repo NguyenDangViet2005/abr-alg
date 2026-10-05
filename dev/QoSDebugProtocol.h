@@ -80,7 +80,8 @@ enum QsAbrReason : quint8 {
     QS_R_C2_BLOCK_UP     = static_cast<quint8>(AbrReason::C2_BLOCK_UP),
     QS_R_SCORE_LOW       = static_cast<quint8>(AbrReason::SCORE_LOW),
     QS_R_STUCK_OBSERVE   = static_cast<quint8>(AbrReason::STUCK_OBSERVE),
-    QS_R_RESET_STUCK     = static_cast<quint8>(AbrReason::RESET_STUCK)
+    QS_R_RESET_STUCK     = static_cast<quint8>(AbrReason::RESET_STUCK),
+    QS_R_C2_LOSS_HIGH    = static_cast<quint8>(AbrReason::C2_LOSS_HIGH)
 };
 
 enum QsEventType : quint8 {

@@ -35,8 +35,9 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
 {
     // Internal state reset only — NOT a socket reset. Mirrors the base
     // contract; the socket-reset path is a separate, unimplemented signal.
-    m_bitrate = (bitrateKbps > 0) ? bitrateKbps : ABR_MIN_BITRATE_KBPS;
+    m_bitrate = (bitrateKbps > 0) ? bitrateKbps : ABR_INITIAL_BITRATE_KBPS;
     m_notUsableTicks = 0;
+    m_c2LossTicks = 0;
     m_lastEmitted = -1;
     m_lastChangeMs = m_clock.elapsed();
     m_observing = false;
@@ -133,8 +134,18 @@ AbrDecision XBAdaptiveBitrateStreaming::processQoS()
     const int ticksBefore = m_notUsableTicks;
     m_notUsableTicks = linkDown ? m_notUsableTicks + 1 : 0;
 
+    // Count consecutive FRESH-C2 ticks above the loss threshold, for the same
+    // reason as notUsableTicks above: the core must see "before this tick" so it
+    // can require N in a row. Only a FRESH C2 carries a live loss reading —
+    // STALE/NEVER_SEEN is "unknown", not "clean", so it clears the streak rather
+    // than letting it accrue on stale data.
+    const int c2LossTicksBefore = m_c2LossTicks;
+    const bool c2Lossy = (c2Mode == C2Mode::FRESH && m_c2.lossRatePct > ABR_C2_LOSS_PAUSE_PCT);
+    m_c2LossTicks = c2Lossy ? m_c2LossTicks + 1 : 0;
+
     const AbrDecision d = decideBitrate(m_video, m_c2, c2Mode, m_bitrate,
-                                        ticksBefore, sinceLastChangeMs, m_maxAbr);
+                                        ticksBefore, c2LossTicksBefore,
+                                        sinceLastChangeMs, m_maxAbr);
     const int b = d.kbps;
 
     // ── state update ─────────────────────────────────────────────────────
@@ -172,7 +183,7 @@ void XBAdaptiveBitrateStreaming::updateStuckObservation(double queuingDelayMs, i
     // than 1/ABR_OVERDRIVE_RATIO of the target (can't sustain ~62% of it).
     // Written as a multiply it was true in normal operation — load ≈ bitrate
     // is always < 1.6×bitrate — so the watch re-armed every tick forever.
-    const bool overdrive = (m_bitrate > ABR_MIN_BITRATE_KBPS)
+    const bool overdrive = (m_bitrate > ABR_OVERDRIVE_MIN_BITRATE_KBPS)
                            && (m_video.throughputKbps > 0.0)
                            && (m_video.throughputKbps < m_bitrate / ABR_OVERDRIVE_RATIO);
     if (!m_observing && overdrive) {

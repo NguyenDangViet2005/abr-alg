@@ -28,13 +28,8 @@ AbrDecision verdict(int kbps, AbrBranch branch, AbrReason reason)
 
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                           C2Mode c2Mode, int bitrate, int notUsableTicks,
-                          qint64 sinceLastChangeMs, int maxAbr)
+                          int c2LossTicks, qint64 sinceLastChangeMs, int maxAbr)
 {
-    // v1 reads only the C2 MODE (present/stale/never-seen/delay-only); the C2
-    // row's own metrics are not consumed yet. Kept as a parameter so the
-    // SELF/NETWORK severity split has its input the moment it is wired.
-    Q_UNUSED(c);
-
     // ── Hard gate: link is down ──────────────────────────────────────────
     // A down link is a definitive verdict, so it overrides everything. Hold
     // for the first two ticks (a single dropped UDP row must not stop video),
@@ -54,6 +49,25 @@ AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceSta
     // ── KTO gate: retransmit >= 2 pushed score to the floor ──────────────
     if (v.score <= 1.0)
         return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::KTO);
+
+    // ── C2-loss gate: the PATH is dropping, stop the video ───────────────
+    //
+    // The C2 row is the only loss signal that is not TCP-hidden: the video
+    // flow's own lossRatePct is masked by retransmits, so a genuinely lossy
+    // path shows up here and nowhere else. Above the threshold the path is
+    // dropping faster than any bitrate can cope with, so a halve (what the
+    // video's own loss branch below does) just sends less into the same lossy
+    // wire — pause instead.
+    //
+    // FRESH only. A STALE or NEVER_SEEN C2 is "unknown", and unknown loss must
+    // NOT pause the video: the same discipline as c2AllowsUp, where a missing
+    // reference blocks the ramp but never the decrease. c2LossTicks is the
+    // debounce (the caller counts consecutive lossy ticks), so one noisy sample
+    // cannot stop the stream; a success on any tick clears it.
+    if (c2Mode == C2Mode::FRESH
+        && c.lossRatePct > ABR_C2_LOSS_PAUSE_PCT
+        && c2LossTicks + 1 >= ABR_C2_LOSS_PAUSE_TICKS)
+        return verdict(QOS_PAUSE, AbrBranch::PAUSE, AbrReason::C2_LOSS_HIGH);
 
     // ── DECREASE (checked before INCREASE) ───────────────────────────────
     // A tick raises OR lowers, never both — the if/elif order below is what

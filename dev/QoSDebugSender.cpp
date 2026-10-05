@@ -53,6 +53,7 @@ const char *reasonText(int r)
     case QS_R_SCORE_LOW: return "SCORE_LOW";
     case QS_R_STUCK_OBSERVE: return "STUCK_OBSERVE";
     case QS_R_RESET_STUCK: return "RESET_STUCK";
+    case QS_R_C2_LOSS_HIGH: return "C2_LOSS_HIGH";
     default: return "?";
     }
 }

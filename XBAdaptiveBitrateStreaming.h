@@ -84,8 +84,12 @@ private:
     bool m_staleWarned  = false;
     bool m_c2Warned     = false;
 
-    int  m_bitrate        = ABR_MIN_BITRATE_KBPS;
+    int  m_bitrate        = ABR_INITIAL_BITRATE_KBPS;
     int  m_notUsableTicks = 0;
+    // Consecutive FRESH-C2 ticks whose loss is above ABR_C2_LOSS_PAUSE_PCT.
+    // Reset by any non-lossy tick, by a non-FRESH C2, and by reset(). Fed to
+    // decideBitrate so the pause needs ABR_C2_LOSS_PAUSE_TICKS in a row.
+    int  m_c2LossTicks    = 0;
     int  m_lastEmitted    = -1;       // -1 = nothing emitted yet
     // C2 mode resolved by the last processQoS(), so handleRouterTick can publish
     // it with the decision without recomputing (which would read a moved clock).
