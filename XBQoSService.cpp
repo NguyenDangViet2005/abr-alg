@@ -60,9 +60,7 @@ void XBQoSService::setupConnections()
             return;
         }
 
-        VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
-        qInfo().noquote() << QString(">>> [BITRATE OUTPUT] ===> [%1 kbps] (%2) dispatched to Camera <<<")
-                                 .arg(newBitrate).arg(profile.name);
+        m_resolutionAdapter.updateBitrate(newBitrate);
         dispatchToCameraServer(static_cast<int>(newBitrate));
 
         if (m_cameraKeepAliveTimer) {
