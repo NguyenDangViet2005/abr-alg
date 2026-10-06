@@ -235,16 +235,19 @@ AbrDecision XBAdaptiveBitrateStreaming::processQoS()
         // from records that level as the wall. The guard keeps a CHAIN of cuts
         // from overwriting the true top with each lower step (matches xbfirm
         // setNewBitrate: only record when the previous action was not a decrease).
-        // An INCREASE past the recorded level means we climbed back over the wall
-        // — clear it, the link recovered.
+        //
+        // The ONLY exit is the dwell expiry in processQoS (or reset()). There is
+        // deliberately no "climb past the level → clear" branch: the cap holds
+        // every ramp to ABR_CEILING_BACKOFF × the recorded level, so an INCREASE
+        // can never reach the level itself — such a test is dead code. Recovery
+        // is time-based: the wall is remembered for ABR_CEILING_DWELL_MS, then
+        // forgotten and the ramp is free to find the (possibly moved) wall again.
         if (b < from) {
             const bool wasBackingOff = (m_ceilingKbps > 0) && (from <= m_ceilingKbps);
             if (!wasBackingOff) {
                 m_ceilingKbps = from;
                 m_ceilingSinceMs = m_clock.elapsed();
             }
-        } else if (m_ceilingKbps > 0 && b > m_ceilingKbps) {
-            m_ceilingKbps = 0;
         }
 
         m_lastChangeMs = m_clock.elapsed();

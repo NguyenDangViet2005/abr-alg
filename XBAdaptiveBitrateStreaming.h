@@ -113,8 +113,9 @@ private:
     // so the wall is invisible until hit; this remembers where it was and caps
     // the ramp at ABR_CEILING_BACKOFF × it for ABR_CEILING_DWELL_MS. Recorded
     // only when we were NOT already backing off, so a chain of cuts keeps the
-    // TOP (matches xbfirm setNewBitrate). Cleared when the ramp climbs past the
-    // recorded level (recovered) or reset(). See ABRDecision.h for the rationale.
+    // TOP (matches xbfirm setNewBitrate). Cleared by dwell expiry (60s) or
+    // reset(); the cap keeps every ramp BELOW the recorded level, so there is no
+    // "climb past it" exit. See ABRDecision.h for the rationale.
     int    m_ceilingKbps    = 0;
     qint64 m_ceilingSinceMs = 0;
 
