@@ -70,8 +70,10 @@ enum QsAbrReason : quint8 {
     QS_R_NONE            = static_cast<quint8>(AbrReason::NONE),
     QS_R_KTO             = static_cast<quint8>(AbrReason::KTO),
     QS_R_LOSS_HIGH       = static_cast<quint8>(AbrReason::LOSS_HIGH),
-    QS_R_QDELAY_400      = static_cast<quint8>(AbrReason::QDELAY_400),
-    QS_R_QDELAY_5        = static_cast<quint8>(AbrReason::QDELAY_5),
+    // 3 and 4 are reserved: were QDELAY_400 / QDELAY_5, retired 2026-10-06. The
+    // numbers stay so the wire enum does not shift (dashboard decoder).
+    QS_R_QDELAY_400_RESERVED = 3,
+    QS_R_QDELAY_5_RESERVED   = 4,
     QS_R_TREND_RAPID_DEC = static_cast<quint8>(AbrReason::TREND_RAPID_DEC),
     QS_R_LINK_DEAD       = static_cast<quint8>(AbrReason::LINK_DEAD),
     QS_R_NOT_USABLE      = static_cast<quint8>(AbrReason::NOT_USABLE),
@@ -81,7 +83,9 @@ enum QsAbrReason : quint8 {
     QS_R_SCORE_LOW       = static_cast<quint8>(AbrReason::SCORE_LOW),
     QS_R_STUCK_OBSERVE   = static_cast<quint8>(AbrReason::STUCK_OBSERVE),
     QS_R_RESET_STUCK     = static_cast<quint8>(AbrReason::RESET_STUCK),
-    QS_R_C2_LOSS_HIGH    = static_cast<quint8>(AbrReason::C2_LOSS_HIGH)
+    QS_R_C2_LOSS_HIGH    = static_cast<quint8>(AbrReason::C2_LOSS_HIGH),
+    // HOLD reason: score >= ABR_SCORE_UP_MIN but the high streak is still short.
+    QS_R_SCORE_HIGH      = static_cast<quint8>(AbrReason::SCORE_HIGH)
 };
 
 enum QsEventType : quint8 {

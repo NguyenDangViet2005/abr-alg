@@ -27,8 +27,7 @@ AbrDecision verdict(int kbps, AbrBranch branch, AbrReason reason)
 } // namespace
 
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
-                          C2Mode c2Mode, int bitrate, int notUsableTicks,
-                          int c2LossTicks, int qdelayHighTicks,
+                          C2Mode c2Mode, int bitrate, const AbrCounters &cnt,
                           bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr)
 {
     // ── Hard gate: link is down ──────────────────────────────────────────
@@ -36,7 +35,7 @@ AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceSta
     // for the first two ticks (a single dropped UDP row must not stop video),
     // then pause.
     if (!v.isConnected || !v.isMptcp) {
-        if (notUsableTicks + 1 >= ABR_PAUSE_AFTER_TICKS)
+        if (cnt.notUsableTicks + 1 >= ABR_PAUSE_AFTER_TICKS)
             return verdict(QOS_PAUSE, AbrBranch::PAUSE, AbrReason::LINK_DEAD);
         return verdict((bitrate > ABR_MIN_BITRATE_KBPS) ? bitrate : ABR_MIN_BITRATE_KBPS,
                        AbrBranch::HOLD, AbrReason::LINK_DEAD);
@@ -67,63 +66,74 @@ AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceSta
     // cannot stop the stream; a success on any tick clears it.
     if (c2Mode == C2Mode::FRESH
         && c.lossRatePct > ABR_C2_LOSS_PAUSE_PCT
-        && c2LossTicks + 1 >= ABR_C2_LOSS_PAUSE_TICKS)
+        && cnt.c2LossTicks + 1 >= ABR_C2_LOSS_PAUSE_TICKS)
         return verdict(QOS_PAUSE, AbrBranch::PAUSE, AbrReason::C2_LOSS_HIGH);
 
     // ── DECREASE (checked before INCREASE) ───────────────────────────────
     // A tick raises OR lowers, never both — the if/elif order below is what
-    // guarantees that. Graduated, and the ORDER is the policy:
-    //   loss   -> halve (harsh: the pipe is already dropping)
-    //   qdelay -> ×0.8  (gentle: bufferbloat, delay-based backoff)
-    //   trend  -> ×0.85 (earliest brake, score already falling fast)
+    // guarantees that. The ORDER is the policy, and it is TWO-SPEED:
+    //   loss  -> halve  (FAST, harsh: the pipe is already dropping)
+    //   trend -> ×0.85  (FAST, earliest brake, score already falling fast)
+    //   score streak low -> ×0.80 (SLOW: 3 low samples in a row)
     //
-    // An earlier draft fused loss+qdelay into one compound branch whose inner
-    // term ALSO tested `qdelay > ABR_QDELAY_HIGH_MS`. Because the outer test
-    // used that same threshold, the compound fired for every qdelay>400 case
-    // and made the ×0.8 line UNREACHABLE — dead code that silently promoted a
-    // gentle backoff to a hard halve. The two loss tiers below both halve for
-    // now; they stay separate so a stronger response (drop-to-MIN) has a home
-    // when tuned. Report §7 lists qdelay>400 as ×0.8, which this restores.
+    // The fast branches come FIRST so a real loss/trend event is answered on the
+    // tick it happens and the slow branch is never reached on that same tick —
+    // no ÷2 stacked with ×0.80. The slow branch is the LOSS-FREE brake: a link
+    // decaying without dropping packets reaches the decision only here.
+    //
+    // There is NO separate queue/congestion branch. Score already carries the
+    // queue: computeRawScore charges wRTT*(rtt-minRtt) plus loss and jitter, so
+    // a filling buffer lowers score, which drags the streak low. A dedicated
+    // rtt-minRtt backoff used to sit here and was removed (2026-10-06) — it was
+    // the sibling of the router's Little's-Law queuingDelayMs, a feedback trap
+    // (its divisor is the throughput the ABR sets). One aggregate signal (score)
+    // decides, exactly as the pre-refactor routerModule did.
+    //
+    // The two loss tiers both halve for now; they stay separate so a stronger
+    // response (drop-to-MIN) has a home when tuned.
     if (v.lossRatePct > ABR_LOSS_SEVERE_PCT)
         return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::LOSS_HIGH);
     if (v.lossRatePct > ABR_LOSS_HIGH_PCT)
         return verdict(clampHalve(bitrate, maxAbr), AbrBranch::HALVE, AbrReason::LOSS_HIGH);
-    // Debounced like the link-down and C2-loss gates: one spike is noise (a
-    // Little's Law artifact at low throughput, a scheduling hiccup), three in a
-    // row is bufferbloat. The counter is counted by the caller so the core sees
-    // "before this tick"; the decrease is otherwise immediate, unlike the
-    // increase which waits out ABR_UP_COOLDOWN_MS.
-    if (v.queuingDelayMs > ABR_QDELAY_HIGH_MS
-        && qdelayHighTicks + 1 >= ABR_QDELAY_DEC_TICKS)
-        return verdict(clampMul(bitrate, ABR_QDELAY_GAIN, maxAbr), AbrBranch::MUL, AbrReason::QDELAY_400);
     if (v.trend == TREND_RAPID_DECREASE)
         return verdict(clampMul(bitrate, ABR_TREND_RAPID_DEC_GAIN, maxAbr),
                        AbrBranch::MUL, AbrReason::TREND_RAPID_DEC);
+    // Slow path: the last ABR_SCORE_STREAK_TICKS samples were all below
+    // ABR_SCORE_DEC_MIN. The streak is counted by the wrapper, so this is a pure
+    // test. Fires only when the two fast branches above did not.
+    if (cnt.scoreLowStreak >= ABR_SCORE_STREAK_TICKS)
+        return verdict(clampMul(bitrate, ABR_SCORE_DEC_GAIN, maxAbr),
+                       AbrBranch::MUL, AbrReason::SCORE_LOW);
 
     // ── INCREASE ─────────────────────────────────────────────────────────
     // Permitted only when C2 gives a reference (FRESH) or C2 is not deployed
     // at all (DELAY_ONLY). STALE/NEVER_SEEN withhold the reference and block
     // the ramp — never the decrease.
     const bool c2AllowsUp = (c2Mode == C2Mode::FRESH || c2Mode == C2Mode::DELAY_ONLY);
-    const bool linkClean  = v.queuingDelayMs < ABR_QDELAY_LOW_MS
-                            && (v.rttMs - v.minRttMs) < ABR_RTT_INFLATION_MS
-                            && v.jitterMs < ABR_JITTER_HIGH_MS;
+    // The ramp gate is the HIGH STREAK, not a single sample (2026-10-06): the
+    // last ABR_SCORE_STREAK_TICKS scores were all >= ABR_SCORE_UP_MIN. This
+    // replaces both the single-sample `score >= ABR_SCORE_UP_MIN` test and the
+    // `trend <= TREND_STABLE` gate — the streak IS our trend. Score remains the
+    // SINGLE quality signal (computeRawScore already charges wRTT*(rtt-minRtt),
+    // loss and jitter), so a filling queue, dropping packets or growing jitter
+    // all drag the streak low and hold the ramp shut.
     if (c2AllowsUp
-        && v.score >= ABR_SCORE_UP_MIN
-        && v.trend <= TREND_STABLE          // improving/stable, NOT decreasing
+        && cnt.scoreHighStreak >= ABR_SCORE_STREAK_TICKS
         && bitrate < maxAbr
-        && linkClean
         && !cameraCollapsed                 // camera not delivering what we ask
         && sinceLastChangeMs >= ABR_UP_COOLDOWN_MS)
         return verdict(clampAdd(bitrate, ABR_UP_STEP_KBPS, maxAbr), AbrBranch::UP, AbrReason::COOLDOWN_OK);
 
     // HOLD — a positive value, distinct from NOT_AVAILABLE. A hold is the
     // steady state, so its reason is NONE unless a gate definitively withheld
-    // the ramp: a withheld C2 reference (STALE) or a score below the ramp floor
-    // (SCORE_LOW). Naming any other gate here would be a guess the wire enum
-    // does not back, so it stays NONE.
+    // the ramp: a withheld C2 reference (STALE), a score below the ramp floor
+    // (SCORE_LOW), or a score AT/above the floor whose streak has not yet
+    // reached the required length (SCORE_HIGH). Naming any other gate here
+    // would be a guess the wire enum does not back, so it stays NONE.
     AbrReason holdReason = AbrReason::NONE;
     if (!c2AllowsUp && c2Mode == C2Mode::STALE) holdReason = AbrReason::STALE;
     else if (c2AllowsUp && v.score < ABR_SCORE_UP_MIN) holdReason = AbrReason::SCORE_LOW;
+    else if (c2AllowsUp && cnt.scoreHighStreak < ABR_SCORE_STREAK_TICKS)
+        holdReason = AbrReason::SCORE_HIGH;
     return verdict(bitrate, AbrBranch::HOLD, holdReason);
 }

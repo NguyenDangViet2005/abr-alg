@@ -13,6 +13,15 @@
 // The router sends FACTS (quality, load, flags); this decides a bitrate. Note
 // `throughputKbps` is LOAD (bytes actually sent), NOT capacity — it must never
 // be used as a ceiling, or the algorithm deadlocks at its own send rate.
+//
+// SCORE is the one aggregate quality signal (2026-10-06). The router's
+// computeRawScore already charges wRTT*(rtt-minRtt), loss and jitter, so a
+// filling queue, dropping packets or growing jitter all lower it. This core
+// reads score for the ramp and for the KTO floor, and reads raw loss/trend only
+// for the fast decrease. The router's `queuingDelayMs` is deliberately NOT read
+// anywhere: it is Little's Law (backlog / throughput) and its divisor is the
+// throughput this very controller sets, so it feeds back on itself — it drove
+// the bitrate to the floor while RTT stayed flat (2026-10-05 and -06).
 
 // Which C2 reference state applies to this tick. Critical: "C2 did not arrive
 // this tick" is NOT "C2 is clean" — conflating them labels network loss as
@@ -57,8 +66,15 @@ enum class AbrReason : int {
     NONE            = 0,
     KTO             = 1,
     LOSS_HIGH       = 2,
-    QDELAY_400      = 3,
-    QDELAY_5        = 4,
+    // 3 and 4 are RETIRED (were QDELAY_400 / QDELAY_5). The router's
+    // queuingDelayMs is Little's Law and its divisor is the ABR's own output, so
+    // it fed back on itself (2026-10-06: drove the bitrate to the 10 kbps floor
+    // while rtt-minRtt stayed flat at 1-15ms). The queue backoff is gone; the
+    // queue now reaches the decision only through score (its rtt-minRtt term).
+    // The numbers stay reserved so the wire enum does not shift and the
+    // dashboard's decoder keeps working.
+    QDELAY_400_RESERVED = 3,
+    QDELAY_5_RESERVED   = 4,
     TREND_RAPID_DEC = 5,
     LINK_DEAD       = 6,
     NOT_USABLE      = 7,
@@ -68,7 +84,12 @@ enum class AbrReason : int {
     SCORE_LOW       = 11,
     STUCK_OBSERVE   = 12,
     RESET_STUCK     = 13,
-    C2_LOSS_HIGH    = 14
+    C2_LOSS_HIGH    = 14,
+    // HOLD reason: score is at/above ABR_SCORE_UP_MIN but the high streak is
+    // still below ABR_SCORE_STREAK_TICKS, so the ramp is withheld by the streak,
+    // not by the score. (A successful INCREASE keeps COOLDOWN_OK.) Appended at
+    // the tail so no existing wire number shifts.
+    SCORE_HIGH      = 15
 };
 
 // What decideBitrate returns: the bitrate AND the branch/reason that produced
@@ -91,17 +112,39 @@ constexpr double ABR_LOSS_SEVERE_PCT  = 5.0;
 // ABR_LOSS_SEVERE_PCT (5.0): a video self-report halving at 5% is cheap to
 // reverse, but pausing the video is disruptive, so C2 must be clearly bad first.
 constexpr double ABR_C2_LOSS_PAUSE_PCT = 10.0;
-constexpr double ABR_QDELAY_HIGH_MS   = 400.0;
-constexpr double ABR_QDELAY_LOW_MS    = 100.0;
-constexpr double ABR_RTT_INFLATION_MS = 50.0;
-constexpr double ABR_JITTER_HIGH_MS   = 15.0;
-// Minimum VIDEO score to permit INCREASE. Lowered 85 -> 65 (2026-10-05): a
-// healthy link carrying a standing ~50ms queue sits at score ~75 (the RTT term
-// wRTT*(rtt-minRtt) alone costs ~25), so 85 held the ramp shut on links that
-// were merely a little loaded, not broken. The 65 floor still blocks the ramp
-// on a genuinely degraded link (score < 65 = loss/RTT penalties compounding)
-// while letting a stable, lightly-queued link climb.
-constexpr double ABR_SCORE_UP_MIN     = 65.0;
+// ── Score-history two-speed control (2026-10-06) ────────────────────────────
+//
+// The decision reads the HISTORY of the last few scores, not one sample. Two
+// thresholds with a deadband between them, and a streak length, so a single
+// noisy tick can neither ramp nor back off:
+//
+//   ABR_SCORE_DEC_MIN : a sample at/below this is "low"
+//   ABR_SCORE_UP_MIN  : a sample at/above this is "high"
+//   [DEC_MIN, UP_MIN) : deadband — clears both streaks, holds
+//
+//   ABR_SCORE_STREAK_TICKS consecutive low  -> slow DECREASE (×ABR_SCORE_DEC_GAIN)
+//   ABR_SCORE_STREAK_TICKS consecutive high -> slow INCREASE (+ABR_UP_STEP_KBPS)
+//
+// Two thresholds (not one) create a real deadband, which is what stops the
+// bang-bang oscillation a single threshold causes around the boundary. The
+// streak is counted by the WRAPPER (this core stays pure); the core only tests
+// `streak >= ABR_SCORE_STREAK_TICKS`.
+//
+// The slow path is the LOSS-FREE degradation brake. Raw loss/trend stay the FAST
+// path (one tick) and are checked BEFORE the slow path, so a real loss event is
+// answered immediately and never also fires the slow decrease on the same tick.
+//
+// ABR_SCORE_UP_MIN is 70 (was 65, 2026-10-05). The raise tightens the ramp: a
+// healthy link carrying a standing ~50ms queue sits at score ~75, so it now
+// needs 3 consecutive samples in [70,100] to climb. If field logs show a stalled
+// ramp, this is the first lever (70 -> 65) — the streak length the second.
+constexpr double ABR_SCORE_DEC_MIN    = 55.0;
+constexpr double ABR_SCORE_UP_MIN     = 70.0;
+constexpr int    ABR_SCORE_STREAK_TICKS = 3;
+// ×0.80 is the xbfirm precedent (XBAdaptiveBitrateStreaming::rttHigh, the
+// rtt-minRtt queue branch). Gentler than the loss halve, firmer than the trend
+// ×0.85 — a slow, aggregate signal warrants a slow, moderate cut.
+constexpr double ABR_SCORE_DEC_GAIN   = 0.80;
 constexpr int    ABR_UP_STEP_KBPS     = 100;
 constexpr qint64 ABR_UP_COOLDOWN_MS   = 2000;
 constexpr int    ABR_MIN_BITRATE_KBPS = 10;
@@ -127,14 +170,6 @@ constexpr int    ABR_PAUSE_AFTER_TICKS = 3;
 // path — i.e. it waits out ABR_UP_COOLDOWN_MS from the pause, exactly as a
 // link-dead pause does. It does not jump straight back to the pre-pause rate.
 constexpr int    ABR_C2_LOSS_PAUSE_TICKS = 3;
-// Consecutive qdelay>ABR_QDELAY_HIGH_MS ticks before the ×0.8 backoff fires.
-// The decrease path was UNDEBOUNCED: a single spike halved the bitrate
-// instantly while the increase path waits out ABR_UP_COOLDOWN_MS (2000ms). That
-// asymmetry let one noisy sample ratchet the bitrate down 250->200->160->128.
-// Three consecutive ticks is the same cadence as the link-down and C2-loss
-// pauses, so every "act on the wire" gate settles alike; a success clears it.
-constexpr int    ABR_QDELAY_DEC_TICKS   = 3;
-constexpr double ABR_QDELAY_GAIN        = 0.8;
 constexpr double ABR_TREND_RAPID_DEC_GAIN = 0.85;
 
 // Camera-collapse gate. When the camera reports an achieved bitrate far below
@@ -161,14 +196,26 @@ constexpr qint64 ABR_RESET_COOLDOWN_MS  = 30000; // min gap between reset emits
 // copy: XBQoSService is a separate binary and must not include across repos.
 //
 // ORDER MATTERS. RAPID_INCREASE is 0 and RAPID_DECREASE is 4, so "improving"
-// is a LOWER value. The increase gate therefore tests `trend <= TREND_STABLE`
-// (rapid-increase/increase/stable), NOT `>=`. The report's `>=` was a bug: it
-// admitted DECREASE and RAPID_DECREASE into the ramp-up condition.
+// is a LOWER value. The trend is now read ONLY by the fast decrease branch
+// (`trend == TREND_RAPID_DECREASE`); the ramp gate that used to test
+// `trend <= TREND_STABLE` was removed (2026-10-06) — the score streak is our
+// trend now.
 constexpr int TREND_RAPID_INCREASE = 0;
 constexpr int TREND_INCREASE       = 1;
 constexpr int TREND_STABLE         = 2;
 constexpr int TREND_DECREASE       = 3;
 constexpr int TREND_RAPID_DECREASE = 4;
+
+// The per-tick streak counters the core reads. Grouped in a struct — four
+// same-typed ints adjacent in an argument list can be silently transposed at a
+// call site and the compiler would not complain. Named fields make the wiring
+// self-checking.
+struct AbrCounters {
+    int notUsableTicks  = 0;   // consecutive ticks the link has been down BEFORE this tick
+    int c2LossTicks     = 0;   // consecutive C2-lossy ticks BEFORE this tick (FRESH only)
+    int scoreLowStreak  = 0;   // consecutive score < ABR_SCORE_DEC_MIN samples
+    int scoreHighStreak = 0;   // consecutive score >= ABR_SCORE_UP_MIN samples
+};
 
 // decideBitrate — the whole algorithm, pure.
 //
@@ -178,11 +225,7 @@ constexpr int TREND_RAPID_DECREASE = 4;
 //                    c2Mode == FRESH, else the row is stale/absent and ignored.
 //   c2Mode         : resolved reference state (see C2Mode)
 //   bitrate        : current bitrate BEFORE this tick
-//   notUsableTicks : consecutive ticks the link has been down BEFORE this tick
-//   c2LossTicks    : consecutive C2-lossy ticks BEFORE this tick (FRESH only)
-//   qdelayHighTicks: consecutive ticks v.queuingDelayMs > ABR_QDELAY_HIGH_MS
-//                    BEFORE this tick. Debounces the ×0.8 backoff so one spike
-//                    cannot ratchet the bitrate down (see ABR_QDELAY_DEC_TICKS).
+//   cnt            : per-tick streak counters (see AbrCounters)
 //   cameraCollapsed: the camera's last reported achieved bitrate is far below
 //                    what we asked (achieved/requested < ABR_CAMERA_COLLAPSE_RATIO).
 //                    Blocks INCREASE only — a DECREASE must still pass, since
@@ -194,8 +237,7 @@ constexpr int TREND_RAPID_DECREASE = 4;
 // it. Only the kbps field is the "answer"; branch/reason exist so the QS debug
 // channel can publish the decision beside its inputs.
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
-                          C2Mode c2Mode, int bitrate, int notUsableTicks,
-                          int c2LossTicks, int qdelayHighTicks,
+                          C2Mode c2Mode, int bitrate, const AbrCounters &cnt,
                           bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr);
 
 #endif // ABRDECISION_H

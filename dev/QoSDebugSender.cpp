@@ -42,8 +42,8 @@ const char *reasonText(int r)
     case QS_R_NONE: return "NONE";
     case QS_R_KTO: return "KTO";
     case QS_R_LOSS_HIGH: return "LOSS_HIGH";
-    case QS_R_QDELAY_400: return "QDELAY_400";
-    case QS_R_QDELAY_5: return "QDELAY_5";
+    case QS_R_QDELAY_400_RESERVED: return "RESERVED_3";
+    case QS_R_QDELAY_5_RESERVED: return "RESERVED_4";
     case QS_R_TREND_RAPID_DEC: return "TREND_RAPID_DEC";
     case QS_R_LINK_DEAD: return "LINK_DEAD";
     case QS_R_NOT_USABLE: return "NOT_USABLE";
@@ -54,6 +54,7 @@ const char *reasonText(int r)
     case QS_R_STUCK_OBSERVE: return "STUCK_OBSERVE";
     case QS_R_RESET_STUCK: return "RESET_STUCK";
     case QS_R_C2_LOSS_HIGH: return "C2_LOSS_HIGH";
+    case QS_R_SCORE_HIGH: return "SCORE_HIGH";
     default: return "?";
     }
 }

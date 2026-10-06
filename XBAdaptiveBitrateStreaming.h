@@ -96,12 +96,15 @@ private:
     // Reset by any non-lossy tick, by a non-FRESH C2, and by reset(). Fed to
     // decideBitrate so the pause needs ABR_C2_LOSS_PAUSE_TICKS in a row.
     int  m_c2LossTicks    = 0;
-    // Consecutive ticks the VIDEO row's queuingDelayMs exceeded
-    // ABR_QDELAY_HIGH_MS. Reset by any tick under the threshold and by reset().
-    // Fed to decideBitrate so the ×0.8 backoff needs ABR_QDELAY_DEC_TICKS in a
-    // row — the decrease path had no debounce and a single spike could ratchet
-    // the bitrate down.
-    int  m_qdelayHighTicks = 0;
+    // Score-history streaks (2026-10-06). Counted ONLY on a fresh-video tick —
+    // the freshness guard early-returns before this, so a skipped tick freezes
+    // them. A sample below ABR_SCORE_DEC_MIN bumps m_scoreLowStreak and clears
+    // the high one (and vice-versa); a deadband sample clears both. BOTH are
+    // cleared whenever the bitrate changes, so a slow score backoff needs 3 NEW
+    // low samples before it can fire again, and a fast loss-halve cannot be
+    // followed by a slow x0.80 on the same event.
+    int  m_scoreLowStreak  = 0;
+    int  m_scoreHighStreak = 0;
     int  m_lastEmitted    = -1;       // -1 = nothing emitted yet
 
     // ── Camera closed loop ──
