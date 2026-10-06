@@ -28,7 +28,8 @@ AbrDecision verdict(int kbps, AbrBranch branch, AbrReason reason)
 
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                           C2Mode c2Mode, int bitrate, const AbrCounters &cnt,
-                          bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr)
+                          bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr,
+                          int rampCapKbps)
 {
     // ── Hard gate: link is down ──────────────────────────────────────────
     // A down link is a definitive verdict, so it overrides everything. Hold
@@ -117,23 +118,34 @@ AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceSta
     // SINGLE quality signal (computeRawScore already charges wRTT*(rtt-minRtt),
     // loss and jitter), so a filling queue, dropping packets or growing jitter
     // all drag the streak low and hold the ramp shut.
+    //
+    // rampCapKbps is the ceiling memory (see ABR_CEILING_*). It gates the ramp
+    // ONLY — a decrease above is never capped, because lowering is exactly what a
+    // link at its wall needs. `<= 0` means no memory is live. The test is on the
+    // PROPOSED step, so a ramp PARKS at the cap (equal is allowed) instead of
+    // overshooting it by one step.
     if (c2AllowsUp
         && cnt.scoreHighStreak >= ABR_SCORE_STREAK_TICKS
         && bitrate < maxAbr
         && !cameraCollapsed                 // camera not delivering what we ask
-        && sinceLastChangeMs >= ABR_UP_COOLDOWN_MS)
+        && sinceLastChangeMs >= ABR_UP_COOLDOWN_MS
+        && (rampCapKbps <= 0 || bitrate + ABR_UP_STEP_KBPS <= rampCapKbps))
         return verdict(clampAdd(bitrate, ABR_UP_STEP_KBPS, maxAbr), AbrBranch::UP, AbrReason::COOLDOWN_OK);
 
     // HOLD — a positive value, distinct from NOT_AVAILABLE. A hold is the
     // steady state, so its reason is NONE unless a gate definitively withheld
     // the ramp: a withheld C2 reference (STALE), a score below the ramp floor
-    // (SCORE_LOW), or a score AT/above the floor whose streak has not yet
-    // reached the required length (SCORE_HIGH). Naming any other gate here
-    // would be a guess the wire enum does not back, so it stays NONE.
+    // (SCORE_LOW), a score AT/above the floor whose streak has not yet reached
+    // the required length (SCORE_HIGH), or the ceiling cap (CEILING). Naming any
+    // other gate here would be a guess the wire enum does not back, so it stays
+    // NONE. The CEILING test mirrors the ramp gate exactly: it is only reached
+    // when everything else would have permitted an INCREASE.
     AbrReason holdReason = AbrReason::NONE;
     if (!c2AllowsUp && c2Mode == C2Mode::STALE) holdReason = AbrReason::STALE;
     else if (c2AllowsUp && v.score < ABR_SCORE_UP_MIN) holdReason = AbrReason::SCORE_LOW;
     else if (c2AllowsUp && cnt.scoreHighStreak < ABR_SCORE_STREAK_TICKS)
         holdReason = AbrReason::SCORE_HIGH;
+    else if (c2AllowsUp && rampCapKbps > 0 && bitrate + ABR_UP_STEP_KBPS > rampCapKbps)
+        holdReason = AbrReason::CEILING;
     return verdict(bitrate, AbrBranch::HOLD, holdReason);
 }

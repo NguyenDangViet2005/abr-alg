@@ -89,7 +89,11 @@ enum class AbrReason : int {
     // still below ABR_SCORE_STREAK_TICKS, so the ramp is withheld by the streak,
     // not by the score. (A successful INCREASE keeps COOLDOWN_OK.) Appended at
     // the tail so no existing wire number shifts.
-    SCORE_HIGH      = 15
+    SCORE_HIGH      = 15,
+    // HOLD reason: the ramp was capped by ceiling memory — the next step would
+    // exceed ABR_CEILING_BACKOFF × the bitrate that last failed. Appended at the
+    // tail so no existing wire number shifts.
+    CEILING         = 16
 };
 
 // What decideBitrate returns: the bitrate AND the branch/reason that produced
@@ -138,7 +142,13 @@ constexpr double ABR_C2_LOSS_PAUSE_PCT = 10.0;
 // healthy link carrying a standing ~50ms queue sits at score ~75, so it now
 // needs 3 consecutive samples in [70,100] to climb. If field logs show a stalled
 // ramp, this is the first lever (70 -> 65) — the streak length the second.
-constexpr double ABR_SCORE_DEC_MIN    = 55.0;
+// ABR_SCORE_DEC_MIN is 45 (was 55, 2026-10-06). Lowered to make the slow backoff
+// less twitchy: score floors at ~198ms of rtt-minRtt (wRTT=0.5, see
+// ScoreCalculator.h), so 55 (≈90ms) tripped on ordinary queueing. 45 ≈ 110ms,
+// still ~8ms below the 118ms at which the 2026-10-06 field link collapsed. This
+// is near the usable ceiling of "loose": the scale floors at 198ms, so there is
+// little room above before the branch stops firing at all.
+constexpr double ABR_SCORE_DEC_MIN    = 45.0;
 constexpr double ABR_SCORE_UP_MIN     = 70.0;
 constexpr int    ABR_SCORE_STREAK_TICKS = 3;
 // ×0.80 is the xbfirm precedent (XBAdaptiveBitrateStreaming::rttHigh, the
@@ -171,6 +181,28 @@ constexpr int    ABR_PAUSE_AFTER_TICKS = 3;
 // link-dead pause does. It does not jump straight back to the pre-pause rate.
 constexpr int    ABR_C2_LOSS_PAUSE_TICKS = 3;
 constexpr double ABR_TREND_RAPID_DEC_GAIN = 0.85;
+
+// ── Ceiling memory (2026-10-06) ─────────────────────────────────────────────
+//
+// The ramp→wall→cut→ramp sawtooth: the ABR is OPEN-LOOP on capacity. Its
+// `throughputKbps` is LOAD (bytes the sender already pushed), never the link
+// ceiling, so nothing tells the ramp where the wall is — it can only find it by
+// hitting it. On the 2026-10-06 field link the pattern repeated every ~20 ticks:
+// climb to 1248, collapse (rtt-minRtt 118ms, score 65), fall to ~470, climb
+// again. No score threshold can separate "recovered" from "at the wall" because
+// that link reads score 85-90 right up to the collapse tick.
+//
+// So remember the level that FAILED. After a congestion decrease the ramp is
+// capped at ABR_CEILING_BACKOFF × the bitrate it fired FROM, for
+// ABR_CEILING_DWELL_MS. 0.85 ⇒ a link that died at 1248 re-parks at 1061 (below
+// the 1148 that held). Soft: this only withholds INCREASE, never forces a
+// decrease. Deliberate DEVIATION from xbfirm (aiCompressor/XBAdaptiveBitrateStreaming),
+// which keeps the same memory (m_problematicBitrateThreshold) but uses it only
+// as a one-shot recovery-kick guard, never as a sustained ramp cap — justified
+// because this link's wall is a cliff, not a slope. The memory and the clock
+// live in the wrapper; the core reads only the resulting cap (rampCapKbps).
+constexpr double ABR_CEILING_BACKOFF  = 0.85;
+constexpr qint64 ABR_CEILING_DWELL_MS = 60000;
 
 // Camera-collapse gate. When the camera reports an achieved bitrate far below
 // what we asked for (achieved/requested < this ratio), the camera is not
@@ -232,12 +264,17 @@ struct AbrCounters {
 //                    lowering is exactly what a collapsed camera needs.
 //   sinceLastChangeMs : ms since the last bitrate change
 //   maxAbr         : ceiling
+//   rampCapKbps    : ceiling memory (see ABR_CEILING_*). `<= 0` = no cap. The
+//                    wrapper's recorded failed bitrate × ABR_CEILING_BACKOFF
+//                    while its dwell is live, else 0. The core only reads it —
+//                    the memory and the clock live in the wrapper.
 //
 // Returns the proposed bitrate together with the branch/reason that produced
 // it. Only the kbps field is the "answer"; branch/reason exist so the QS debug
 // channel can publish the decision beside its inputs.
 AbrDecision decideBitrate(const RouterInterfaceStat &v, const RouterInterfaceStat &c,
                           C2Mode c2Mode, int bitrate, const AbrCounters &cnt,
-                          bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr);
+                          bool cameraCollapsed, qint64 sinceLastChangeMs, int maxAbr,
+                          int rampCapKbps = 0);
 
 #endif // ABRDECISION_H

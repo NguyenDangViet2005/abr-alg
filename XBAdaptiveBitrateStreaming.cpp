@@ -50,6 +50,10 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_c2LossTicks = 0;
     m_scoreLowStreak = 0;
     m_scoreHighStreak = 0;
+    // The ceiling memory belongs to the OLD stream; a reset starts a new one and
+    // the wall may have moved. Drop it so the fresh stream is not capped.
+    m_ceilingKbps = 0;
+    m_ceilingSinceMs = 0;
     // The camera's last report belongs to the OLD stream; a reset starts a new
     // one, so a stale achieved value must not survive it.
     m_lastAchievedKbps = 0;
@@ -205,15 +209,44 @@ AbrDecision XBAdaptiveBitrateStreaming::processQoS()
     cnt.scoreLowStreak  = m_scoreLowStreak;
     cnt.scoreHighStreak = m_scoreHighStreak;
 
+    // Ceiling memory (see ABR_CEILING_*). Resolve the LIVE cap from the PREVIOUS
+    // tick's memory BEFORE the call, exactly as c2Mode is resolved before
+    // m_lastComputeMs: the cap this tick's decision obeys is the one already on
+    // file, not one this very decision might write. A memory older than the dwell
+    // is dead — zero it here so the log and the cap agree, and so a stale entry
+    // cannot resurrect itself.
+    if (m_ceilingKbps > 0 && m_clock.elapsed() - m_ceilingSinceMs >= ABR_CEILING_DWELL_MS)
+        m_ceilingKbps = 0;
+    const int rampCapKbps = (m_ceilingKbps > 0)
+                                ? static_cast<int>(m_ceilingKbps * ABR_CEILING_BACKOFF)
+                                : 0;
+
     const AbrDecision d = decideBitrate(m_video, m_c2, c2Mode, m_bitrate, cnt,
                                         m_cameraCollapsed,
-                                        sinceLastChangeMs, m_maxAbr);
+                                        sinceLastChangeMs, m_maxAbr, rampCapKbps);
     const int b = d.kbps;
 
     // ── state update ─────────────────────────────────────────────────────
     if (b == QOS_NOT_AVAILABLE) return d;   // -1: leave state alone
 
     if (b != m_bitrate) {
+        const int from = m_bitrate;
+        // Ceiling memory: a DECREASE from a level we were not already backing off
+        // from records that level as the wall. The guard keeps a CHAIN of cuts
+        // from overwriting the true top with each lower step (matches xbfirm
+        // setNewBitrate: only record when the previous action was not a decrease).
+        // An INCREASE past the recorded level means we climbed back over the wall
+        // — clear it, the link recovered.
+        if (b < from) {
+            const bool wasBackingOff = (m_ceilingKbps > 0) && (from <= m_ceilingKbps);
+            if (!wasBackingOff) {
+                m_ceilingKbps = from;
+                m_ceilingSinceMs = m_clock.elapsed();
+            }
+        } else if (m_ceilingKbps > 0 && b > m_ceilingKbps) {
+            m_ceilingKbps = 0;
+        }
+
         m_lastChangeMs = m_clock.elapsed();
         // Reset-after-fire: the streak that produced this change has done its
         // job. Clearing BOTH here means a slow x0.80 needs 3 NEW low samples
@@ -238,6 +271,7 @@ AbrDecision XBAdaptiveBitrateStreaming::processQoS()
                        << " lowStreak=" << m_scoreLowStreak << " upStreak=" << m_scoreHighStreak
                        << " rtt+=" << QString::number(m_video.rttMs - m_video.minRttMs, 'f', 1)
                        << " loss=" << QString::number(m_video.lossRatePct, 'f', 3)
+                       << " cap=" << rampCapKbps
                        << " -> " << b << "kbps";
 
     return d;

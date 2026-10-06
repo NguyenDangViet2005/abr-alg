@@ -247,7 +247,7 @@ int main()
     }
 
     // ── deadband: the streak, not the score, is what the core reads ──────
-    // A score in [55,70) is neither "low" nor "high" — the WRAPPER clears both
+    // A score in [45,70) is neither "low" nor "high" — the WRAPPER clears both
     // streaks there. The core never sees a non-zero streak from a deadband
     // sample, so all-zero counters must HOLD regardless of the score value.
     {
@@ -305,6 +305,49 @@ int main()
                  "STALE C2 lossy -> hold (unknown is not lossy; ramp blocked)");
         expectEq(decideBitrate(v, cLossy, C2Mode::NEVER_SEEN, CUR, counters(0, 9, 0, FULL), false, 9999, MAX_ABR), CUR,
                  "NEVER_SEEN C2 lossy -> hold (unknown is not lossy; ramp blocked)");
+    }
+
+    // ── CEILING memory caps the ramp (2026-10-06) ────────────────────────
+    // rampCapKbps is the wrapper's recorded failed bitrate × ABR_CEILING_BACKOFF.
+    // It gates INCREASE only; the last positional arg defaults to 0 (no cap) so
+    // every call above is unchanged. Field case: died at 1248 -> cap 1061.
+    {
+        RouterInterfaceStat v = healthyVideo();
+        const int CAP = 1061;   // 1248 × 0.85
+        // Next step would exceed the cap -> HOLD, reason CEILING.
+        AbrDecision d = decideBitrate(v, c, C2Mode::FRESH, 1048, counters(0, 0, 0, FULL),
+                                      false, 3000, MAX_ABR, CAP);
+        expectEq(d, 1048, "cap 1061, at 1048 (+100 > cap) -> hold");
+        expectReason(d, AbrReason::CEILING, "cap blocks the ramp");
+        // The step fits exactly -> UP (parks AT the cap, equal allowed).
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, 961, counters(0, 0, 0, FULL), false, 3000, MAX_ABR, CAP),
+                 1061, "cap 1061, at 961 (+100 == cap) -> UP, parks at cap");
+        // Well below -> UP.
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, 900, counters(0, 0, 0, FULL), false, 3000, MAX_ABR, CAP),
+                 1000, "cap 1061, at 900 -> UP (fits)");
+        // No memory -> no cap.
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, 1048, counters(0, 0, 0, FULL), false, 3000, MAX_ABR, 0),
+                 1148, "rampCapKbps 0 -> no cap, UP");
+        // The cap NEVER blocks a decrease: a lossy tick above the cap still halves.
+        RouterInterfaceStat vl = healthyVideo();
+        vl.lossRatePct = 1.0;
+        AbrDecision dl = decideBitrate(vl, c, C2Mode::FRESH, 1248, counters(), false, 9999, MAX_ABR, CAP);
+        expectEq(dl, 624, "cap does not block DECREASE (loss still halves)");
+        expectReason(dl, AbrReason::LOSS_HIGH, "cap does not block DECREASE");
+    }
+
+    // ── ABR_SCORE_DEC_MIN 45: the slow-low branch fires at score 50 ───────
+    // Score 50 is below 55 (the old floor) but above 45, so the WRAPPER's
+    // streak logic (score < DEC_MIN) is what decides. The core reads only the
+    // streak, so this is a constants check: a 3-low streak at a score that the
+    // OLD threshold would have held now fires ×0.80.
+    {
+        RouterInterfaceStat v = healthyVideo();
+        v.score = 50.0;   // < 55, >= 45 -> "low" only under the new floor
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, counters(0, 0, 2), false, 9999, MAX_ABR), CUR,
+                 "score 50, low streak 2 -> hold");
+        expectEq(decideBitrate(v, c, C2Mode::FRESH, CUR, counters(0, 0, FULL), false, 9999, MAX_ABR),
+                 static_cast<int>(CUR * ABR_SCORE_DEC_GAIN), "score 50, low streak 3 -> x0.80 (new floor)");
     }
 
     // ── hold ─────────────────────────────────────────────────────────────

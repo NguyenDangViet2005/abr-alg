@@ -85,7 +85,9 @@ enum QsAbrReason : quint8 {
     QS_R_RESET_STUCK     = static_cast<quint8>(AbrReason::RESET_STUCK),
     QS_R_C2_LOSS_HIGH    = static_cast<quint8>(AbrReason::C2_LOSS_HIGH),
     // HOLD reason: score >= ABR_SCORE_UP_MIN but the high streak is still short.
-    QS_R_SCORE_HIGH      = static_cast<quint8>(AbrReason::SCORE_HIGH)
+    QS_R_SCORE_HIGH      = static_cast<quint8>(AbrReason::SCORE_HIGH),
+    // HOLD reason: the ramp was capped by ceiling memory (see ABR_CEILING_*).
+    QS_R_CEILING         = static_cast<quint8>(AbrReason::CEILING)
 };
 
 enum QsEventType : quint8 {

@@ -107,6 +107,17 @@ private:
     int  m_scoreHighStreak = 0;
     int  m_lastEmitted    = -1;       // -1 = nothing emitted yet
 
+    // ── Ceiling memory (2026-10-06) ──
+    // The bitrate that last FAILED on a congestion decrease, and when it was
+    // recorded. 0 = no memory → no cap. `throughputKbps` is LOAD, not capacity,
+    // so the wall is invisible until hit; this remembers where it was and caps
+    // the ramp at ABR_CEILING_BACKOFF × it for ABR_CEILING_DWELL_MS. Recorded
+    // only when we were NOT already backing off, so a chain of cuts keeps the
+    // TOP (matches xbfirm setNewBitrate). Cleared when the ramp climbs past the
+    // recorded level (recovered) or reset(). See ABRDecision.h for the rationale.
+    int    m_ceilingKbps    = 0;
+    qint64 m_ceilingSinceMs = 0;
+
     // ── Camera closed loop ──
     // Last achieved bitrate the camera reported for a request. 0 = nothing
     // reported yet (or reset), which must NOT read as "collapsed".
