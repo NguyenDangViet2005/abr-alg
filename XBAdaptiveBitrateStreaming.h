@@ -145,6 +145,12 @@ private:
     void setNewBitrate(unsigned int new_bitrate_kbps);
     void updateStreamingStatus(const tcpInfo &tcpi, bool bitrateChanged);
 
+    // Phase 01 (PORT DEVIATION, not xbfirm): true when the current video-loss
+    // break started right after OUR own step-up, i.e. the loss is our
+    // overshoot rather than a weak link. Causal/timing test, never an absolute
+    // score comparison — see the definition for why.
+    bool isOvershoot() const;
+
     void onNetworkDataTimeout();
     void onStatusBroadcastTimeout();
 
@@ -167,6 +173,27 @@ private:
     static constexpr unsigned int TELEMETRY_KICK_BITRATE_KBPS = 500;
     static constexpr qint64  BITRATE_INCREASE_COOLDOWN_MS = 2000;
 
+    // ── Phase 01: overshoot classifier + ceiling (PORT DEVIATION) ─────────
+    // A break counts as "our overshoot" only if it lands within this many
+    // ticks after our own step-up. Too small -> overshoot misread as weak
+    // (harsh MIN); too large -> weak misread as overshoot (stuck high).
+    // Tune against the field log (Phase 04).
+    static constexpr int OVERSHOOT_WINDOW_TICKS = 3;
+    // The same window as wall-clock, so a data gap cannot freeze the tick
+    // counter and make an old step-up look recent. ~3 ticks at the router's
+    // 1 Hz push.
+    static constexpr qint64 OVERSHOOT_WINDOW_MS = 3000;
+    // The score at step-up must have been at least this good for the break to
+    // be "our overshoot". A margin, not an absolute grade — it only separates
+    // "we pushed from a healthy link" from "we pushed from an already-poor one".
+    static constexpr double OVERSHOOT_MIN_SCORE_AT_STEPUP = 70.0;
+    // The wire trend at step-up must NOT already be falling, or the link was
+    // degrading BEFORE we pushed — that is a weak link, not our overshoot. Trend
+    // ordinals match ScoringModule: 0=RAPID_INCREASE..2=STABLE, 3=DECREASE,
+    // 4=RAPID_DECREASE. This is the "score already falling before T" half of the
+    // brainstorm's discriminator, implemented without a score history.
+    static constexpr int OVERSHOOT_MAX_TREND_AT_STEPUP = 2;   // <= STABLE
+
     // ── Core state (xbfirm) ──────────────────────────────────────────────
     AbrState m_abrState;
     QVector<quint32> m_rttHistory;
@@ -175,6 +202,21 @@ private:
     qint64 m_lastQualityChangeTime = 0;
     double m_avgSiocoutq = 0.0;
     unsigned int m_maxAbr;
+
+    // ── Phase 01: ceiling + causal overshoot state (PORT DEVIATION) ───────
+    // m_ceilingKbps: the STEADY-STATE ramp never exceeds this. Found once on
+    // overshoot, then respected (Phase 03's NetworkReference is the only thing
+    // that lifts it). One documented exception: the telemetry ABR kick in
+    // processTelemetryTCPInfo may exceed it (a post-outage probe, see there).
+    // m_lastGoodKbps: the bitrate immediately BEFORE the break-causing step-up
+    // — the value we fall back to. m_scoreAtStepUp / m_ticksSinceStepUp /
+    // m_lastStepUpMs are the causal triple the classifier reads.
+    unsigned int m_ceilingKbps = MAX_BITRATE_KBPS;
+    unsigned int m_lastGoodKbps = 0;
+    double m_scoreAtStepUp = 0.0;
+    int m_trendAtStepUp = 0;
+    int m_ticksSinceStepUp = 0;
+    qint64 m_lastStepUpMs = 0;
 
     // Advisor coefficients. xbfirm's CellularPredictive drove these; with no
     // predictor they stay at xbfirm's ctor defaults (1.0), so gainDown=1.0
