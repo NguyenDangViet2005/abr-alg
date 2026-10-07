@@ -32,8 +32,8 @@ public:
 
     static constexpr double BW_UTILIZATION_RATIO                    = 0.90;
 
-    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 100;
-    static constexpr qint64 FAILURE_MEMORY_PROBE_INTERVAL_MS        = 10000;
+    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 50;
+    static constexpr qint64 FAILURE_MEMORY_PROBE_INTERVAL_MS        = 15000;
     static constexpr qint64 FAILURE_MEMORY_RETENTION_MS             = 30000;
 
     static constexpr int RTT_BASELINE_WARMUP_SAMPLES                = 5;
@@ -45,8 +45,8 @@ public:
     static constexpr qint64 KEYFRAME_IMMUNITY_DURATION_MS           = 800;
     static constexpr qint64 MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE      = 20;
 
-    static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 3000;
-    static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS                 = 2500;
+    static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 5000;
+    static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS                 = 5000;
 
     enum class CongestionState {
         Clear = 0,     
@@ -92,6 +92,7 @@ private:
                        int rawDropSndTotal = 0, int rawDropRcvTotal = 0,
                        int rawRetransTotal = 0);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
+    unsigned int calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const;
 
     void evaluateC2Quality();
     QString c2PriorityToString(C2PriorityLevel p) const;
@@ -132,8 +133,10 @@ private:
     qint64 m_cooldownUntilMs;
     int m_consecutiveZeroLossCount;
     qint64 m_clearSinceMs;
+    unsigned int m_previousStableBitrate;
     unsigned int m_lastCongestedBitrate;
     qint64 m_lastProbeTime;
+    double m_bottleneckBwMbps;
 
     QTimer *m_heartbeatTimer;
     double m_latestSmoothedRtt;
