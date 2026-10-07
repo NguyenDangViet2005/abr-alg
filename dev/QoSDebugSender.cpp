@@ -276,7 +276,7 @@ QsSample QoSDebugSender::buildSample(const QString &iface) const
 
     s.videoTrend = static_cast<quint8>(v.trend);
     s.c2Trend    = c2Present ? static_cast<quint8>(c.trend) : 255;
-    // Quality is not on the router's 14-field row (it is derived); 255 = absent
+    // Quality is not on the router's 22-field row (it is derived); 255 = absent
     // so the dashboard renders a dash rather than a fabricated 0.
     s.videoQuality = 255;
     s.c2Quality    = 255;
@@ -290,19 +290,22 @@ QsSample QoSDebugSender::buildSample(const QString &iface) const
     s.maxAbrKbps        = abr.maxAbrKbps;
     s.sinceLastChangeMs = 0;
 
+    // thr/rtt/minRtt are METHODS on RouterInterfaceStat: the wire carries only
+    // the raw counters (µs, B/s) and these convert them for display, so they are
+    // called, not read as fields.
     s.video.score  = v.score;
-    s.video.thr    = v.throughputKbps;
+    s.video.thr    = v.throughputKbps();
     s.video.loss   = v.lossRatePct;
-    s.video.rtt    = v.rttMs;
-    s.video.minRtt = v.minRttMs;
+    s.video.rtt    = v.rttMs();
+    s.video.minRtt = v.minRttMs();
     s.video.qdelay = v.queuingDelayMs;
     s.video.jitter = v.jitterMs;
 
     s.c2.score  = c.score;
-    s.c2.thr    = c.throughputKbps;
+    s.c2.thr    = c.throughputKbps();
     s.c2.loss   = c.lossRatePct;
-    s.c2.rtt    = c.rttMs;
-    s.c2.minRtt = c.minRttMs;
+    s.c2.rtt    = c.rttMs();
+    s.c2.minRtt = c.minRttMs();
     s.c2.qdelay = c.queuingDelayMs;
     s.c2.jitter = c.jitterMs;
 

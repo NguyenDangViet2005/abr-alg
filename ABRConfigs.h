@@ -19,9 +19,14 @@
 // ── ABR defaults ──
 // Ceiling on any proposed bitrate. SHARED by both ABR engines — the SRT/camera
 // socket one (ABRFactory::startCameraSocketAbr) and the router-telemetry one
-// (ABRFactory::startRouterAbr) — so this single value caps both. Lowered
-// 6000 -> 3000 (2026-10-05) to keep the video below the link's real capacity.
-#define ABR_DEFAULT_MAX_ABR_BITRATE           3000
+// (ABRFactory::startRouterAbr) — so this single value caps both.
+//
+// Set to xbfirm's MAX_BITRATE_KBPS (2000) so the router ABR's clamp matches the
+// reference standard. NOTE: because the constant is shared, this also lowers the
+// SRT engine's ceiling 3000 -> 2000. That engine is the one being superseded by
+// the router ABR, so the lower cap is the intended direction — but it is a
+// cross-engine effect, not a router-ABR-local one.
+#define ABR_DEFAULT_MAX_ABR_BITRATE           2000
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
 #define VIDEO_DISABLED_BITRATE_KBPS           0

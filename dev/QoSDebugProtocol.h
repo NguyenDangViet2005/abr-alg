@@ -6,7 +6,6 @@
 #include <QVector>
 #include <QPair>
 #include <QtGlobal>
-#include "../ABRDecision.h"   // AbrBranch / AbrReason — the wire values' home
 
 // Wire format "QS" — the debug channel from XBQoSService to qos-dashboard.
 //
@@ -48,46 +47,59 @@ enum QsRecordType : quint8 {
     QS_CONFIG = 3
 };
 
+// Trend ordinals — the router's own trend enum (ScoringModule::Trend), carried
+// verbatim on the router wire (RouterInterfaceStat.trend). Defined HERE because
+// the QS encoder is where they cross into the wire vocabulary; the values must
+// match ScoringModule's enum exactly (RAPID_INCREASE=0 … RAPID_DECREASE=4).
+// The pure decision core that used to own these was deleted (Phase 03); the
+// wire ordinals are the contract and must not drift.
+constexpr int TREND_RAPID_INCREASE = 0;
+constexpr int TREND_INCREASE       = 1;
+constexpr int TREND_STABLE         = 2;
+constexpr int TREND_DECREASE       = 3;
+constexpr int TREND_RAPID_DECREASE = 4;
+
 // Why the bitrate moved this tick (§3.1).
 //
-// The values now live in ABRDecision.h (AbrBranch / AbrReason) so the DECIDER
-// and the WIRE share one definition — the reason a branch was taken is computed
-// where the decision is made, not reconstructed later. These QS_* names are
-// aliases kept for the encoder, the decoder and the tests, which read the wire
-// vocabulary. `ABR_NOT_AVAILABLE` is the pre-wiring default (no decision yet).
+// FROZEN WIRE VALUES. These used to alias an AbrBranch/AbrReason enum in
+// ABRDecision.h, but that pure decision core was deleted (Phase 03 — the port
+// is xbfirm's algorithm and never called it). The ordinals are now written out
+// literally so the wire layout is a self-contained contract: the dashboard's
+// parser.js reads these POSITIONALLY, so a changed or removed number shifts
+// every field after it. In the xbfirm port the branch is always HOLD and the
+// reason always NONE — the slots are kept, and emitted as 0, purely so the
+// decoder does not shift.
 enum QsAbrBranch : quint8 {
-    QS_BR_HOLD             = static_cast<quint8>(AbrBranch::HOLD),
-    QS_BR_UP               = static_cast<quint8>(AbrBranch::UP),
-    QS_BR_HALVE            = static_cast<quint8>(AbrBranch::HALVE),
-    QS_BR_MUL              = static_cast<quint8>(AbrBranch::MUL),
-    QS_BR_PAUSE            = static_cast<quint8>(AbrBranch::PAUSE),
-    QS_BR_NOT_AVAILABLE    = static_cast<quint8>(AbrBranch::NOT_AVAILABLE),
-    QS_BR_TO_STUCK_OBSERVE = static_cast<quint8>(AbrBranch::TO_STUCK_OBSERVE),
-    QS_BR_RESET_REQUEST    = static_cast<quint8>(AbrBranch::RESET_REQUEST)
+    QS_BR_HOLD             = 0,
+    QS_BR_UP               = 1,
+    QS_BR_HALVE            = 2,
+    QS_BR_MUL              = 3,
+    QS_BR_PAUSE            = 4,
+    QS_BR_NOT_AVAILABLE    = 5,
+    QS_BR_TO_STUCK_OBSERVE = 6,
+    QS_BR_RESET_REQUEST    = 7
 };
 
 enum QsAbrReason : quint8 {
-    QS_R_NONE            = static_cast<quint8>(AbrReason::NONE),
-    QS_R_KTO             = static_cast<quint8>(AbrReason::KTO),
-    QS_R_LOSS_HIGH       = static_cast<quint8>(AbrReason::LOSS_HIGH),
+    QS_R_NONE            = 0,
+    QS_R_KTO             = 1,
+    QS_R_LOSS_HIGH       = 2,
     // 3 and 4 are reserved: were QDELAY_400 / QDELAY_5, retired 2026-10-06. The
     // numbers stay so the wire enum does not shift (dashboard decoder).
     QS_R_QDELAY_400_RESERVED = 3,
     QS_R_QDELAY_5_RESERVED   = 4,
-    QS_R_TREND_RAPID_DEC = static_cast<quint8>(AbrReason::TREND_RAPID_DEC),
-    QS_R_LINK_DEAD       = static_cast<quint8>(AbrReason::LINK_DEAD),
-    QS_R_NOT_USABLE      = static_cast<quint8>(AbrReason::NOT_USABLE),
-    QS_R_STALE           = static_cast<quint8>(AbrReason::STALE),
-    QS_R_COOLDOWN_OK     = static_cast<quint8>(AbrReason::COOLDOWN_OK),
-    QS_R_C2_BLOCK_UP     = static_cast<quint8>(AbrReason::C2_BLOCK_UP),
-    QS_R_SCORE_LOW       = static_cast<quint8>(AbrReason::SCORE_LOW),
-    QS_R_STUCK_OBSERVE   = static_cast<quint8>(AbrReason::STUCK_OBSERVE),
-    QS_R_RESET_STUCK     = static_cast<quint8>(AbrReason::RESET_STUCK),
-    QS_R_C2_LOSS_HIGH    = static_cast<quint8>(AbrReason::C2_LOSS_HIGH),
-    // HOLD reason: score >= ABR_SCORE_UP_MIN but the high streak is still short.
-    QS_R_SCORE_HIGH      = static_cast<quint8>(AbrReason::SCORE_HIGH),
-    // HOLD reason: the ramp was capped by ceiling memory (see ABR_CEILING_*).
-    QS_R_CEILING         = static_cast<quint8>(AbrReason::CEILING)
+    QS_R_TREND_RAPID_DEC = 5,
+    QS_R_LINK_DEAD       = 6,
+    QS_R_NOT_USABLE      = 7,
+    QS_R_STALE           = 8,
+    QS_R_COOLDOWN_OK     = 9,
+    QS_R_C2_BLOCK_UP     = 10,
+    QS_R_SCORE_LOW       = 11,
+    QS_R_STUCK_OBSERVE   = 12,
+    QS_R_RESET_STUCK     = 13,
+    QS_R_C2_LOSS_HIGH    = 14,
+    QS_R_SCORE_HIGH      = 15,
+    QS_R_CEILING         = 16
 };
 
 enum QsEventType : quint8 {

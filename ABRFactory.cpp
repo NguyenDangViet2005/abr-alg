@@ -91,10 +91,10 @@ void ABRFactory::handleRouterRow(const RouterInterfaceStat &row)
         << " usable="  << row.usable
         << " score="   << QString::number(row.score, 'f', 2)
         << " trend="   << row.trend
-        << " thr="     << QString::number(row.throughputKbps, 'f', 2) << "kbps"
+        << " thr="     << QString::number(row.throughputKbps(), 'f', 2) << "kbps"
         << " loss="    << QString::number(row.lossRatePct, 'f', 4) << "%"
-        << " rtt="     << QString::number(row.rttMs, 'f', 2) << "ms"
-        << " minRtt="  << QString::number(row.minRttMs, 'f', 2) << "ms"
+        << " rtt="     << QString::number(row.rttMs(), 'f', 2) << "ms"
+        << " minRtt="  << QString::number(row.minRttMs(), 'f', 2) << "ms"
         << " qdelay="  << QString::number(row.queuingDelayMs, 'f', 2) << "ms"
         << " jitter="  << QString::number(row.jitterMs, 'f', 2) << "ms"
         << (row.parseFailed ? "  [PARSE FAILURES]" : "");

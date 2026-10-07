@@ -8,7 +8,6 @@ TARGET = aiCompressor
 
 HEADERS += \
     ABRConfigs.h \
-    ABRDecision.h \
     ABRFactory.h \
     IAdaptiveBitrateStreaming.h \
     RouterInterfaceStat.h \
@@ -26,7 +25,6 @@ HEADERS += \
 SOURCES += \
     dev/RouterNetworkHandler.cpp \
     main.cpp \
-    ABRDecision.cpp \
     ABRFactory.cpp \
     IAdaptiveBitrateStreaming.cpp \
     SRTAdaptiveBitrateStreaming.cpp \

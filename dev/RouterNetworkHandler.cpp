@@ -27,13 +27,20 @@ static const char SPECTRUM_STUB2_ID[] = "56";   // 560
 // the flood-control sense — there is simply nothing here worth logging 2x/s.
 static const int UNKNOWN_ID_LOG_INTERVAL_SEC = 10;
 
-// VIDEO / C2 rows carry exactly this many fields, positionally:
-static const int ROW_FIELD_COUNT = 14;
+// VIDEO / C2 rows carry exactly this many fields, positionally. The order is
+// the wire contract: fields 7..16 are the RAW tcpi counter block in the OLD
+// branch's units (xbfirm's processTCPInfo inputs), fields 17..22 are the
+// refactor's derived metrics. Changing one without the others shifts every
+// value; see RouterInterfaceStat.h and docs/xblink-telemetry-protocol.md §3b.
+static const int ROW_FIELD_COUNT = 22;
 static const char *const ROW_FIELD_NAMES[ROW_FIELD_COUNT] = {
-    "interfaceName", "priority",    "isActivated", "isConnected",
-    "isMptcp",       "usable",      "score",       "trend",
-    "throughputKbps", "lossRatePct", "rttMs",      "minRttMs",
-    "queuingDelayMs", "jitterMs"
+    "interfaceName", "priority",     "isActivated",   "isConnected",
+    "isMptcp",       "usable",
+    "rttUs",         "deliveryRateBps", "lost",       "segsOut",
+    "sndCwnd",       "sndMss",       "lastAckRecv",   "sockOutq",
+    "sockSndBuf",    "minRttUs",
+    "score",         "trend",        "lossRatePct",   "queuingDelayMs",
+    "jitterMs",      "sockOutqUnacked"
 };
 
 // Parse one numeric field, reporting a conversion failure rather than
@@ -64,6 +71,22 @@ static double parseDoubleField(const QStringList &fields, int index, bool *anyFa
     if (!ok) {
         qWarning().nospace() << "[ROUTER][PARSE] field " << index << " ('" << raw
                              << "') unparsable as double — treated as 0";
+        *anyFailure = true;
+    }
+    return value;
+}
+
+// Byte counters (fields 14/15) are emitted by the router as unsigned integers
+// via std::to_string(uint64_t). Parsed as quint64 so a value above INT_MAX
+// (a 4 GiB+ backlog) is not truncated to a negative int.
+static quint64 parseU64Field(const QStringList &fields, int index, bool *anyFailure)
+{
+    bool ok = false;
+    const QString raw = fields.at(index);
+    const quint64 value = raw.toULongLong(&ok);
+    if (!ok) {
+        qWarning().nospace() << "[ROUTER][PARSE] field " << index << " ('" << raw
+                             << "') unparsable as uint64 — treated as 0";
         *anyFailure = true;
     }
     return value;
@@ -181,7 +204,7 @@ void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddr
 
     if (connType == ConnType::PRIMARY) {
         // PRIMARY's payload is a NAME, not a metric row — its arity is
-        // legitimately 1, so it never goes through emitRow's 14-field path.
+        // legitimately 1, so it never goes through emitRow's 22-field path.
         const QString primary = fields.value(0, QStringLiteral("-"));
         if (fields.size() != 1) {
             qWarning().nospace() << "[ROUTER][RX] PRIMARY expected 1 field, got "
@@ -234,20 +257,33 @@ void RouterNetworkHandler::emitRow(ConnType connType, const QStringList &fields)
     }
 
     bool failed = false;
-    row.priority       = parseIntField(fields, 1, &failed);
-    row.isActivated    = parseIntField(fields, 2, &failed) != 0;
-    row.isConnected    = parseIntField(fields, 3, &failed) != 0;
-    row.isMptcp        = parseIntField(fields, 4, &failed) != 0;
-    row.usable         = parseIntField(fields, 5, &failed) != 0;
-    row.score          = parseDoubleField(fields, 6, &failed);
-    row.trend          = parseIntField(fields, 7, &failed);
-    row.throughputKbps = parseDoubleField(fields, 8, &failed);
-    row.lossRatePct    = parseDoubleField(fields, 9, &failed);
-    row.rttMs          = parseDoubleField(fields, 10, &failed);
-    row.minRttMs       = parseDoubleField(fields, 11, &failed);
-    row.queuingDelayMs = parseDoubleField(fields, 12, &failed);
-    row.jitterMs       = parseDoubleField(fields, 13, &failed);
-    row.parseFailed    = failed;
+    // #1..#6 — identity / status.
+    row.priority    = parseIntField(fields, 1, &failed);
+    row.isActivated = parseIntField(fields, 2, &failed) != 0;
+    row.isConnected = parseIntField(fields, 3, &failed) != 0;
+    row.isMptcp     = parseIntField(fields, 4, &failed) != 0;
+    row.usable      = parseIntField(fields, 5, &failed) != 0;
+    // #7..#16 — the RAW tcpi counter block, OLD-branch units (µs, B/s, packet
+    // counts). deliveryRateBps is a byte/s rate that can exceed INT_MAX on a
+    // fast link, so it is parsed as u64 like the two byte counters below.
+    row.rttUs           = parseIntField(fields, 6, &failed);
+    row.deliveryRateBps = parseU64Field(fields, 7, &failed);
+    row.lost            = parseIntField(fields, 8, &failed);
+    row.segsOut         = parseIntField(fields, 9, &failed);
+    row.sndCwnd         = parseIntField(fields, 10, &failed);
+    row.sndMss          = parseIntField(fields, 11, &failed);
+    row.lastAckRecv     = parseIntField(fields, 12, &failed);
+    row.sockOutq        = parseIntField(fields, 13, &failed);
+    row.sockSndBuf      = parseIntField(fields, 14, &failed);
+    row.minRttUs        = parseIntField(fields, 15, &failed);
+    // #17..#22 — refactor-derived metrics.
+    row.score           = parseDoubleField(fields, 16, &failed);
+    row.trend           = parseIntField(fields, 17, &failed);
+    row.lossRatePct     = parseDoubleField(fields, 18, &failed);
+    row.queuingDelayMs  = parseDoubleField(fields, 19, &failed);
+    row.jitterMs        = parseDoubleField(fields, 20, &failed);
+    row.sockOutqUnacked = parseU64Field(fields, 21, &failed);
+    row.parseFailed     = failed;
 
     emit onRouterRow(row);
 }

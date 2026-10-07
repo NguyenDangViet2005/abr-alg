@@ -2,67 +2,129 @@
 #include <QDebug>
 #include <QtMath>
 
-static const char *c2ModeName(C2Mode m)
+// Verbatim port of xbfirm's XBAdaptiveBitrateStreaming
+// (aiCompressor/XBAdaptiveBitrateStreaming.cpp). The core — haveLostPackets,
+// rttHigh, calculateJitter, checkSenderQueue, setNewBitrate,
+// processTCPInfo, processTelemetryTCPInfo, updateStreamingStatus, reset — is
+// copied as-is. Every deviation is a comment beginning with "PORT DEVIATION".
+
+static const char *statusName(int s)
 {
-    switch (m) {
-    case C2Mode::FRESH:      return "FRESH";
-    case C2Mode::STALE:      return "STALE";
-    case C2Mode::NEVER_SEEN: return "NEVER_SEEN";
-    case C2Mode::DELAY_ONLY: return "DELAY_ONLY";
+    switch (s) {
+    case 0: return "Playing (Auto)";
+    case 1: return "Optimizing";
+    case 2: return "Poor Network";
+    case 3: return "Buffering / Reconnecting";
+    case 4: return "Loading";
     }
     return "?";
 }
+
+// === CONSTRUCTOR / DESTRUCTOR ===
 
 XBAdaptiveBitrateStreaming::XBAdaptiveBitrateStreaming(const QString &iface,
                                                        bool isC2Configured,
                                                        QObject *parent)
     : IAdaptiveBitrateStreaming(parent)
+    , m_maxAbr(ABR_DEFAULT_MAX_ABR_BITRATE)
     , m_iface(iface)
     , m_isC2Configured(isC2Configured)
-    , m_maxAbr(ABR_DEFAULT_MAX_ABR_BITRATE)
 {
+    // xbfirm ctor: m_abrState.current_bitrate_kbps = 800; maxAbr = MAX_BITRATE_KBPS.
+    m_abrState.current_bitrate_kbps = 800;
+    m_problematicBitrateThreshold = m_maxAbr;
+
+    // PORT DEVIATION (timing): xbfirm uses QDateTime::currentMSecsSinceEpoch()
+    // for every elapsed measurement. The epoch is irrelevant and non-monotonic;
+    // QElapsedTimer measures the same elapsed ms without NTP-jump risk.
     m_clock.start();
+
+    m_networkDataTimer = new QTimer(this);
+    m_networkDataTimer->setInterval(5000);
+    m_networkDataTimer->setSingleShot(false);
+    connect(m_networkDataTimer, &QTimer::timeout,
+            this, &XBAdaptiveBitrateStreaming::onNetworkDataTimeout);
+
+    m_statusBroadcastTimer = new QTimer(this);
+    m_statusBroadcastTimer->setInterval(5000);
+    m_statusBroadcastTimer->setSingleShot(false);
+    connect(m_statusBroadcastTimer, &QTimer::timeout,
+            this, &XBAdaptiveBitrateStreaming::onStatusBroadcastTimeout);
+
     qInfo().nospace() << "[ABR][" << m_iface << "] instance created (isC2Configured="
                       << m_isC2Configured << ", maxAbr=" << m_maxAbr << ")";
 }
 
+XBAdaptiveBitrateStreaming::~XBAdaptiveBitrateStreaming()
+{
+    if (m_networkDataTimer) { m_networkDataTimer->stop(); delete m_networkDataTimer; m_networkDataTimer = nullptr; }
+    if (m_statusBroadcastTimer) { m_statusBroadcastTimer->stop(); delete m_statusBroadcastTimer; m_statusBroadcastTimer = nullptr; }
+}
+
+// === xbfirm PUBLIC API ===
+
 void XBAdaptiveBitrateStreaming::setMaxAbrBitrate(unsigned int newMaxAbrBitrate)
 {
-    m_maxAbr = static_cast<int>(newMaxAbrBitrate);
-    // A ceiling below the CURRENT bitrate would otherwise be violated on every
-    // HOLD: the INCREASE gate requires `bitrate < maxAbr`, so a bitrate already
-    // above the ceiling can never be raised OR lowered by the ramp — HOLD
-    // returns it unchanged. Pull the current value down to the new ceiling now.
-    // (ABR_INITIAL_BITRATE_KBPS is 250, so this only bites when a caller sets a
-    // ceiling under the current ask; with the default 3000 it is a no-op.)
-    if (m_bitrate > m_maxAbr) m_bitrate = m_maxAbr;
+    // xbfirm setMaxAbrBitrate, verbatim.
+    m_maxAbr = newMaxAbrBitrate;
+    m_problematicBitrateThreshold = m_maxAbr;
+}
+
+void XBAdaptiveBitrateStreaming::start()
+{
+    // xbfirm start(), verbatim. Resets to 1000 and starts the two 5s timers.
+    if (m_isStarted) return;
+
+    reset(1000);
+
+    m_isStarted = true;
+    m_lastNetworkDataTime = m_clock.elapsed();
+
+    if (m_networkDataTimer) m_networkDataTimer->start();
+    if (m_statusBroadcastTimer) m_statusBroadcastTimer->start();
+}
+
+void XBAdaptiveBitrateStreaming::stop()
+{
+    // xbfirm stop(), verbatim.
+    if (!m_isStarted) return;
+
+    m_isStarted = false;
+    if (m_networkDataTimer && m_networkDataTimer->isActive()) m_networkDataTimer->stop();
+    if (m_statusBroadcastTimer && m_statusBroadcastTimer->isActive()) m_statusBroadcastTimer->stop();
+
+    m_lastNetworkDataTime = 0;
+    m_rttHistory.clear();
+    m_consecutivePoorConditions = 0;
 }
 
 void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
 {
-    // Internal state reset only — NOT a socket reset. Mirrors the base
-    // contract; the socket-reset path is a separate, unimplemented signal.
-    m_bitrate = (bitrateKbps > 0) ? bitrateKbps : ABR_INITIAL_BITRATE_KBPS;
-    // Same ceiling rule as setMaxAbrBitrate: a restore must not land above the
-    // configured max, or HOLD would keep it there.
-    if (m_bitrate > m_maxAbr) m_bitrate = m_maxAbr;
-    m_notUsableTicks = 0;
-    m_c2LossTicks = 0;
-    m_scoreLowStreak = 0;
-    m_scoreHighStreak = 0;
-    // The ceiling memory belongs to the OLD stream; a reset starts a new one and
-    // the wall may have moved. Drop it so the fresh stream is not capped.
-    m_ceilingKbps = 0;
-    m_ceilingSinceMs = 0;
-    // The camera's last report belongs to the OLD stream; a reset starts a new
-    // one, so a stale achieved value must not survive it.
-    m_lastAchievedKbps = 0;
-    m_cameraCollapsed = false;
-    m_lastEmitted = -1;
-    m_lastChangeMs = m_clock.elapsed();
-    m_observing = false;
-    m_obsTicks = 0;
+    // xbfirm reset(), verbatim. Note it does NOT reset
+    // m_problematicBitrateThreshold (commented out in xbfirm) and restores the
+    // advisor gains to 1.0.
+    _cameraStatus = true;
+    m_abrState.current_bitrate_kbps = static_cast<unsigned int>(bitrateKbps > 0 ? bitrateKbps : 0);
+    m_lastAbrAction = ABR_NONE;
+    m_lastQualityChangeTime = 0;
+    m_avgSiocoutq = 0.0;
+    m_rttHistory.clear();
+
+    m_currentStatus = LOADING;
+    m_previousStatus = LOADING;
+    m_consecutivePoorConditions = 0;
+    m_lastStatusChangeTime = 0;
+
+    m_lastNetworkDataTime = 0;
+    _lastTcpiSegsout = 0;
+    _lastTelemetrySegsout = 0;
+
+    m_alpha = 1.0;
+    m_gainUp = 1.0;
+    m_gainDown = 1.0;
 }
+
+// === ROUTER WIRING (not xbfirm) ===
 
 void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
 {
@@ -73,306 +135,442 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
                              << row.interfaceName << "' — ignored";
         return;
     }
-
     if (row.parseFailed) {
-        // A row whose fields could not be parsed is worse than a missing row:
-        // it carries plausible zeros. Do not store it — treat as silence.
+        // A row whose fields could not be parsed carries plausible zeros. Do not
+        // store it — treat as silence.
         qWarning().nospace() << "[ABR][" << m_iface << "] row parseFailed — not stored";
         return;
     }
 
+    m_lastNetworkDataTime = m_clock.elapsed();
+
     if (row.connType == ConnType::VIDEO) {
         m_video = row;
-        m_lastVideoMs = m_clock.elapsed();
-        m_videoEverSeen = true;
+
+        // VIDEO row -> xbfirm's 11-arg processTCPInfo. The router's raw block
+        // (fields 7..16) is EXACTLY that argument list, positionally:
+        //   rtt µs, deliveryRate B/s, tcpiLoss count, tcpiSegsout count,
+        //   sndCwnd, sndMss, lastAckRecv, sockOutq bytes, sndBuf bytes, minRtt µs.
+        // So this is a 1:1 call — no unit conversion here. xbfirm's own 7-arg
+        // overload does the µs->ms / B/s->kbps / count->percent conversion, and
+        // it also carries the `if (!_cameraStatus) return;` gate, which is why
+        // the gate is NOT duplicated above: it lives inside the 7-arg stage
+        // exactly as in xbfirm. (The const-ref core stays ungated, as in xbfirm.)
+        processTCPInfo(row.rttUs,             // rtt        (µs)
+                       row.deliveryRateBps,   // deliveryRate (B/s)
+                       row.rttUs,             // tcpiRtt    (µs, dropped by 11-arg)
+                       row.lost,              // tcpiLoss   (count)
+                       row.segsOut,           // tcpiSegsout(count)
+                       row.sndCwnd,           // sndCwnd    (dropped by 11-arg)
+                       row.sndMss,            // sndMss     (dropped by 11-arg)
+                       row.lastAckRecv,       // lastAckRecv(dropped by 11-arg)
+                       row.sockOutq,          // sockOutq   (bytes)
+                       row.sockSndBuf,        // sockSndBuf (bytes, router sends 0)
+                       row.minRttUs);         // tcpiMinRtt (µs)
     } else if (row.connType == ConnType::C2) {
         m_c2 = row;
-        m_lastC2Ms = m_clock.elapsed();
-        m_c2EverSeen = true;
+        // The C2 subflow exists -> xbfirm's _haveTelemetry. Without this,
+        // rttHigh never fires and the telemetry-loss branch reads 0.
+        _haveTelemetry = true;
+
+        // C2 row -> xbfirm's telemetry slot (processTelemetryTCPInfo). Same raw
+        // units as the video call: the router's 601 carries the real counters, so
+        // xbfirm's own delta(tcpiLoss)/delta(tcpiSegsout) derives the telemetry
+        // loss percent with no synthetic counter. This is the 1:1 argument list
+        // of xbfirm's telemetry caller.
+        processTelemetryTCPInfo(row.rttUs,            // rtt        (µs)
+                                row.deliveryRateBps,  // deliveryRate (B/s)
+                                row.rttUs,            // tcpiRtt    (µs, unused)
+                                row.lost,             // tcpiLoss   (count)
+                                row.segsOut,          // tcpiSegsout(count)
+                                row.sndCwnd,          // sndCwnd    (unused)
+                                row.sndMss,           // sndMss     (unused)
+                                row.lastAckRecv,      // lastAckRecv(unused)
+                                row.sockOutq,         // sockOutq   (unused)
+                                row.sockSndBuf,       // sockSndBuf (unused)
+                                row.minRttUs);        // tcpiMinRtt (µs)
     }
-}
-
-void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
-{
-    // A non-positive report means the camera said nothing (or reported 0 for an
-    // unpaused stream) — it is NOT evidence of collapse. 0/requested would read
-    // as ratio 0 < 0.25 and wrongly block the ramp, so ignore it entirely and
-    // leave the previous verdict standing. Mirrors SRT's guard
-    // (SRTAdaptiveBitrateStreaming.cpp:402).
-    if (achievedKbps <= 0) return;
-    if (m_bitrate <= 0) return;
-
-    m_lastAchievedKbps = achievedKbps;
-    const double ratio = static_cast<double>(achievedKbps) / static_cast<double>(m_bitrate);
-    const bool collapsed = (ratio < ABR_CAMERA_COLLAPSE_RATIO);
-    if (collapsed != m_cameraCollapsed) {
-        qWarning().nospace() << "[ABR][" << m_iface << "] camera "
-                             << (collapsed ? "COLLAPSED" : "recovered")
-                             << " (asked=" << m_bitrate << "kbps achieved=" << achievedKbps
-                             << "kbps ratio=" << QString::number(ratio, 'f', 2) << ")";
-    }
-    m_cameraCollapsed = collapsed;
-}
-
-bool XBAdaptiveBitrateStreaming::hasFreshVideoRow() const
-{
-    return m_lastVideoMs > m_lastComputeMs;
-}
-
-C2Mode XBAdaptiveBitrateStreaming::c2ModeForThisTick()
-{
-    if (!m_isC2Configured) return C2Mode::DELAY_ONLY;   // C2 not deployed → delay-based
-    if (m_lastC2Ms > m_lastComputeMs) return C2Mode::FRESH;   // a C2 row arrived this tick
-    if (m_c2EverSeen) return C2Mode::STALE;             // seen before, absent now
-    return C2Mode::NEVER_SEEN;                          // declared present, never seen
-}
-
-AbrDecision XBAdaptiveBitrateStreaming::processQoS()
-{
-    // ── freshness guard (§6b) ────────────────────────────────────────────
-    // No new VIDEO row since the last computation → recomputing would act on
-    // already-seen numbers, and a since-expired cooldown could then RAISE the
-    // bitrate on stale data. Skip.
-    if (!hasFreshVideoRow()) {
-        const qint64 silenceMs = (m_lastVideoMs < 0)
-                                     ? m_clock.elapsed()
-                                     : m_clock.elapsed() - m_lastVideoMs;
-        if (silenceMs > ABR_STALE_WARN_MS && !m_staleWarned) {
-            qWarning().nospace() << "[ABR][" << m_iface << "] silent " << silenceMs
-                                 << "ms — holding bitrate " << m_bitrate << "kbps, not computing";
-            m_staleWarned = true;
-        }
-        return AbrDecision{ QOS_NOT_AVAILABLE, AbrBranch::NOT_AVAILABLE, AbrReason::STALE };
-    }
-    m_staleWarned = false;
-
-    // Resolve C2 freshness BEFORE stamping m_lastComputeMs. C2 rows always
-    // arrive before the 602 tick marker, so m_lastC2Ms is older than "now";
-    // if we stamped first, `m_lastC2Ms > m_lastComputeMs` could never hold and
-    // FRESH would be unreachable — every tick would resolve STALE and the ramp
-    // would be permanently blocked. The video guard above works only because it
-    // reads the pre-update value; C2 must use the same pre-update value.
-    const C2Mode c2Mode = c2ModeForThisTick();
-    m_lastComputeMs = m_clock.elapsed();
-    m_lastC2Mode = c2Mode;   // published with the decision in handleRouterTick
-
-    // C2 declared present but never seen → warn once, after a grace period, so
-    // a slow C2 subflow at startup is not mistaken for a misconfiguration.
-    if (c2Mode == C2Mode::NEVER_SEEN && !m_c2Warned
-        && m_clock.elapsed() > ABR_C2_GRACE_MS) {
-        qWarning().nospace() << "[ABR][" << m_iface
-                             << "] C2 declared configured but 601 never seen — blocking INCREASE";
-        m_c2Warned = true;
-    }
-
-    const qint64 sinceLastChangeMs = m_clock.elapsed() - m_lastChangeMs;
-
-    // Count consecutive link-down ticks from the LINK STATE, not from the
-    // returned bitrate. Driving it from `b == QOS_PAUSE` deadlocks: the core
-    // needs notUsableTicks+1 >= ABR_PAUSE_AFTER_TICKS to RETURN pause, but a
-    // down link returns hold (positive), so the counter would reset to 0 every
-    // tick and PAUSE could never fire — the video would never stop.
-    const bool linkDown = !(m_video.isConnected && m_video.isMptcp);
-    const int ticksBefore = m_notUsableTicks;
-    m_notUsableTicks = linkDown ? m_notUsableTicks + 1 : 0;
-
-    // Count consecutive FRESH-C2 ticks above the loss threshold, for the same
-    // reason as notUsableTicks above: the core must see "before this tick" so it
-    // can require N in a row. Only a FRESH C2 carries a live loss reading —
-    // STALE/NEVER_SEEN is "unknown", not "clean", so it clears the streak rather
-    // than letting it accrue on stale data.
-    const int c2LossTicksBefore = m_c2LossTicks;
-    const bool c2Lossy = (c2Mode == C2Mode::FRESH && m_c2.lossRatePct > ABR_C2_LOSS_PAUSE_PCT);
-    m_c2LossTicks = c2Lossy ? m_c2LossTicks + 1 : 0;
-
-    // Score-history streaks. Count THIS tick's sample — the freshness guard
-    // above already returned if there was no fresh video row, so a skipped tick
-    // FREEZES the streaks (never reaches here). Update BEFORE the call: the core
-    // compares the streak to ABR_SCORE_STREAK_TICKS, so it reads the count
-    // INCLUDING this tick — unlike notUsableTicks/c2LossTicks, whose core adds 1
-    // to a "before" value. A low sample clears the high streak and vice-versa; a
-    // deadband sample (neither low nor high) clears both.
-    if (m_video.score < ABR_SCORE_DEC_MIN) {
-        ++m_scoreLowStreak;
-        m_scoreHighStreak = 0;
-    } else if (m_video.score >= ABR_SCORE_UP_MIN) {
-        ++m_scoreHighStreak;
-        m_scoreLowStreak = 0;
-    } else {
-        m_scoreLowStreak = 0;
-        m_scoreHighStreak = 0;
-    }
-
-    AbrCounters cnt;
-    cnt.notUsableTicks  = ticksBefore;
-    cnt.c2LossTicks     = c2LossTicksBefore;
-    cnt.scoreLowStreak  = m_scoreLowStreak;
-    cnt.scoreHighStreak = m_scoreHighStreak;
-
-    // Ceiling memory (see ABR_CEILING_*). Resolve the LIVE cap from the PREVIOUS
-    // tick's memory BEFORE the call, exactly as c2Mode is resolved before
-    // m_lastComputeMs: the cap this tick's decision obeys is the one already on
-    // file, not one this very decision might write. A memory older than the dwell
-    // is dead — zero it here so the log and the cap agree, and so a stale entry
-    // cannot resurrect itself.
-    if (m_ceilingKbps > 0 && m_clock.elapsed() - m_ceilingSinceMs >= ABR_CEILING_DWELL_MS)
-        m_ceilingKbps = 0;
-    const int rampCapKbps = (m_ceilingKbps > 0)
-                                ? static_cast<int>(m_ceilingKbps * ABR_CEILING_BACKOFF)
-                                : 0;
-
-    const AbrDecision d = decideBitrate(m_video, m_c2, c2Mode, m_bitrate, cnt,
-                                        m_cameraCollapsed,
-                                        sinceLastChangeMs, m_maxAbr, rampCapKbps);
-    const int b = d.kbps;
-
-    // ── state update ─────────────────────────────────────────────────────
-    if (b == QOS_NOT_AVAILABLE) return d;   // -1: leave state alone
-
-    if (b != m_bitrate) {
-        const int from = m_bitrate;
-        // Ceiling memory: a DECREASE from a level we were not already backing off
-        // from records that level as the wall. The guard keeps a CHAIN of cuts
-        // from overwriting the true top with each lower step (matches xbfirm
-        // setNewBitrate: only record when the previous action was not a decrease).
-        //
-        // The ONLY exit is the dwell expiry in processQoS (or reset()). There is
-        // deliberately no "climb past the level → clear" branch: the cap holds
-        // every ramp to ABR_CEILING_BACKOFF × the recorded level, so an INCREASE
-        // can never reach the level itself — such a test is dead code. Recovery
-        // is time-based: the wall is remembered for ABR_CEILING_DWELL_MS, then
-        // forgotten and the ramp is free to find the (possibly moved) wall again.
-        if (b < from) {
-            const bool wasBackingOff = (m_ceilingKbps > 0) && (from <= m_ceilingKbps);
-            if (!wasBackingOff) {
-                m_ceilingKbps = from;
-                m_ceilingSinceMs = m_clock.elapsed();
-            }
-        }
-
-        m_lastChangeMs = m_clock.elapsed();
-        // Reset-after-fire: the streak that produced this change has done its
-        // job. Clearing BOTH here means a slow x0.80 needs 3 NEW low samples
-        // before repeating, and a fast loss-halve clears the low streak so a
-        // x0.80 cannot stack on the same event next tick.
-        m_scoreLowStreak  = 0;
-        m_scoreHighStreak = 0;
-    }
-    m_bitrate = b;
-
-    // ── Part B (§6c): stuck detection ────────────────────────────────────
-    updateStuckObservation(m_video.queuingDelayMs, b);
-
-    // The decision reads score, loss and trend; rtt+ (rtt - minRtt) is logged
-    // for diagnosis only, and the router's queuingDelayMs is dropped entirely —
-    // the two disagreed by orders of magnitude (2026-10-06) and only rtt+ is the
-    // physical queuing delay. If a future change makes rtt+ drive a branch, this
-    // line already carries it.
-    qDebug().nospace() << "[ABR][" << m_iface << "] c2=" << c2ModeName(c2Mode)
-                       << " score=" << QString::number(m_video.score, 'f', 1)
-                       << " trend=" << m_video.trend
-                       << " lowStreak=" << m_scoreLowStreak << " upStreak=" << m_scoreHighStreak
-                       << " rtt+=" << QString::number(m_video.rttMs - m_video.minRttMs, 'f', 1)
-                       << " loss=" << QString::number(m_video.lossRatePct, 'f', 3)
-                       << " cap=" << rampCapKbps
-                       << " -> " << b << "kbps";
-
-    return d;
-}
-
-void XBAdaptiveBitrateStreaming::updateStuckObservation(double queuingDelayMs, int emittedBitrate)
-{
-    // PART B — a reset is DESTRUCTIVE (teardown + reconnect = frozen picture).
-    // It is warranted only for a STUCK queue: congestion that persists AFTER
-    // the bitrate has already been lowered. Plain congestion is fixed by
-    // lowering and must never trigger a reset. See report §6c.
-    //
-    // Enter observation when either:
-    //   (a) this interface just became primary (a switch toward us — the sender
-    //       may still be pushing the old interface's high bitrate), or
-    //   (b) overdrive: measured throughput is far below what we are asking for.
-    // Both only START a watch; the reset decision is made after the window.
-    // The ratio is a DIVISOR: we are overdriving when the link delivers less
-    // than 1/ABR_OVERDRIVE_RATIO of the target (can't sustain ~62% of it).
-    // Written as a multiply it was true in normal operation — load ≈ bitrate
-    // is always < 1.6×bitrate — so the watch re-armed every tick forever.
-    const bool overdrive = (m_bitrate > ABR_OVERDRIVE_MIN_BITRATE_KBPS)
-                           && (m_video.throughputKbps > 0.0)
-                           && (m_video.throughputKbps < m_bitrate / ABR_OVERDRIVE_RATIO);
-    if (!m_observing && overdrive) {
-        m_observing = true;
-        m_obsQdelay0 = queuingDelayMs;
-        m_obsTicks = 0;
-        qInfo().nospace() << "[ABR][" << m_iface << "] observing (overdrive: thr="
-                          << QString::number(m_video.throughputKbps, 'f', 0)
-                          << "kbps < bitrate=" << m_bitrate << ")";
-    }
-
-    if (!m_observing) return;
-
-    ++m_obsTicks;
-
-    // Drained enough within the window → it was congestion, not a deadlock.
-    const bool drained = (m_obsQdelay0 > 0.0)
-                         && (queuingDelayMs <= m_obsQdelay0 * (1.0 - ABR_STUCK_DRAIN_DROP_PCT));
-    if (drained) {
-        qInfo().nospace() << "[ABR][" << m_iface << "] observation cleared (qdelay drained "
-                          << m_obsQdelay0 << " -> " << queuingDelayMs << "ms)";
-        m_observing = false;
-        m_obsTicks = 0;
-        return;
-    }
-
-    if (m_obsTicks < ABR_STUCK_OBSERVE_TICKS) return;
-
-    // Window elapsed with qdelay still high and undrained → stuck.
-    if (queuingDelayMs > ABR_STUCK_QDELAY_HIGH_MS) {
-        // Reset is destructive; rate-limit so a genuinely stuck link emits at
-        // most once per cooldown instead of re-firing every ~5 ticks. The
-        // executor (CameraControl) owns the real reset policy — this is only a
-        // guard against a signal storm from the detector.
-        const qint64 sinceResetMs = m_clock.elapsed() - m_lastResetMs;
-        if (m_lastResetMs == 0 || sinceResetMs >= ABR_RESET_COOLDOWN_MS) {
-            qWarning().nospace() << "[ABR][" << m_iface
-                                 << "] STUCK — qdelay " << queuingDelayMs
-                                 << "ms undrained after " << m_obsTicks
-                                 << " ticks at lowered bitrate → requestStreamReset";
-            m_lastResetMs = m_clock.elapsed();
-            emit requestStreamReset(m_iface, QStringLiteral("stuck"));
-        }
-    }
-    m_observing = false;
-    m_obsTicks = 0;
-    Q_UNUSED(emittedBitrate);
 }
 
 void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterface)
 {
-    // ── Part B entry: did we just become primary? (§6c) ──────────────────
-    const bool isPrimary = (primaryInterface == m_iface);
-    if (isPrimary && !m_wasPrimary) {
-        qInfo().nospace() << "[ABR][" << m_iface << "] became primary — begin watch";
-        if (!m_observing) {
-            m_observing = true;
-            m_obsQdelay0 = m_video.queuingDelayMs;
-            m_obsTicks = 0;
+    // xbfirm has no per-tick hook — its algorithm is edge-triggered from
+    // processTCPInfo. This exists so the QS debug channel gets a per-tick
+    // verdict; it does NOT feed the algorithm.
+    //
+    // branch/reason are VESTIGIAL: xbfirm has no branch concept, so the value is
+    // always HOLD(0)/NONE(0). The wire keeps both columns (frozen — the
+    // dashboard decodes positionally); only the values are pinned to 0. Emitted
+    // as plain ints (no include of the wire enum) so this class stays decoupled.
+    Q_UNUSED(primaryInterface);
+    emit decisionMade(m_iface, static_cast<int>(m_abrState.current_bitrate_kbps),
+                      0, /*branch=HOLD*/ 0, /*reason=NONE*/ 0,
+                      static_cast<int>(m_maxAbr));
+}
+
+void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
+{
+    // PORT DEVIATION: xbfirm has NO camera-collapse input. Stored for logging
+    // only; it does NOT gate the algorithm (that would be non-xbfirm logic).
+    if (achievedKbps <= 0) return;
+    m_lastAchievedKbps = achievedKbps;
+    qInfo().nospace() << "[ABR][" << m_iface << "] camera reported achieved="
+                      << achievedKbps << "kbps (asked="
+                      << m_abrState.current_bitrate_kbps << "kbps)";
+}
+
+// === xbfirm CORE — processTCPInfo ===
+
+void XBAdaptiveBitrateStreaming::processTCPInfo(const tcpInfo &tcpi)
+{
+    // xbfirm processTCPInfo(const tcpInfo&), verbatim.
+    m_lastNetworkDataTime = m_clock.elapsed();
+
+    bool bitrateChanged = false;
+
+    if (haveLostPackets(tcpi)) {
+        bitrateChanged = true;
+    } else if (rttHigh(tcpi)) {
+        bitrateChanged = true;
+    } else {
+        unsigned int oldBitrate = m_abrState.current_bitrate_kbps;
+        checkSenderQueue(tcpi);
+        bitrateChanged = (oldBitrate != m_abrState.current_bitrate_kbps);
+    }
+
+    updateStreamingStatus(tcpi, bitrateChanged);
+}
+
+void XBAdaptiveBitrateStreaming::processTCPInfo(quint32 rtt, quint32 min_rtt,
+                                                double throughput, double loss_rate,
+                                                quint32 siocoutq, quint32 so_sndbuf,
+                                                int tcpiSegsout)
+{
+    // xbfirm processTCPInfo(quint32,...), verbatim. Converts raw units to
+    // tcpInfo's (ms / kbps / percent) and gates on _cameraStatus before
+    // forwarding to the core. NOTE the gate lives HERE, not at the router-row
+    // entry: xbfirm puts it in this overload, and the 11-arg caller above simply
+    // forwards through it.
+    int deltaSegsout = tcpiSegsout - _lastTcpiSegsout;
+    _lastTcpiSegsout = tcpiSegsout;
+
+    tcpInfo tcpi;
+    tcpi.rtt = rtt / 1000;
+    tcpi.min_rtt = min_rtt / 1000;
+    tcpi.throughput = (throughput * 8) / 1000.0;
+    // loss_rate arrives as a lost-packet COUNT; dividing by the packets sent in
+    // this interval yields the percent. This is why the router sends the raw
+    // counters rather than a percent — the same arithmetic xbfirm runs.
+    tcpi.loss_rate = (deltaSegsout > 0) ? (loss_rate / deltaSegsout * 100.0) : 0.0;
+    tcpi.siocoutq = siocoutq;
+    tcpi.so_sndbuf = so_sndbuf;
+    if (!_cameraStatus) return;
+    this->processTCPInfo(tcpi);
+}
+
+void XBAdaptiveBitrateStreaming::processTCPInfo(double rtt, double deliveryRate,
+                                                double tcpiRtt, int tcpiLoss,
+                                                int tcpiSegsout, int tcpiSndCwnd,
+                                                int tcpiSndMss, int tcpiLastAckRecv,
+                                                int sockOutq, int sockSndBuf,
+                                                int tcpiMinRtt)
+{
+    // xbfirm processTCPInfo(double,...), verbatim: forwards to the 7-arg
+    // overload, DROPPING tcpiSndCwnd/tcpiSndMss/tcpiLastAckRecv and the
+    // duplicated tcpiRtt. Kept as a distinct overload so the port consumes the
+    // router's 22-field row in xbfirm's own wire order.
+    Q_UNUSED(tcpiRtt);
+    Q_UNUSED(tcpiSndCwnd);
+    Q_UNUSED(tcpiSndMss);
+    Q_UNUSED(tcpiLastAckRecv);
+    this->processTCPInfo(static_cast<quint32>(rtt),
+                         static_cast<quint32>(tcpiMinRtt),
+                         deliveryRate, tcpiLoss, static_cast<quint32>(sockOutq),
+                         static_cast<quint32>(sockSndBuf), tcpiSegsout);
+}
+
+void XBAdaptiveBitrateStreaming::processTelemetryTCPInfo(double rtt, double deliveryRate,
+                                                         double tcpiRtt, int tcpiLoss,
+                                                         int tcpiSegsout, int tcpiSndCwnd,
+                                                         int tcpiSndMss, int tcpiLastAckRecv,
+                                                         int sockOutq, int sockSndBuf,
+                                                         int tcpiMinRtt)
+{
+    // xbfirm processTelemetryTCPInfo(...), verbatim. Only rtt/minRtt/loss are
+    // read; the rest of the signature is kept for parity with xbfirm's caller.
+    Q_UNUSED(deliveryRate);
+    Q_UNUSED(tcpiRtt);
+    Q_UNUSED(tcpiSndCwnd);
+    Q_UNUSED(tcpiSndMss);
+    Q_UNUSED(tcpiLastAckRecv);
+    Q_UNUSED(sockOutq);
+    Q_UNUSED(sockSndBuf);
+
+    if (!_haveTelemetry) return;
+
+    int deltaSegsout = tcpiSegsout - _lastTelemetrySegsout;
+    _lastTelemetrySegsout = tcpiSegsout;
+    const double lossRate = (deltaSegsout > 0)
+                                ? (static_cast<double>(tcpiLoss) / deltaSegsout * 100.0)
+                                : 0.0;
+
+    m_telemetryLossRate = lossRate;
+    m_telemetryRtt      = static_cast<quint32>(rtt / 1000);
+    m_telemetryMinRtt   = static_cast<quint32>(tcpiMinRtt / 1000);
+
+    if (lossRate > 1.0) {
+        if (m_abrState.current_bitrate_kbps > MIN_BITRATE_KBPS
+            && m_abrState.current_bitrate_kbps < m_problematicBitrateThreshold) {
+            m_problematicBitrateThreshold = m_abrState.current_bitrate_kbps;
+            qWarning().nospace() << "[ABR][" << m_iface
+                                 << "] Kick failed: recorded problematic threshold ="
+                                 << m_problematicBitrateThreshold << "kbps";
+        }
+        _cameraStatus = false;
+        m_telemetryStableSince = 0;
+        m_abrState.current_bitrate_kbps = MIN_BITRATE_KBPS;
+        emit bitrateProposed(m_iface, 0);
+        return;
+    } else {
+        if (!_cameraStatus) {
+            const qint64 now = m_clock.elapsed();
+
+            if (m_telemetryStableSince == 0) m_telemetryStableSince = now;
+
+            if (now - m_telemetryStableSince >= static_cast<qint64>(TELEMETRY_STABLE_TIMEOUT_MS)) {
+                _cameraStatus = true;
+                m_telemetryStableSince = 0;
+
+                if (m_abrState.current_bitrate_kbps <= MIN_BITRATE_KBPS) {
+                    unsigned int kickBitrate;
+                    if (m_problematicBitrateThreshold < m_maxAbr) {
+                        kickBitrate = static_cast<unsigned int>(m_problematicBitrateThreshold * 0.9);
+                        kickBitrate = qBound(MIN_BITRATE_KBPS + BITRATE_STEP_KBPS, kickBitrate, m_maxAbr);
+                        qWarning().nospace() << "[ABR][" << m_iface
+                                             << "] ABR Kick (smart): MIN ->" << kickBitrate
+                                             << "kbps (threshold:" << m_problematicBitrateThreshold << "kbps)";
+                    } else {
+                        kickBitrate = qMin(TELEMETRY_KICK_BITRATE_KBPS, m_maxAbr);
+                        qWarning().nospace() << "[ABR][" << m_iface
+                                             << "] ABR Kick (probe): MIN ->" << kickBitrate << "kbps";
+                    }
+                    setNewBitrate(kickBitrate);
+                } else {
+                    qInfo().nospace() << "[ABR][" << m_iface << "] ABR recovery: bitrate already at "
+                                      << m_abrState.current_bitrate_kbps << "kbps, no kick needed";
+                }
+            }
         }
     }
-    m_wasPrimary = isPrimary;
+}
 
-    const AbrDecision d = processQoS();
-    if (d.kbps == QOS_NOT_AVAILABLE) return;   // -1: cannot decide → do not emit
+// === xbfirm CORE — decision branches ===
 
-    // The full decision goes out EVERY computable tick, holds included: the QS
-    // channel wants the verdict beside its inputs on each sample, not only when
-    // the bitrate moves. bitrateProposed keeps its deadband below — a consumer
-    // acting on the video only cares when the number changes.
-    emit decisionMade(m_iface, d.kbps, static_cast<int>(m_lastC2Mode),
-                      static_cast<int>(d.branch), static_cast<int>(d.reason), m_maxAbr);
+bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
+{
+    // xbfirm haveLostPackets, verbatim.
+    if (tcpi.loss_rate <= 0.8) return false;
 
-    const int b = d.kbps;
-    if (b == m_lastEmitted) return;       // deadband at the emit layer
+    if (m_telemetryLossRate > 0.3) {
+        qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
+                             << "% + Telemetry loss: " << m_telemetryLossRate
+                             << "% -> Network degraded, dropping to MIN";
+        setNewBitrate(MIN_BITRATE_KBPS);
+    } else {
+        unsigned int new_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * 0.50);
+        qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
+                             << "% but Telemetry OK (" << m_telemetryLossRate
+                             << "%) -> Self-congestion, reducing 50% to " << new_bitrate << "kbps";
+        setNewBitrate(new_bitrate);
+    }
+    m_rttHistory.clear();
+    return true;
+}
 
-    m_lastEmitted = b;
-    emit bitrateProposed(m_iface, static_cast<unsigned int>(b));
+bool XBAdaptiveBitrateStreaming::rttHigh(const tcpInfo &tcpi)
+{
+    // xbfirm rttHigh, verbatim. NOTE: reads the TELEMETRY (C2) rtt, not the
+    // video socket's — tcpi is unused. The threshold is hardcoded 500 in xbfirm
+    // (RTT_HIGH_THRESHOLD_MS is declared but not used there either).
+    Q_UNUSED(tcpi);
+    quint32 queuing_delay = m_telemetryRtt - m_telemetryMinRtt;
+    if (queuing_delay <= 500) return false;
+
+    qWarning().nospace() << "[ABR][" << m_iface << "] High Telemetry RTT (Queuing Delay > 500ms): "
+                         << queuing_delay << "ms (RTT:" << m_telemetryRtt
+                         << "ms, MinRTT:" << m_telemetryMinRtt << "ms)";
+    unsigned int new_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * 0.80);
+    setNewBitrate(new_bitrate);
+    m_rttHistory.clear();
+    return true;
+}
+
+double XBAdaptiveBitrateStreaming::calculateJitter()
+{
+    // xbfirm calculateJitter, verbatim.
+    if (m_rttHistory.size() < 2) return 0.0;
+
+    double sum = 0.0;
+    for (const auto &val : m_rttHistory) { sum += val; }
+    const double mean = sum / m_rttHistory.size();
+
+    double sq_sum = 0.0;
+    for (const auto &val : m_rttHistory) { sq_sum += qPow(val - mean, 2); }
+    return qSqrt(sq_sum / m_rttHistory.size());
+}
+
+void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
+{
+    // xbfirm checkSenderQueue, verbatim. (The stray unused
+    // `bool testNetworkDelay = ...` in xbfirm is dropped — it is dead.)
+    m_rttHistory.append(tcpi.rtt);
+    if (m_rttHistory.size() > RTT_HISTORY_SIZE) m_rttHistory.removeFirst();
+
+    const double jitter = calculateJitter();
+
+    constexpr double EMA_ALPHA = 0.5;
+    m_avgSiocoutq = (EMA_ALPHA * tcpi.siocoutq) + ((1.0 - EMA_ALPHA) * m_avgSiocoutq);
+
+    const unsigned int current_throughput_Bps = static_cast<unsigned int>((tcpi.throughput * 1000) / 8);
+
+    if (current_throughput_Bps == 0) {
+        qWarning().nospace() << "[ABR][" << m_iface << "] Throughput is 0! Dropping to MIN";
+        setNewBitrate(MIN_BITRATE_KBPS);
+        return;
+    }
+
+    const double queuing_delay_ms = (m_avgSiocoutq / static_cast<double>(current_throughput_Bps)) * 1000.0;
+
+    const double increase_q_delay_threshold =
+        (m_lastAbrAction == ABR_DECREASE) ? QUEUE_DELAY_LOW_AFTER_DECREASE_MS : QUEUE_DELAY_LOW_THRESHOLD_MS;
+    const double increase_rtt_delay_threshold =
+        (m_lastAbrAction == ABR_DECREASE) ? RTT_STABLE_AFTER_DECREASE_MS : RTT_STABLE_THRESHOLD_MS;
+
+    if (queuing_delay_ms > QUEUE_DELAY_HIGH_THRESHOLD_MS) {
+        qWarning().nospace() << "[ABR][" << m_iface << "] Queued time >"
+                             << QUEUE_DELAY_HIGH_THRESHOLD_MS << "ms";
+        unsigned int decreased_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * m_gainDown);
+        setNewBitrate(decreased_bitrate);
+        m_rttHistory.clear();
+    } else if (queuing_delay_ms < increase_q_delay_threshold) {
+        qWarning().nospace() << "[ABR][" << m_iface << "] Queued time <" << queuing_delay_ms << "ms";
+        const quint32 network_delay = tcpi.rtt - tcpi.min_rtt;
+        if (network_delay < increase_rtt_delay_threshold) {
+            qWarning().nospace() << "[ABR][" << m_iface << "] Network delay <" << network_delay << "ms";
+            if (jitter < JITTER_STABLE_THRESHOLD_MS) {
+                qWarning().nospace() << "[ABR][" << m_iface << "] RTT stable (" << network_delay
+                                     << "ms < " << increase_rtt_delay_threshold << "ms) & Jitter stable ("
+                                     << jitter << "ms < " << JITTER_STABLE_THRESHOLD_MS << "ms)";
+                const qint64 now = m_clock.elapsed();
+                const qint64 time_since_last_change = now - m_lastQualityChangeTime;
+                qWarning().nospace() << "[ABR][" << m_iface << "] Cooldown check: "
+                                     << time_since_last_change << "ms since last change (need >= "
+                                     << BITRATE_INCREASE_COOLDOWN_MS << "ms)";
+                if (time_since_last_change >= BITRATE_INCREASE_COOLDOWN_MS) {
+                    unsigned int new_bitrate = m_abrState.current_bitrate_kbps
+                                             + static_cast<unsigned int>(m_gainUp * BITRATE_STEP_KBPS);
+                    setNewBitrate(new_bitrate);
+                }
+            }
+        }
+    } else {
+        qWarning().nospace() << "[ABR][" << m_iface << "] Another condition: Queued time is moderate ("
+                             << increase_q_delay_threshold << " < " << queuing_delay_ms << "ms) < "
+                             << QUEUE_DELAY_HIGH_THRESHOLD_MS << "ms). Holding bitrate.";
+    }
+}
+
+void XBAdaptiveBitrateStreaming::setNewBitrate(unsigned int new_bitrate_kbps)
+{
+    // xbfirm setNewBitrate, verbatim. `emit bitrateChanged(adjusted_bitrate)` is
+    // renamed to bitrateProposed(m_iface, ...).
+    double adjusted_bitrate_raw = new_bitrate_kbps * m_alpha;
+    adjusted_bitrate_raw = qBound(MIN_BITRATE_KBPS,
+                                  static_cast<unsigned int>(adjusted_bitrate_raw),
+                                  m_maxAbr);
+
+    const double diff_raw = (adjusted_bitrate_raw > m_abrState.current_bitrate_kbps)
+                                ? (adjusted_bitrate_raw - m_abrState.current_bitrate_kbps)
+                                : (m_abrState.current_bitrate_kbps - adjusted_bitrate_raw);
+    if (diff_raw < MIN_BITRATE_CHANGE_THRESHOLD) return;
+
+    const unsigned int adjusted_bitrate = static_cast<unsigned int>(adjusted_bitrate_raw);
+
+    qInfo().nospace() << "[ABR][" << m_iface << "] BITRATE CHANGE: old="
+                      << m_abrState.current_bitrate_kbps << "kbps -> new=" << adjusted_bitrate << "kbps";
+
+    if (adjusted_bitrate < m_abrState.current_bitrate_kbps) {
+        if (m_lastAbrAction == ABR_INCREASE || m_lastAbrAction == ABR_NONE) {
+            m_problematicBitrateThreshold = m_abrState.current_bitrate_kbps;
+        }
+        m_lastAbrAction = ABR_DECREASE;
+    } else if (adjusted_bitrate >= m_problematicBitrateThreshold) {
+        m_problematicBitrateThreshold = m_maxAbr;
+        m_lastAbrAction = ABR_INCREASE;
+    }
+
+    m_abrState.current_bitrate_kbps = adjusted_bitrate;
+    m_lastQualityChangeTime = m_clock.elapsed();
+
+    emit bitrateProposed(m_iface, adjusted_bitrate);
+}
+
+// === xbfirm CORE — UX status ===
+
+void XBAdaptiveBitrateStreaming::updateStreamingStatus(const tcpInfo &tcpi, bool bitrateChanged)
+{
+    // xbfirm updateStreamingStatus, verbatim (QDateTime -> m_clock.elapsed()).
+    StreamingQualityStatus newStatus = m_currentStatus;
+    const qint64 now = m_clock.elapsed();
+
+    if (tcpi.throughput == 0.0 || tcpi.loss_rate > 5.0) {
+        newStatus = BUFFERING;
+        m_consecutivePoorConditions++;
+    } else if (m_previousStatus == BUFFERING && (now - m_lastStatusChangeTime) < 3000) {
+        newStatus = LOADING;
+        m_consecutivePoorConditions = 0;
+    } else if (m_abrState.current_bitrate_kbps <= (MIN_BITRATE_KBPS + BITRATE_STEP_KBPS)
+               || (m_lastAbrAction == ABR_DECREASE && m_consecutivePoorConditions >= 2)) {
+        newStatus = POOR_NETWORK;
+        if (m_lastAbrAction == ABR_DECREASE) m_consecutivePoorConditions++;
+    } else if (bitrateChanged || (now - m_lastQualityChangeTime) < 3000) {
+        newStatus = OPTIMIZING;
+        if (m_lastAbrAction == ABR_INCREASE) m_consecutivePoorConditions = 0;
+    } else {
+        newStatus = PLAYING_AUTO;
+        m_consecutivePoorConditions = 0;
+    }
+
+    if (newStatus != m_currentStatus) {
+        m_previousStatus = m_currentStatus;
+        m_currentStatus = newStatus;
+        m_lastStatusChangeTime = now;
+        qInfo().nospace() << "[ABR][" << m_iface << "] UX status -> " << statusName(newStatus);
+        emit onStatus(static_cast<int>(newStatus));
+    }
+}
+
+// === xbfirm TIMERS ===
+
+void XBAdaptiveBitrateStreaming::onNetworkDataTimeout()
+{
+    // PORT DEVIATION: xbfirm uses this to REQUEST connection stats over a socket
+    // (emit requestStartConnectionStats) when its transport goes quiet. The
+    // router PUSHES at 1 Hz and this service owns no such socket, so the timer
+    // is repurposed to WARN on router silence — the same "inputs went stale"
+    // signal, without inventing a request path.
+    if (!m_isStarted) return;
+    const qint64 timeSinceLastData = m_clock.elapsed() - m_lastNetworkDataTime;
+    if (timeSinceLastData >= 5000) {
+        qWarning().nospace() << "[ABR][" << m_iface << "] no router row for "
+                             << timeSinceLastData << "ms — ABR is open-loop on stale inputs";
+    }
+}
+
+void XBAdaptiveBitrateStreaming::onStatusBroadcastTimeout()
+{
+    // xbfirm onStatusBroadcastTimeout, verbatim: re-broadcast the current UX
+    // status every 5s so a consumer never misses a transition.
+    if (!m_isStarted) return;
+    emit onStatus(static_cast<int>(m_currentStatus));
 }

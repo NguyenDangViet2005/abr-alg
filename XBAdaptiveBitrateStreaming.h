@@ -3,139 +3,231 @@
 
 #include <QObject>
 #include <QString>
+#include <QVector>
 #include <QElapsedTimer>
+#include <QTimer>
 #include "IAdaptiveBitrateStreaming.h"
 #include "RouterInterfaceStat.h"
-#include "ABRDecision.h"
 #include "ABRConfigs.h"
 
 // One ABR instance per interface, fed by the router's per-interface rows
 // (UDP 12346, id-60). Distinct from SRTAdaptiveBitrateStreaming, which consumes
 // XBSRTFactory's QoS on 12345; the two are deliberately separate engines.
 //
-// The decision itself lives in the pure decideBitrate() (ABRDecision.h). This
-// class only holds state, guards against stale data, resolves the C2 reference
-// mode, and emits a proposal. That split is what makes the algorithm testable
-// without a socket.
+// This is a VERBATIM port of xbfirm's XBAdaptiveBitrateStreaming
+// (aiCompressor/XBAdaptiveBitrateStreaming.{h,cpp}) — the standard. The decision
+// core — haveLostPackets / rttHigh / checkSenderQueue / setNewBitrate /
+// calculateJitter / processTCPInfo / processTelemetryTCPInfo /
+// updateStreamingStatus / reset — is copied as-is. Only the SOURCE of the two
+// inputs changes:
+//
+//   VIDEO row (600) -> the tcpInfo slot   (processTCPInfo)
+//   C2 row    (601) -> the telemetry slot (processTelemetryTCPInfo)
+//
+// xbfirm fused two INDEPENDENT measurements (the video socket's tcpi + a
+// separate link probe). The router already carries the equivalent pair as the
+// video and C2 flows, so mapping C2 -> telemetry restores the second source
+// without inventing anything.
+//
+// Adaptations from xbfirm, each documented at its site:
+//   1. Settings/serial/UDP coupling stripped. Thresholds are the xbfirm
+//      Settings DEFAULTS (what xbfirm actually runs — see the constants; the
+//      header's inline 10.0/15.0 for the two *AFTER_DECREASE values are DEAD,
+//      overwritten in xbfirm's ctor from Settings).
+//   2. Timing uses the monotonic QElapsedTimer, not wall-clock. xbfirm's
+//      QDateTime::currentMSecsSinceEpoch() calls measured ELAPSED ms; the
+//      epoch is irrelevant and monotonic is strictly safer (no NTP jumps).
+//   3. The two 5s QTimers are xbfirm's transport polling. The router PUSHES at
+//      1 Hz, so onNetworkDataTimeout() is repurposed to WARN on router silence
+//      rather than request stats over a socket this service does not own.
 class XBAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
     Q_OBJECT
 public:
     XBAdaptiveBitrateStreaming(const QString &iface, bool isC2Configured,
                                QObject *parent = nullptr);
+    ~XBAdaptiveBitrateStreaming() override;
 
     void setMaxAbrBitrate(unsigned int newMaxAbrBitrate) override;
-    void start() override {}
-    void stop()  override {}
+    void start() override;
+    void stop()  override;
     void reset(int bitrateKbps) override;
 
     QString iface() const { return m_iface; }
     bool    isC2Configured() const { return m_isC2Configured; }
-    int     currentBitrate() const { return m_bitrate; }
+    int     currentBitrate() const { return static_cast<int>(m_abrState.current_bitrate_kbps); }
 
 public slots:
     // One VIDEO or C2 row destined for THIS interface (the factory routes by
-    // name). Stores the row and stamps its arrival on the monotonic clock;
-    // rows for other interfaces never reach here.
+    // name). Splits by connType: VIDEO -> processTCPInfo (the tcpInfo slot),
+    // C2 -> processTelemetryTCPInfo (the telemetry slot). xbfirm's two input
+    // sources, fed from the router's two flows.
     void handleRouterRow(const RouterInterfaceStat &row);
 
-    // End-of-tick marker (row 602). Runs the stateful wrapper around the core.
+    // End-of-tick marker (row 602). xbfirm has no equivalent — its algorithm is
+    // edge-triggered from processTCPInfo. This exists so the QS debug channel
+    // gets a per-tick verdict; it does not feed the algorithm.
     void handleRouterTick(const QString &primaryInterface);
 
-    // The camera's report of what it actually achieved for the last request.
-    // Closes the loop: the router ABR is otherwise open-loop, so this is the one
-    // fact that tells it whether the camera accepted the ask. `achievedKbps <= 0`
-    // (camera did not report) is ignored — it must NOT read as "collapsed".
+    // The camera's report of what it actually achieved. xbfirm has NO such
+    // input; kept only so the existing wiring compiles, and stored for logging.
+    // It does NOT gate the algorithm (that would be non-xbfirm logic).
     void handleCameraReportedBitrate(int achievedKbps);
 
 signals:
-    // The proposal for this interface. `-1` (NOT_AVAILABLE) is never emitted —
-    // the wrapper returns before emitting. `0` means pause.
+    // xbfirm's bitrateChanged, renamed. `0` means pause.
     void bitrateProposed(const QString &iface, unsigned int kbps);
 
-    // The FULL decision for this tick: the proposal plus the branch/reason that
-    // produced it and the C2 mode + ceiling it was made against. The QS debug
-    // channel taps this so a sample carries the decision beside its inputs —
-    // bitrateProposed alone loses the WHY. Ints, not the enums, so a plain
-    // QObject::connect (no qRegisterMetaType) carries it to another object.
-    // Emitted every computable tick, even when the bitrate holds.
+    // Per-tick verdict for the QS debug channel. Emitted with the current
+    // bitrate; branch/reason are VESTIGIAL (xbfirm has no branch concept) and
+    // carry HOLD/NONE. The wire keeps both columns (frozen — the dashboard
+    // decodes positionally); only the values are pinned to 0.
     void decisionMade(const QString &iface, int kbps, int c2Mode,
                       int branch, int reason, int maxAbr);
 
     // PART B — a reset is warranted. No executor exists (XBQoSService owns no
-    // video socket), so this is detect + emit only; see report §6c.
+    // video socket), so this is detect + emit only.
     void requestStreamReset(const QString &iface, const QString &reason);
 
 private:
-    AbrDecision processQoS();
-    C2Mode  c2ModeForThisTick();
-    bool    hasFreshVideoRow() const;
-    void    updateStuckObservation(double queuingDelayMs, int emittedBitrate);
+    // ── xbfirm's core ────────────────────────────────────────────────────
+    struct tcpInfo {
+        quint32 rtt = 0;          // ms
+        quint32 min_rtt = 0;      // ms
+        double  throughput = 0;   // kbps
+        double  loss_rate = 0;    // %
+        quint32 siocoutq = 0;     // bytes
+        quint32 so_sndbuf = 0;    // bytes
+    };
+    struct AbrState { unsigned int current_bitrate_kbps = 0; };
+    enum LastAction { ABR_NONE, ABR_INCREASE, ABR_DECREASE };
 
+    // xbfirm's UX status, emitted via onStatus (base signal).
+    enum StreamingQualityStatus {
+        PLAYING_AUTO = 0, OPTIMIZING = 1, POOR_NETWORK = 2, BUFFERING = 3, LOADING = 4
+    };
+
+    void processTCPInfo(const tcpInfo &tcpi);
+
+    // xbfirm's 7-arg overload: the unit-conversion + _cameraStatus gate stage.
+    // Inputs are RAW: rtt/min_rtt in MICROseconds, throughput in BYTES/s,
+    // loss_rate as a lost-packet COUNT (the body divides it by delta(tcpiSegsout)
+    // to get a percent), siocoutq/so_sndbuf bytes, tcpiSegsout a packet count.
+    // These are exactly the router's raw counter block, so the port feeds them
+    // with no unit fudge.
+    void processTCPInfo(quint32 rtt, quint32 min_rtt, double throughput,
+                        double loss_rate, quint32 siocoutq, quint32 so_sndbuf,
+                        int tcpiSegsout);
+
+    // xbfirm's 11-arg overload: the wire-shaped entry, forwarding to the 7-arg
+    // overload above. DROPS tcpiSndCwnd/tcpiSndMss/tcpiLastAckRecv — exactly as
+    // xbfirm does, so the port keeps the same (smaller) live field set. rtt and
+    // tcpiMinRtt are MICROseconds.
+    void processTCPInfo(double rtt, double deliveryRate, double tcpiRtt,
+                        int tcpiLoss, int tcpiSegsout, int tcpiSndCwnd,
+                        int tcpiSndMss, int tcpiLastAckRecv, int sockOutq,
+                        int sockSndBuf, int tcpiMinRtt);
+
+    // xbfirm's telemetry slot, fed from the C2 (601) row. Same raw units as the
+    // 11-arg overload: rtt/tcpiMinRtt MICROseconds, tcpiLoss/tcpiSegsout packet
+    // counts. The body derives the telemetry loss percent from
+    // delta(tcpiLoss)/delta(tcpiSegsout) itself, so no synthetic counter is
+    // needed — the router sends the real counters.
+    void processTelemetryTCPInfo(double rtt, double deliveryRate, double tcpiRtt,
+                                 int tcpiLoss, int tcpiSegsout, int tcpiSndCwnd,
+                                 int tcpiSndMss, int tcpiLastAckRecv, int sockOutq,
+                                 int sockSndBuf, int tcpiMinRtt);
+
+    bool haveLostPackets(const tcpInfo &tcpi);
+    bool rttHigh(const tcpInfo &tcpi);
+    double calculateJitter();
+    void checkSenderQueue(const tcpInfo &tcpi);
+    void setNewBitrate(unsigned int new_bitrate_kbps);
+    void updateStreamingStatus(const tcpInfo &tcpi, bool bitrateChanged);
+
+    void onNetworkDataTimeout();
+    void onStatusBroadcastTimeout();
+
+    // ── Bitrate constraints (xbfirm) ─────────────────────────────────────
+    static constexpr unsigned int MIN_BITRATE_KBPS  = 30;
+    static constexpr unsigned int MAX_BITRATE_KBPS  = 2000;
+    static constexpr unsigned int BITRATE_STEP_KBPS = 100;
+    static constexpr unsigned int MIN_BITRATE_CHANGE_THRESHOLD = 30;
+
+    // ── Algorithm parameters (xbfirm; *AFTER_DECREASE = Settings defaults) ──
+    static constexpr int     RTT_HISTORY_SIZE = 10;
+    static constexpr quint32 RTT_HIGH_THRESHOLD_MS = 500;   // rttHigh hardcodes 500
+    static constexpr double  QUEUE_DELAY_HIGH_THRESHOLD_MS = 400.0;
+    static constexpr double  QUEUE_DELAY_LOW_THRESHOLD_MS  = 100.0;
+    static constexpr double  QUEUE_DELAY_LOW_AFTER_DECREASE_MS = 20.0;
+    static constexpr double  RTT_STABLE_THRESHOLD_MS = 50.0;
+    static constexpr double  RTT_STABLE_AFTER_DECREASE_MS = 20.0;
+    static constexpr double  JITTER_STABLE_THRESHOLD_MS = 15.0;
+    static constexpr double  TELEMETRY_STABLE_TIMEOUT_MS = 3000.0;
+    static constexpr unsigned int TELEMETRY_KICK_BITRATE_KBPS = 500;
+    static constexpr qint64  BITRATE_INCREASE_COOLDOWN_MS = 2000;
+
+    // ── Core state (xbfirm) ──────────────────────────────────────────────
+    AbrState m_abrState;
+    QVector<quint32> m_rttHistory;
+    LastAction m_lastAbrAction = ABR_NONE;
+    unsigned int m_problematicBitrateThreshold = MAX_BITRATE_KBPS;
+    qint64 m_lastQualityChangeTime = 0;
+    double m_avgSiocoutq = 0.0;
+    unsigned int m_maxAbr;
+
+    // Advisor coefficients. xbfirm's CellularPredictive drove these; with no
+    // predictor they stay at xbfirm's ctor defaults (1.0), so gainDown=1.0
+    // makes the qdelay>400 decrease a no-op and gainUp=1.0 gives the plain
+    // +BITRATE_STEP_KBPS step. Kept as members for parity.
+    double m_alpha = 1.0;
+    double m_gainUp = 1.0;
+    double m_gainDown = 1.0;
+
+    // UX status (xbfirm updateStreamingStatus).
+    StreamingQualityStatus m_currentStatus = LOADING;
+    StreamingQualityStatus m_previousStatus = LOADING;
+    int m_consecutivePoorConditions = 0;
+    qint64 m_lastStatusChangeTime = 0;
+
+    bool m_isStarted = false;
+
+    // Cumulative tracking for the delta calculation (xbfirm).
+    int _lastTcpiSegsout = 0;
+    int _lastTelemetrySegsout = 0;
+
+    // Telemetry (C2) data (xbfirm).
+    quint32 m_telemetryRtt = 0;
+    quint32 m_telemetryMinRtt = 0;
+    double  m_telemetryLossRate = 0.0;
+    qint64  m_telemetryStableSince = 0;
+
+    // Gate on the telemetry slot (xbfirm's _haveTelemetry). Set true once a C2
+    // row has been seen — "the C2 subflow exists". If C2 is never present,
+    // rttHigh never fires and the telemetry-loss branch reads 0, mirroring
+    // xbfirm with no telemetry source.
+    bool _haveTelemetry = false;
+    // xbfirm's _cameraStatus: false pins the video path off while telemetry loss
+    // is severe. Set false by processTelemetryTCPInfo on >1% loss; restored
+    // after TELEMETRY_STABLE_TIMEOUT_MS of clean telemetry.
+    bool _cameraStatus = true;
+
+    // ── Router wiring (not xbfirm) ───────────────────────────────────────
     const QString m_iface;
-    const bool    m_isC2Configured;   // global, from ctor, immutable
-    int           m_maxAbr;
+    const bool m_isC2Configured;
 
-    RouterInterfaceStat m_video;
-    RouterInterfaceStat m_c2;
+    QElapsedTimer m_clock;
 
-    QElapsedTimer m_clock;            // monotonic — never wall-clock (NTP jumps)
-    qint64 m_lastVideoMs   = -1;
-    qint64 m_lastC2Ms      = -1;
-    qint64 m_lastComputeMs = -1;
-    qint64 m_lastChangeMs  = 0;
+    RouterInterfaceStat m_video;   // last VIDEO row
+    RouterInterfaceStat m_c2;      // last C2 row
+    qint64 m_lastNetworkDataTime = 0;
+    qint64 m_lastResetMs = 0;      // 0 = never emitted a reset (Part B rate-limit)
 
-    bool m_c2EverSeen   = false;
-    bool m_videoEverSeen = false;
-    bool m_staleWarned  = false;
-    bool m_c2Warned     = false;
+    // Camera closed loop — stored for logging only (see handleCameraReportedBitrate).
+    int m_lastAchievedKbps = 0;
 
-    int  m_bitrate        = ABR_INITIAL_BITRATE_KBPS;
-    int  m_notUsableTicks = 0;
-    // Consecutive FRESH-C2 ticks whose loss is above ABR_C2_LOSS_PAUSE_PCT.
-    // Reset by any non-lossy tick, by a non-FRESH C2, and by reset(). Fed to
-    // decideBitrate so the pause needs ABR_C2_LOSS_PAUSE_TICKS in a row.
-    int  m_c2LossTicks    = 0;
-    // Score-history streaks (2026-10-06). Counted ONLY on a fresh-video tick —
-    // the freshness guard early-returns before this, so a skipped tick freezes
-    // them. A sample below ABR_SCORE_DEC_MIN bumps m_scoreLowStreak and clears
-    // the high one (and vice-versa); a deadband sample clears both. BOTH are
-    // cleared whenever the bitrate changes, so a slow score backoff needs 3 NEW
-    // low samples before it can fire again, and a fast loss-halve cannot be
-    // followed by a slow x0.80 on the same event.
-    int  m_scoreLowStreak  = 0;
-    int  m_scoreHighStreak = 0;
-    int  m_lastEmitted    = -1;       // -1 = nothing emitted yet
-
-    // ── Ceiling memory (2026-10-06) ──
-    // The bitrate that last FAILED on a congestion decrease, and when it was
-    // recorded. 0 = no memory → no cap. `throughputKbps` is LOAD, not capacity,
-    // so the wall is invisible until hit; this remembers where it was and caps
-    // the ramp at ABR_CEILING_BACKOFF × it for ABR_CEILING_DWELL_MS. Recorded
-    // only when we were NOT already backing off, so a chain of cuts keeps the
-    // TOP (matches xbfirm setNewBitrate). Cleared by dwell expiry (60s) or
-    // reset(); the cap keeps every ramp BELOW the recorded level, so there is no
-    // "climb past it" exit. See ABRDecision.h for the rationale.
-    int    m_ceilingKbps    = 0;
-    qint64 m_ceilingSinceMs = 0;
-
-    // ── Camera closed loop ──
-    // Last achieved bitrate the camera reported for a request. 0 = nothing
-    // reported yet (or reset), which must NOT read as "collapsed".
-    int  m_lastAchievedKbps = 0;
-    // achieved/requested below ABR_CAMERA_COLLAPSE_RATIO on the last report.
-    // Blocks INCREASE (never a DECREASE). Recomputed on every camera report.
-    bool m_cameraCollapsed  = false;
-    // C2 mode resolved by the last processQoS(), so handleRouterTick can publish
-    // it with the decision without recomputing (which would read a moved clock).
-    C2Mode m_lastC2Mode   = C2Mode::NEVER_SEEN;
-
-    // ── Part B: stuck detection ──
-    bool   m_wasPrimary  = false;
-    bool   m_observing   = false;
-    double m_obsQdelay0  = 0.0;
-    int    m_obsTicks    = 0;
-    qint64 m_lastResetMs = 0;         // 0 = never emitted a reset
+    QTimer *m_networkDataTimer = nullptr;
+    QTimer *m_statusBroadcastTimer = nullptr;
 };
 
 #endif // XBADAPTIVEBITRATESTREAMING_H

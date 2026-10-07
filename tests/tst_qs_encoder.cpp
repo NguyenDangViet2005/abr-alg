@@ -16,8 +16,7 @@
 // so they agree with the dashboard's parser.js, which reads raw bytes. That
 // cross-language agreement is the whole point.
 
-#include "../dev/QoSDebugProtocol.h"
-#include "../ABRDecision.h"   // TREND_* wire values (shared enum order)
+#include "../dev/QoSDebugProtocol.h"   // TREND_* and the QS_BR_*/QS_R_* wire values
 #include <QByteArray>
 #include <QDebug>
 
