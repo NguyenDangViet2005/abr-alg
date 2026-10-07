@@ -21,12 +21,12 @@ public:
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
     static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 50;
 
-    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 500;  
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 1000;  
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
     static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  
-    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500;
+    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 3000;
  
-    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 500;
+    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 1000;
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 

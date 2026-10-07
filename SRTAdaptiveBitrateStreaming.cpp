@@ -858,16 +858,16 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             if (m_currentBitrateKbps < effectiveMax) {
                 unsigned int stepKbps;
                 if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= static_cast<unsigned int>(m_lastCongestedBitrate * 0.70)) {
-                    // Cận kề trần tắc nghẽn: tăng từng bước nhỏ 100 kbps để không vọt quá năng lực đường truyền
-                    stepKbps = 100;
+                    // Cận kề trần tắc nghẽn: tăng từng bước nhỏ 50-100 kbps để không vọt quá năng lực đường truyền
+                    stepKbps = (m_currentBitrateKbps < 250) ? 50 : 100;
                 } else if (m_currentBitrateKbps < 250) {
                     stepKbps = 50;
                 } else if (m_currentBitrateKbps < 800) {
-                    stepKbps = 200; 
+                    stepKbps = 100; 
                 } else if (m_currentBitrateKbps < 2000) {
-                    stepKbps = 300; 
+                    stepKbps = 150; 
                 } else {
-                    stepKbps = 400; 
+                    stepKbps = 200; 
                 }
 
                 unsigned int targetBitrate = m_currentBitrateKbps + stepKbps;
@@ -910,7 +910,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
                     if (m_currentBitrateKbps > MIN_ACTIVE_VIDEO_BITRATE_KBPS) {
-                        unsigned int safeCeiling = static_cast<unsigned int>(m_currentBitrateKbps * 0.85);
+                        unsigned int safeCeiling = static_cast<unsigned int>(m_currentBitrateKbps * 0.70);
                         safeCeiling = (safeCeiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                         m_lastCongestedBitrate = (m_lastCongestedBitrate > 0)
                             ? qMin(m_lastCongestedBitrate, safeCeiling)
@@ -940,7 +940,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
                 if (m_currentBitrateKbps > MIN_ACTIVE_VIDEO_BITRATE_KBPS) {
-                    unsigned int safeCeiling = static_cast<unsigned int>(m_currentBitrateKbps * 0.88);
+                    unsigned int safeCeiling = static_cast<unsigned int>(m_currentBitrateKbps * 0.80);
                     safeCeiling = (safeCeiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                     m_lastCongestedBitrate = (m_lastCongestedBitrate > 0)
                         ? qMin(m_lastCongestedBitrate, safeCeiling)
@@ -973,7 +973,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     rampLimit = qMin(rampLimit, m_lastCongestedBitrate);
                 }
 
-                unsigned int stepUp = (m_currentBitrateKbps < 250) ? 50u : ((state == CongestionState::Severe) ? 200u : 300u);
+                unsigned int stepUp = (m_currentBitrateKbps < 250) ? 50u : ((state == CongestionState::Severe) ? 100u : 150u);
                 unsigned int targetBitrate = m_currentBitrateKbps + stepUp;
                 targetBitrate = qMin(rampLimit, targetBitrate);
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
