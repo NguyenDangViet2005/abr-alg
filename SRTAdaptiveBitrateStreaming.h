@@ -158,6 +158,7 @@ private:
     CongestionState m_lastCongestionState;
     bool m_wasCongested;
     qint64 m_lastKeyframeRequestTime;
+    int m_consecutivePanicCount;
 
     qint64 m_lastCameraQosTime;
     qint64 m_lastActiveTrafficTime;

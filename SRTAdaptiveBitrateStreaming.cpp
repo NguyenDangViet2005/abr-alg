@@ -49,6 +49,7 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_lastCongestionState(CongestionState::Clear)
     , m_wasCongested(false)
     , m_lastKeyframeRequestTime(0)
+    , m_consecutivePanicCount(0)
     , m_lastCameraQosTime(0)
     , m_lastActiveTrafficTime(0)
     , m_isTrafficIdle(true)
@@ -106,6 +107,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_lastCongestionState = CongestionState::Clear;
     m_wasCongested = false;
     m_lastKeyframeRequestTime = 0;
+    m_consecutivePanicCount = 0;
     m_lastCameraQosTime = 0;
     m_lastActiveTrafficTime = 0;
     m_isTrafficIdle = true;
@@ -169,6 +171,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_lastCongestionState = CongestionState::Clear;
     m_wasCongested = false;
     m_lastKeyframeRequestTime = 0;
+    m_consecutivePanicCount = 0;
     m_lastCameraQosTime = 0;
     m_lastActiveTrafficTime = 0;
     m_isTrafficIdle = true;
@@ -447,8 +450,8 @@ SRTAdaptiveBitrateStreaming::CongestionState SRTAdaptiveBitrateStreaming::classi
     const bool isLowLatencyLink = (rtt <= 25.0 && rttInflation < 10.0 && !hasLatencyDrops);
     const double panicLossThreshold = isLowLatencyLink ? (28.0 * f) : (18.0 * f);
 
-    // Khi vừa gửi keyframe, I-frame kích thước lớn làm hàng đợi phình to tạm thời trong 800ms.
-    // Nếu không có mất gói cao (lossPercent < 10%), tạm thời không kích hoạt Panic ảo do RTT spike.
+    // Large keyframe I-frames can temporarily bloat queue latency for up to 800ms.
+    // Unless loss is high (lossPercent >= 10%), suppress false Panic triggers from transient RTT spikes.
     const bool allowRttPanic = !isKeyframeBurst || (lossPercent >= 10.0 * f);
 
     if (lossPercent >= panicLossThreshold || 
@@ -487,6 +490,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     if (isStreamRecovering) {
         m_needRecoveryRefresh = false;
         m_isVideoCollapsed = false;
+        m_consecutivePanicCount = 0;
 
         m_rttHistory.clear();
         m_bwHistory.clear();
@@ -632,8 +636,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     double instantLossPercent = 0.0;
     if (deltaFailures > 0) {
         if (deltaSent > 0) {
-            // Đặt sàn mẫu tối thiểu 20 gói để tránh nhiễu mẫu nhỏ ở bitrate thấp (400 kbps)
-            // (Ví dụ chỉ rớt 2 gói trong 8 gói không bị nhân lên thành 25% gây false Panic)
+            // Minimum sample floor of 20 packets to avoid small-sample noise at low bitrates
+            // (e.g. losing 2 out of 8 packets won't artificially blow up to 25% causing false Panic)
             const qint64 sampleBase = qMax(deltaSent, MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE);
             instantLossPercent = (static_cast<double>(deltaFailures) / static_cast<double>(sampleBase)) * 100.0;
         } else {
@@ -665,7 +669,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     } else {
         m_consecutiveZeroLossCount = 0;
         if (instantLossPercent > m_lossPercentAvg) {
-            m_lossPercentAvg = (m_lossPercentAvg * 0.35) + (instantLossPercent * 0.65);
+            m_lossPercentAvg = (m_lossPercentAvg * 0.55) + (instantLossPercent * 0.45);
         } else {
             m_lossPercentAvg = (m_lossPercentAvg * 0.70) + (instantLossPercent * 0.30);
         }
@@ -714,7 +718,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
     unsigned int bandwidthCapKbps = m_maxBitrateKbps;
 
-    // 1. Áp dụng trần từ probe SRT hợp lệ (nếu đo được và <= 150 Mbps)
+    // 1. Apply cap from valid SRT bandwidth probe (if measured and <= 150 Mbps)
     if (smoothedBw > 0.1 && smoothedBw <= 150.0) {
         double capKbps = smoothedBw * 1000.0 * BW_UTILIZATION_RATIO;
         if (capKbps >= MIN_ACTIVE_VIDEO_BITRATE_KBPS && capKbps < static_cast<double>(bandwidthCapKbps)) {
@@ -814,6 +818,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
 
     if (state == CongestionState::Clear) {
+        m_consecutivePanicCount = 0;
+
         if (m_clearSinceMs == 0) {
             m_clearSinceMs = ctime;
         }
@@ -838,7 +844,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 return;
             }
 
-            // Probing thận trọng vượt trần nghẽn cũ: chỉ khi đã chạy ổn định ở trần ít nhất FAILURE_MEMORY_PROBE_INTERVAL_MS
+            // Careful probing beyond congested ceiling: only when stable at ceiling for at least FAILURE_MEMORY_PROBE_INTERVAL_MS
             if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= m_lastCongestedBitrate) {
                 if (m_lastProbeTime == 0) {
                     m_lastProbeTime = ctime;
@@ -856,10 +862,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             }
 
             if (m_currentBitrateKbps < effectiveMax) {
+                const bool hasHighBandwidthHeadroom = (smoothedBw >= 10.0 && m_lossPercentAvg == 0.0 && rttInflation < 5.0);
                 unsigned int stepKbps;
                 if (m_lastCongestedBitrate > 0 && m_currentBitrateKbps >= static_cast<unsigned int>(m_lastCongestedBitrate * 0.70)) {
-                    // Cận kề trần tắc nghẽn: tăng từng bước nhỏ 50-100 kbps để không vọt quá năng lực đường truyền
+                    // Near congestion ceiling: increase in small steps to avoid overshooting
                     stepKbps = (m_currentBitrateKbps < 250) ? 50 : 100;
+                } else if (hasHighBandwidthHeadroom && m_currentBitrateKbps < 1500) {
+                    stepKbps = (m_currentBitrateKbps < 300) ? 200 : 300;
                 } else if (m_currentBitrateKbps < 250) {
                     stepKbps = 50;
                 } else if (m_currentBitrateKbps < 800) {
@@ -895,9 +904,9 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
         m_wasCongested = true;
 
-        // Lưu ý: Không bắn requestKeyframe định kỳ khi đang kẹt ở trạng thái Panic / Loss >= 18%
-        // để tránh "Keyframe Storm" nhồi I-frame liên tục làm nghẽn chết luồng ở mức bitrate sàn.
-        // Keyframe chỉ phát 1 lần khi bắt đầu hồi phục thoát khỏi Panic (ở khối if dòng 890 phía trên).
+        // Avoid sending periodic keyframe requests during Panic state or high loss
+        // to prevent "Keyframe Storm" flooding the channel at floor bitrate.
+        // Keyframe is requested once upon recovering from Panic above.
 
         if (m_currentBitrateKbps > targetProfileBitrate) {
             m_clearSinceMs = 0;
@@ -905,7 +914,16 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 unsigned int targetBitrate = targetProfileBitrate;
 
                 if (state == CongestionState::Panic || m_lossPercentAvg >= 20.0) {
-                    targetBitrate = qMin(targetProfileBitrate, bandwidthCapKbps);
+                    m_consecutivePanicCount++;
+                    if (m_consecutivePanicCount <= 1 && m_currentBitrateKbps > 1000) {
+                        targetBitrate = qMax(800u, static_cast<unsigned int>(m_currentBitrateKbps * 0.35));
+                        targetBitrate = qMin(targetBitrate, bandwidthCapKbps);
+                    } else if (m_consecutivePanicCount <= 2 && m_currentBitrateKbps > 400) {
+                        targetBitrate = qMax(300u, static_cast<unsigned int>(m_currentBitrateKbps * 0.40));
+                        targetBitrate = qMin(targetBitrate, bandwidthCapKbps);
+                    } else {
+                        targetBitrate = MIN_ACTIVE_VIDEO_BITRATE_KBPS;
+                    }
                     targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                     targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
@@ -918,10 +936,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                         m_lastCongestedBitrate = qMax(MIN_ACTIVE_VIDEO_BITRATE_KBPS, m_lastCongestedBitrate);
                     }
                     m_lastProbeTime = ctime;
-                    m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+                    qint64 cooldownMs = (targetBitrate > MIN_ACTIVE_VIDEO_BITRATE_KBPS) ? 1000 : RECOVERY_COOLDOWN_MS;
+                    m_cooldownUntilMs = ctime + cooldownMs;
                     m_lastBitrateChangeTime = ctime;
                     applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
                     return;
+                } else {
+                    m_consecutivePanicCount = 0;
                 }
 
                 unsigned int stepDown;
@@ -956,6 +977,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
         else if (m_currentBitrateKbps < targetProfileBitrate) {
             m_clearSinceMs = 0;
+            m_consecutivePanicCount = 0;
 
             // Never ramp up bitrate while remaining in Panic state
             if (state == CongestionState::Panic) {
