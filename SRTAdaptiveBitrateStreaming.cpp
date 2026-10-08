@@ -449,41 +449,16 @@ void SRTAdaptiveBitrateStreaming::handleQosCameraConnection(const QVector<SRTPee
 
 unsigned int SRTAdaptiveBitrateStreaming::calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const
 {
+    Q_UNUSED(lossPercent);
+    Q_UNUSED(state);
     unsigned int partitionCeiling = m_maxBitrateKbps;
 
-    // 1. Bandwidth partitions (prioritize true bottleneck bandwidth during congestion over transient packet bursts)
+    // Bandwidth capacity partition (pure dynamic formula based on true link bandwidth):
     double effectiveBw = (m_bottleneckBwMbps > 0.0 && state != CongestionState::Clear) ? m_bottleneckBwMbps : smoothedBw;
     if (effectiveBw > 0.1 && effectiveBw < 150.0) {
         unsigned int bwCap = static_cast<unsigned int>(effectiveBw * 1000.0 * BW_UTILIZATION_RATIO);
         bwCap = qMax(MIN_ACTIVE_VIDEO_BITRATE_KBPS, bwCap);
         partitionCeiling = qMin(partitionCeiling, bwCap);
-    }
-
-    // 2. Loss partitions (strict network quality ceiling tiers)
-    if (lossPercent >= 10.0) {
-        partitionCeiling = qMin(partitionCeiling, 500u);
-    } else if (lossPercent >= 5.0) {
-        partitionCeiling = qMin(partitionCeiling, 800u);
-    } else if (lossPercent >= 3.0) {
-        partitionCeiling = qMin(partitionCeiling, 1500u);
-    } else if (lossPercent >= 1.5) {
-        partitionCeiling = qMin(partitionCeiling, 2500u);
-    }
-
-    // 3. Congestion state partitions
-    switch (state) {
-    case CongestionState::Panic:
-        partitionCeiling = qMin(partitionCeiling, MIN_ACTIVE_VIDEO_BITRATE_KBPS);
-        break;
-    case CongestionState::Severe:
-        partitionCeiling = qMin(partitionCeiling, 1000u);
-        break;
-    case CongestionState::Moderate:
-        partitionCeiling = qMin(partitionCeiling, 2200u);
-        break;
-    case CongestionState::Clear:
-    default:
-        break;
     }
 
     partitionCeiling = (partitionCeiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -795,6 +770,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         double safeCapKbps = goodputMbps * 1000.0 * 0.85;
 
         unsigned int estimatedCap = static_cast<unsigned int>(qMax(static_cast<double>(MIN_ACTIVE_VIDEO_BITRATE_KBPS), safeCapKbps));
+        estimatedCap = (estimatedCap / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
         bandwidthCapKbps = qMin(bandwidthCapKbps, estimatedCap);
 
         if (smoothedBw > goodputMbps || smoothedBw <= 0.0) {
@@ -802,6 +778,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             m_latestSmoothedBw = smoothedBw;
         }
     }
+    bandwidthCapKbps = (bandwidthCapKbps / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+    bandwidthCapKbps = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, bandwidthCapKbps, m_maxBitrateKbps);
 
     // Live Bootstrapping: initial bitrate starts low and ramps smoothly
     if (!m_isBootstrapped) {
@@ -881,7 +859,15 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         bool isBufferDrained = (rttInflation < 8.0 || (m_rttMin > 0.0 && smoothedRtt <= m_rttMin * 1.30 + 5.0));
 
         bool cooldownExpired = (ctime >= m_cooldownUntilMs);
-        bool decisionIntervalExpired = (ctime - m_lastBitrateIncrTime >= BITRATE_INCR_DECISION_INTERVAL_MS);
+
+        // Dynamic decision interval in Clear state:
+        // When there is huge available headroom (e.g. limit raised), use 1000ms for agile ramp-up.
+        // When nearing operating limits, use standard 2000ms for rock-solid stability.
+        qint64 availableHeadroom = (bandwidthCapKbps > m_currentBitrateKbps) ? (bandwidthCapKbps - m_currentBitrateKbps) : 0;
+        qint64 incrDecisionInterval = (availableHeadroom >= 400 && m_lossPercentAvg == 0.0 && rttInflation < 3.0)
+                                          ? 1000
+                                          : BITRATE_INCR_DECISION_INTERVAL_MS;
+        bool decisionIntervalExpired = (ctime - m_lastBitrateIncrTime >= incrDecisionInterval);
         bool clearStableMet = (ctime - m_clearSinceMs >= CLEAR_STABLE_DURATION_MS);
 
         if (cooldownExpired && decisionIntervalExpired && clearStableMet) {
@@ -890,12 +876,26 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 return;
             }
 
+            // If physical link bandwidth was previously restricted to extreme survival levels (<= 400 kbps)
+            // and user opens bandwidth limit to broadband (>= 1000 kbps), lift the ceiling to match.
+            // (Does NOT touch normal operational ceilings like 1800k, 2100k, etc.)
+            if (m_lastCongestedBitrate > 0 && m_lastCongestedBitrate <= 400u && bandwidthCapKbps >= 1000u &&
+                m_lossPercentAvg == 0.0 && rttInflation < 4.0) {
+                unsigned int oldCeiling = m_lastCongestedBitrate;
+                m_lastCongestedBitrate = bandwidthCapKbps;
+                m_lastProbeTime = ctime;
+                qInfo().noquote() << QString("[QoS Engine] Network capacity expanded: Ceiling lifted from %1 kbps to %2 kbps")
+                                         .arg(oldCeiling).arg(m_lastCongestedBitrate);
+            }
+
             // In a given network environment, once a failure ceiling is recorded,
             // strictly LOCK it.
             unsigned int effectiveMax = targetProfileBitrate;
             if (m_lastCongestedBitrate > 0) {
                 effectiveMax = qMin(effectiveMax, m_lastCongestedBitrate);
             }
+            effectiveMax = (effectiveMax / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+            effectiveMax = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, effectiveMax, m_maxBitrateKbps);
 
             if (m_currentBitrateKbps >= effectiveMax) {
                 if (m_lastCongestedBitrate > 0) {
@@ -943,8 +943,14 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     return;
                 }
 
-                // Smooth and gradual ramp-up (strictly 50 kbps step, slow and steady)
+                // Smooth and gradual ramp-up (fast recovery when far below capacity, gentle near ceiling)
+                unsigned int headroom = (effectiveMax > m_currentBitrateKbps) ? (effectiveMax - m_currentBitrateKbps) : 0;
                 unsigned int stepKbps = BITRATE_ROUNDING_STEP_KBPS;
+                if (headroom >= 500u) {
+                    stepKbps = 200u;
+                } else if (headroom >= 250u) {
+                    stepKbps = 100u;
+                }
                 unsigned int targetBitrate = m_currentBitrateKbps + stepKbps;
                 targetBitrate = qMin(targetBitrate, effectiveMax);
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -999,27 +1005,36 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
             // Dynamic safe ceiling:
             // Directly lock ceiling to the previous safe operating bitrate.
-            // If failed at 950k -> ceiling is locked to 900k!
-            // If failed at 850k -> ceiling is locked to 800k!
             unsigned int safeCeiling = previousSafe;
             safeCeiling = (safeCeiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
             safeCeiling = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, safeCeiling, m_maxBitrateKbps);
 
-            // Lock ceiling strictly so we never climb back to the congested rate
+            // Lock ceiling:
+            // The ceiling must NEVER exceed the safe rate of the bitrate that just congested!
             unsigned int prevCeiling = m_lastCongestedBitrate;
-            m_lastCongestedBitrate = safeCeiling;
+            if (m_lastCongestedBitrate == 0) {
+                m_lastCongestedBitrate = safeCeiling;
+            } else {
+                m_lastCongestedBitrate = qMin(m_lastCongestedBitrate, safeCeiling);
+            }
+            m_lastCongestedBitrate = (m_lastCongestedBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+            m_lastCongestedBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, m_lastCongestedBitrate, m_maxBitrateKbps);
+
             m_lastProbeTime = ctime;
             if (m_lastCongestedBitrate != prevCeiling) {
                 qInfo().noquote() << QString("[QoS Engine] Bitrate ceiling: %1 kbps").arg(m_lastCongestedBitrate);
             }
 
-            // IMMEDIATELY cut bitrate back to safeCeiling (or lower if Severe/Panic)
+            // Cut bitrate back smoothly:
             unsigned int immediateTarget = safeCeiling;
             if (state == CongestionState::Panic || m_lossPercentAvg >= LOSS_THRESHOLD_PANIC_PERCENT) {
-                // High loss (>= 25% or 30-40%): Emergency Panic buffer flush to floor
                 m_consecutivePanicCount = 1;
-                immediateTarget = MIN_ACTIVE_VIDEO_BITRATE_KBPS;
-                m_cooldownUntilMs = ctime + RECOVERY_COOLDOWN_MS;
+                // Graceful backoff: drop 35% - 40% (minimum 300 kbps) to clear queues immediately without collapsing video
+                unsigned int backoffTarget = static_cast<unsigned int>(m_currentBitrateKbps * 0.65);
+                backoffTarget = qMax(300u, backoffTarget);
+                immediateTarget = qMin(backoffTarget, safeCeiling);
+                immediateTarget = qMin(immediateTarget, bandwidthCapKbps);
+                m_cooldownUntilMs = ctime + 1500;
             } else if (state == CongestionState::Severe || m_lossPercentAvg >= LOSS_THRESHOLD_SEVERE_PERCENT) {
                 m_consecutivePanicCount = 0;
                 unsigned int stepDown = qMax(100u, static_cast<unsigned int>(m_currentBitrateKbps * 0.20));
@@ -1042,16 +1057,21 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             }
         }
         else {
-            // Already in congestion state: handle further step-downs if congestion persists after requiredInterval
-            if (timeSinceLastChange >= requiredInterval) {
+            // Already in congestion state: handle further step-downs only after cooldown has expired and buffers had time to drain
+            bool cooldownExpired = (ctime >= m_cooldownUntilMs);
+            if (cooldownExpired && timeSinceLastChange >= requiredInterval) {
                 unsigned int targetBitrate = m_currentBitrateKbps;
 
                 if (state == CongestionState::Panic || m_lossPercentAvg >= LOSS_THRESHOLD_PANIC_PERCENT) {
                     m_consecutivePanicCount++;
-                    if (m_consecutivePanicCount <= 2 && m_currentBitrateKbps > 400) {
-                        targetBitrate = qMax(300u, static_cast<unsigned int>(m_currentBitrateKbps * 0.40));
+                    if (m_consecutivePanicCount == 2 && m_currentBitrateKbps > 400) {
+                        targetBitrate = qMax(250u, static_cast<unsigned int>(m_currentBitrateKbps * 0.50));
+                        targetBitrate = qMin(targetBitrate, bandwidthCapKbps);
+                    } else if (m_consecutivePanicCount <= 3 && m_currentBitrateKbps > 200) {
+                        targetBitrate = qMax(150u, static_cast<unsigned int>(m_currentBitrateKbps * 0.40));
                         targetBitrate = qMin(targetBitrate, bandwidthCapKbps);
                     } else {
+                        // Sustained Panic (>= 4 samples): Total link collapse
                         targetBitrate = MIN_ACTIVE_VIDEO_BITRATE_KBPS;
                     }
                     m_cooldownUntilMs = ctime + ((targetBitrate > MIN_ACTIVE_VIDEO_BITRATE_KBPS) ? 1000 : RECOVERY_COOLDOWN_MS);
@@ -1071,10 +1091,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
                 if (targetBitrate < m_currentBitrateKbps) {
-                    if (targetBitrate < m_lastCongestedBitrate) {
-                        m_lastCongestedBitrate = targetBitrate;
-                        qInfo().noquote() << QString("[QoS Engine] Bitrate ceiling: %1 kbps").arg(m_lastCongestedBitrate);
-                    }
                     m_lastBitrateChangeTime = ctime;
                     applyNewBitrate(targetBitrate, smoothedRtt, smoothedBw, deltaLoss);
                 }
