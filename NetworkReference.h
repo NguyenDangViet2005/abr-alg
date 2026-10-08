@@ -32,6 +32,15 @@ public:
     // Read-only verdict: may the ceiling be lifted? No side effects.
     bool environmentChanged() const;
 
+    // True while the primary verdict CAN work: a FRESH reading of an ACTUAL
+    // level. A 603 stream carrying NO_INFO(9), or any stale/dead source, is NOT
+    // usable — environmentChanged() is permanently false in exactly those cases,
+    // so the ceiling-escape FALLBACK is gated on !hasUsableStrength() and the
+    // ABR re-probes on a backoff instead of holding forever. (Gating on "a 603
+    // was ever seen" would re-create the held-forever defect: the router sending
+    // 603<name>#9 — modem offline — would disable the fallback permanently.)
+    bool hasUsableStrength() const { return !isStale() && m_strength != NO_INFO; }
+
     // Fresh session: forget everything.
     void reset();
 

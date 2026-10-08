@@ -59,7 +59,11 @@ struct RouterInterfaceStat {
     // These are xbfirm's processTCPInfo argument list, minus the duplicated rtt.
     quint32 rttUs           = 0;   // [7]  tcpi_rtt, MICROseconds (xbfirm /1000)
     quint64 deliveryRateBps = 0;   // [8]  tcpi_delivery_rate, BYTES/s (xbfirm *8/1000)
-    quint32 lost            = 0;   // [9]  tcpi_lost, packets (cumulative)
+    quint32 lost            = 0;   // [9]  tcpi_lost, packets. GAUGE — packets
+                                   //      currently considered lost (kernel
+                                   //      tp->lost_out), NOT a running total; the
+                                   //      raw reading can DECREASE tick-to-tick.
+                                   //      Consumed as a per-tick count.
     quint32 segsOut         = 0;   // [10] tcpi_segs_out, packets (cumulative)
     quint32 sndCwnd         = 0;   // [11] tcpi_snd_cwnd, segments
     quint32 sndMss          = 0;   // [12] tcpi_snd_mss, bytes

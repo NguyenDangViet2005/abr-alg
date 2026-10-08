@@ -144,6 +144,20 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_settleUntil = 0;
     m_zeroThroughputTicks = 0;
     m_telemetryLossyTicks = 0;
+
+    // Phase 08 (A): a fresh session has no loss history to average over.
+    m_lossWindowLost.clear();
+    m_lossWindowSegs.clear();
+    m_videoLossThisTick = false;
+
+    // Phase 08 (B): no overshoot episode is in flight on a fresh session.
+    m_pendingCeiling = 0;
+    m_overshootConfirmTicks = 0;
+
+    // Phase 08 (C): no hold clock, no in-flight fallback probe, backoff at base.
+    m_ceilingHoldSince = 0;
+    m_ceilingReprobeBackoffMs = CEILING_REPROBE_BASE_MS;
+    m_reprobeInFlight = false;
 }
 
 // === ROUTER WIRING (not xbfirm) ===
@@ -290,11 +304,19 @@ void XBAdaptiveBitrateStreaming::processTCPInfo(const tcpInfo &tcpi)
     }
     m_settleUntil = 0;   // expired (or never set)
 
-    if (haveLostPackets(tcpi)) {
-        bitrateChanged = true;
-    } else if (rttHigh(tcpi)) {
-        bitrateChanged = true;
-    } else {
+    // Phase 08 (B): track whether this tick BROKE (loss or bufferbloat). An
+    // overshoot episode stays open only while the breaks keep coming; a tick that
+    // breaks neither way closes it, so a staged ceiling is discarded unless the
+    // very next tick confirms. (Note: a break that is NOT an overshoot — a
+    // telemetry-lossy weak link, say — leaves a staged candidate in place; the
+    // following overshoot break then confirms it. Rare and still a reasonable
+    // ceiling, so it is accepted rather than special-cased.)
+    const bool broke = haveLostPackets(tcpi) || rttHigh(tcpi);
+    bitrateChanged = broke;
+    if (!broke) {
+        // No break this tick -> the overshoot episode (if any) did not repeat.
+        m_pendingCeiling = 0;
+        m_overshootConfirmTicks = 0;
         unsigned int oldBitrate = m_abrState.current_bitrate_kbps;
         checkSenderQueue(tcpi);
         bitrateChanged = (oldBitrate != m_abrState.current_bitrate_kbps);
@@ -313,17 +335,44 @@ void XBAdaptiveBitrateStreaming::processTCPInfo(quint32 rtt, quint32 min_rtt,
     // forwarding to the core. NOTE the gate lives HERE, not at the router-row
     // entry: xbfirm puts it in this overload, and the 11-arg caller above simply
     // forwards through it.
-    int deltaSegsout = tcpiSegsout - _lastTcpiSegsout;
+    // Phase 08 (A): the FIRST video row after reset() (or ever) has
+    // _lastTcpiSegsout == 0, so the delta would be the connection's FULL
+    // cumulative segsOut. Harmless before A (it yielded ~0%), but the window would
+    // carry that huge denominator for LOSS_WINDOW_TICKS and mask real loss for the
+    // next 5 ticks. Seed the counter and report no measurement on this tick.
+    const bool firstVideoSample = (_lastTcpiSegsout == 0);
+    const int deltaSegsout = firstVideoSample ? 0 : (tcpiSegsout - _lastTcpiSegsout);
     _lastTcpiSegsout = tcpiSegsout;
 
     tcpInfo tcpi;
     tcpi.rtt = rtt / 1000;
     tcpi.min_rtt = min_rtt / 1000;
     tcpi.throughput = (throughput * 8) / 1000.0;
-    // loss_rate arrives as a lost-packet COUNT; dividing by the packets sent in
-    // this interval yields the percent. This is why the router sends the raw
-    // counters rather than a percent — the same arithmetic xbfirm runs.
-    tcpi.loss_rate = (deltaSegsout > 0) ? (loss_rate / deltaSegsout * 100.0) : 0.0;
+    // loss_rate arrives as a lost-packet COUNT; the percent is Σlost/ΣsegsOut
+    // over the last LOSS_WINDOW_TICKS ticks. Phase 08 (A): xbfirm divides by the
+    // ONE tick's deltaSegsout, but the video flow sends only ~70-80 segments per
+    // tick, so a single lost packet read as ~1.3% — over the 0.8% trigger — and
+    // every retransmit was a false "high loss" that walked the bitrate down
+    // (field log: 2/69=2.90%, 1/69=1.45%, 4/80=5%). The window restores the true
+    // loss rate (the definition TCP itself uses) and scales with bitrate; a real
+    // collapse still trips on the first tick. The C2 slot keeps the one-tick
+    // form (its denominator is already large).
+    if (deltaSegsout > 0) {
+        m_lossWindowLost.append(static_cast<int>(loss_rate));
+        m_lossWindowSegs.append(deltaSegsout);
+        if (m_lossWindowLost.size() > LOSS_WINDOW_TICKS) m_lossWindowLost.removeFirst();
+        if (m_lossWindowSegs.size() > LOSS_WINDOW_TICKS) m_lossWindowSegs.removeFirst();
+    }
+    // Phase 08 (A): freshness for THIS tick — a break needs new loss, not just an
+    // elevated-but-stale window (see the member's note).
+    m_videoLossThisTick = (loss_rate > 0);
+    int windowLost = 0;
+    int windowSegs = 0;
+    for (int i = 0; i < m_lossWindowSegs.size(); ++i) {
+        windowLost += m_lossWindowLost.at(i);
+        windowSegs += m_lossWindowSegs.at(i);
+    }
+    tcpi.loss_rate = (windowSegs > 0) ? (static_cast<double>(windowLost) / windowSegs * 100.0) : 0.0;
     tcpi.siocoutq = siocoutq;
     tcpi.so_sndbuf = so_sndbuf;
     if (!_cameraStatus) return;
@@ -391,6 +440,13 @@ void XBAdaptiveBitrateStreaming::processTelemetryTCPInfo(double rtt, double deli
         _cameraStatus = false;
         m_telemetryStableSince = 0;
         m_abrState.current_bitrate_kbps = MIN_BITRATE_KBPS;
+        // Phase 08 (B): the link just collapsed and the video path is pinned off
+        // until telemetry is clean again. Any overshoot episode in flight is
+        // stale — its confirming break would otherwise land after the collapse
+        // AND a recovery kick, making "2 consecutive break ticks" span a
+        // discontinuity the plan never considered (H3).
+        m_pendingCeiling = 0;
+        m_overshootConfirmTicks = 0;
         emit bitrateProposed(m_iface, 0);
         return;
     } else {
@@ -476,6 +532,15 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
                                  << TELEMETRY_LOSSY_CONFIRM_TICKS
                                  << ") -> unconfirmed, holding one tick";
         }
+    } else if (!m_videoLossThisTick) {
+        // Phase 08 (A): the windowed video rate is still above 0.8% but THIS tick
+        // lost nothing — the elevated window is the memory of an earlier burst,
+        // not a fresh break. Return false (clean): it closes any open overshoot
+        // episode (B), lets checkSenderQueue run, and stops a single burst from
+        // re-firing the self-congestion path on every window tick. The
+        // telemetry-lossy branch above is deliberately NOT gated by this — C2 loss
+        // is fresh per tick and a weak link must still drop to MIN.
+        return false;
     } else if (isOvershoot()) {
         m_telemetryLossyTicks = 0;
         // PORT DEVIATION (Phase 01): telemetry is CLEAN and the break landed
@@ -555,6 +620,13 @@ bool XBAdaptiveBitrateStreaming::isOvershoot() const
     // Requires: (a) we are still in the post-step-up (INCREASE) state, (b) the
     // step-up recorded a healthy score AND a not-already-falling trend, and
     // (c) there IS a recorded last-good to fall back to.
+    // Phase 08 (B): while an overshoot episode is OPEN (a prior break staged a
+    // candidate ceiling but has not confirmed it), every following break tick is
+    // still that same overshoot — even though the H1 fix already set
+    // m_lastAbrAction = ABR_DECREASE. Without this early return the action test
+    // below would be false on the 2nd tick and the ceiling could never confirm.
+    if (m_pendingCeiling != 0) return true;
+
     return m_lastAbrAction == ABR_INCREASE
         && m_lastGoodKbps > 0
         && m_scoreAtStepUp >= OVERSHOOT_MIN_SCORE_AT_STEPUP
@@ -733,7 +805,21 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                         // the other qWarnings in this loop, accepted.
                         const unsigned int next_bitrate = m_abrState.current_bitrate_kbps
                                                         + static_cast<unsigned int>(m_gainUp * BITRATE_STEP_KBPS);
-                        if (next_bitrate > m_ceilingKbps && !allowExceedCeiling()) {
+                        // Phase 08 (C): the "blocked at a LEARNED ceiling" state is
+                        // `m_ceilingKbps < m_maxAbr`. At m_maxAbr there is nothing
+                        // learned to hold or lift (handleRouterTick reports 0 too),
+                        // so the escape clock must NOT arm there — else every
+                        // healthy link at MAX would spuriously arm it and latch
+                        // m_reprobeInFlight, doubling the backoff on the first real
+                        // ceiling (H2).
+                        if (next_bitrate > m_ceilingKbps
+                            && m_ceilingKbps < m_maxAbr
+                            && !allowExceedCeiling()) {
+                            // Phase 08 (C): remember when the hold began, for the
+                            // no-strength-source re-probe backoff. Lazy (set only if
+                            // not already holding) so it measures the hold, not the
+                            // last ramp tick.
+                            if (m_ceilingHoldSince == 0) m_ceilingHoldSince = m_clock.elapsed();
                             qWarning().nospace() << "[ABR][" << m_iface << "] At ceiling "
                                                  << m_ceilingKbps << "kbps — holding (no ramp)";
                         } else {
@@ -741,7 +827,15 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                             // environment changed — LIFT the ceiling (re-probe). Cleared
                             // directly, no EVENT: the next SAMPLE reports 0 and the
                             // dashboard line clears; a later overshoot learns a new one.
-                            if (next_bitrate > m_ceilingKbps) m_ceilingKbps = m_maxAbr;
+                            //
+                            // Phase 08 (C): if the lift came from the FALLBACK (no
+                            // strength source) rather than a real strength recovery,
+                            // flag it — a re-latch then doubles the backoff.
+                            if (next_bitrate > m_ceilingKbps && m_ceilingKbps < m_maxAbr) {
+                                m_reprobeInFlight = !m_networkRef.environmentChanged();
+                                m_ceilingKbps = m_maxAbr;
+                            }
+                            m_ceilingHoldSince = 0;
                             setNewBitrate(next_bitrate);
                         }
                     }
@@ -764,7 +858,20 @@ unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
     // The ceiling is floored at MIN+STEP so a recovery-from-MIN step-up can never
     // pin it to a permanent stall.
     const unsigned int target = qMin(m_lastGoodKbps, m_abrState.current_bitrate_kbps);
-    setCeiling(qMax(target, MIN_BITRATE_KBPS + BITRATE_STEP_KBPS));
+    const unsigned int stagedCeiling = qMax(target, MIN_BITRATE_KBPS + BITRATE_STEP_KBPS);
+
+    // Phase 08 (B): the DECREASE is immediate and recoverable, so it happens on
+    // the first break (the caller applies `target` either way). The CEILING is
+    // permanent — it holds the ramp for the rest of the session — so it latches
+    // only after OVERSHOOT_CONFIRM_TICKS consecutive break ticks. The first break
+    // stages the candidate and opens the episode; the confirming break latches.
+    // A clean tick in between (processTCPInfo(const tcpInfo&)) discards it.
+    m_pendingCeiling = stagedCeiling;
+    if (++m_overshootConfirmTicks < OVERSHOOT_CONFIRM_TICKS) {
+        return target;   // staged only — no ceilingChanged, no settle yet
+    }
+
+    setCeiling(stagedCeiling);
     // Phase 03: capture the radio strength at THIS learn instant — the anchor
     // environmentChanged() compares against. Taken HERE, not in setCeiling():
     // setCeiling() is de-dup guarded (`if (m_ceilingKbps == kbps) return;`), so a
@@ -781,19 +888,39 @@ unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
     // "consecutive". Clear them; a real collapse re-accumulates after settle.
     m_zeroThroughputTicks = 0;
     m_telemetryLossyTicks = 0;
+    // Episode complete — the next break starts a fresh one.
+    m_pendingCeiling = 0;
+    m_overshootConfirmTicks = 0;
     return target;
 }
 
 bool XBAdaptiveBitrateStreaming::allowExceedCeiling() const
 {
-    // PORT DEVIATION (Phase 03): the single gate that may lift the learned
+    // PORT DEVIATION (Phase 03): the primary gate that may lift the learned
     // ceiling. True only when the radio has genuinely recovered since the
     // ceiling was learned — the strength baseline recorded at the learn instant
     // is LOWER than the current strength (baseline < now), held for a debounce
     // window. Absence of info (stale 603, strength==9, or no baseline yet) is
     // false, so the default is HOLD. GPS (packet 604) is deferred and becomes an
     // EXTRA gate later, not a prerequisite.
-    return m_networkRef.environmentChanged();
+    //
+    // Phase 08 (C): OR-in the FALLBACK, which only ever fires while there is NO
+    // strength source at all (see ceilingReprobeDue). When a 603 exists the
+    // fallback is off and this is exactly the Phase 03 behaviour.
+    return m_networkRef.environmentChanged() || ceilingReprobeDue();
+}
+
+bool XBAdaptiveBitrateStreaming::ceilingReprobeDue() const
+{
+    // Phase 08 (C): the fallback escape. Without a USABLE strength source (no
+    // fresh real level — NO_INFO and stale both count as unusable),
+    // environmentChanged() is permanently false and a learned ceiling would hold
+    // forever (permanent underuse). Re-probe after the current backoff of clean
+    // holds; a re-overshoot re-latches and doubles the wait. Disabled the moment
+    // a real level is being read — the primary path owns the escape then.
+    if (m_networkRef.hasUsableStrength()) return false;
+    if (m_ceilingHoldSince == 0) return false;
+    return (m_clock.elapsed() - m_ceilingHoldSince) >= m_ceilingReprobeBackoffMs;
 }
 
 void XBAdaptiveBitrateStreaming::setCeiling(unsigned int kbps)
@@ -807,6 +934,17 @@ void XBAdaptiveBitrateStreaming::setCeiling(unsigned int kbps)
     m_ceilingKbps = kbps;
     qInfo().nospace() << "[ABR][" << m_iface << "] ceiling set to " << kbps << "kbps";
     emit ceilingChanged(m_iface, kbps);
+
+    // Phase 08 (C): a re-latch right after a FALLBACK re-probe means that probe
+    // overshot — the ceiling is real, so wait LONGER next time (backoff, capped).
+    // A latch after a PRIMARY (strength-driven) lift is not a failed probe, so it
+    // leaves the backoff at base.
+    if (m_reprobeInFlight) {
+        m_ceilingReprobeBackoffMs = qMin(m_ceilingReprobeBackoffMs * 2, CEILING_REPROBE_MAX_MS);
+        m_reprobeInFlight = false;
+    }
+    // A fresh latch restarts the hold clock: the next re-probe is measured from here.
+    m_ceilingHoldSince = 0;
 }
 
 void XBAdaptiveBitrateStreaming::setNewBitrate(unsigned int new_bitrate_kbps)

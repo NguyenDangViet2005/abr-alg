@@ -138,10 +138,10 @@ private:
 
     // xbfirm's 7-arg overload: the unit-conversion + _cameraStatus gate stage.
     // Inputs are RAW: rtt/min_rtt in MICROseconds, throughput in BYTES/s,
-    // loss_rate as a lost-packet COUNT (the body divides it by delta(tcpiSegsout)
-    // to get a percent), siocoutq/so_sndbuf bytes, tcpiSegsout a packet count.
-    // These are exactly the router's raw counter block, so the port feeds them
-    // with no unit fudge.
+    // loss_rate as a lost-packet COUNT (the body divides it by a 5-tick
+    // Σ delta(tcpiSegsout) window to get a percent — Phase 08 (A)), siocoutq/
+    // so_sndbuf bytes, tcpiSegsout a packet count. These are exactly the router's
+    // raw counter block, so the port feeds them with no unit fudge.
     void processTCPInfo(quint32 rtt, quint32 min_rtt, double throughput,
                         double loss_rate, quint32 siocoutq, quint32 so_sndbuf,
                         int tcpiSegsout);
@@ -193,6 +193,12 @@ private:
     // (re-probe) and a later overshoot learns a new one. GPS is a later extra
     // gate. Absence of info (stale/9/no baseline) is false.
     bool allowExceedCeiling() const;
+
+    // Phase 08 (C): the ceiling-escape FALLBACK. True only when there is NO
+    // USABLE strength source (m_networkRef.hasUsableStrength() false) AND we have
+    // held at the ceiling for the current backoff. Composed into
+    // allowExceedCeiling().
+    bool ceilingReprobeDue() const;
 
     // Phase 01 (PORT DEVIATION, not xbfirm): true when the current video-loss
     // break started right after OUR own step-up, i.e. the loss is our
@@ -251,6 +257,23 @@ private:
     // 4=RAPID_DECREASE.
     static constexpr int OVERSHOOT_MAX_TREND_AT_STEPUP = 2;   // <= STABLE
 
+    // Phase 08 (B): a break must repeat this many CONSECUTIVE ticks before the
+    // CEILING latches. The decrease is immediate and recoverable; the ceiling is
+    // permanent (it holds the ramp for the session), so it waits for confirmation.
+    // The field log's 5% spike was a one-tick artifact that pinned the ramp at
+    // 431 kbps forever. A clean tick in between discards the candidate.
+    static constexpr int OVERSHOOT_CONFIRM_TICKS = 2;
+
+    // Phase 08 (C): with NO strength source, environmentChanged() is permanently
+    // false, so a learned ceiling would never lift (permanent underuse — worse
+    // than an occasional re-probe dip). After this long holding at the ceiling
+    // the ABR takes one probing step; if that re-overshoots, the ceiling re-latches
+    // and the wait DOUBLES (backoff), thinning the sawtooth. The wait is capped
+    // at CEILING_REPROBE_MAX_MS. The fallback is disabled once any 603 arrives —
+    // the primary environmentChanged() path owns the escape then.
+    static constexpr qint64  CEILING_REPROBE_BASE_MS = 30000;
+    static constexpr qint64  CEILING_REPROBE_MAX_MS  = 120000;
+
     // ── Phase 07: behavior hardening (PORT DEVIATION) ─────────────────────
     // After an overshoot, HOLD for this long and ACCEPT the loss: the loss that
     // trails a step-up is the queue draining, not a new break. Without it the
@@ -266,6 +289,14 @@ private:
     // throughput==0 is a real collapse only after this many CONSECUTIVE zero
     // ticks — a 1-tick spike must not drop straight to MIN.
     static constexpr int     ZERO_THROUGHPUT_CONFIRM_TICKS = 2;
+    // Phase 08 (A): the VIDEO loss percent is a Σlost/ΣsegsOut over this many
+    // ticks, not one. The video flow sends only ~70-80 segments per tick, so a
+    // single lost packet reads as ~1.3% — over the 0.8% trigger — and every
+    // retransmit was a false "high loss". At 5x70=350 segments one packet is
+    // 0.29%. A real collapse (>50%) still trips on the first tick; only
+    // near-threshold loss is slowed, which is the correct thing to slow. VIDEO
+    // only — the C2 slot's ~550 segs/tick denominator is already adequate.
+    static constexpr int     LOSS_WINDOW_TICKS = 5;
 
     // ── Core state (xbfirm) ──────────────────────────────────────────────
     AbrState m_abrState;
@@ -289,11 +320,32 @@ private:
     double m_scoreAtStepUp = 0.0;
     int m_trendAtStepUp = 0;
 
+    // Phase 08 (B): the overshoot EPISODE. m_pendingCeiling != 0 means a break
+    // tick has been seen and the ceiling is staged but not yet latched;
+    // isOvershoot() returns true for as long as the episode is open so the NEXT
+    // break tick re-enters the same branch (without this the H1 fix — which sets
+    // ABR_DECREASE after the first break — would make a 2nd consecutive break
+    // impossible to classify). m_overshootConfirmTicks counts the break ticks in
+    // the episode. A tick that is neither a loss nor a bufferbloat break closes
+    // the episode (processTCPInfo(const tcpInfo&)).
+    unsigned int m_pendingCeiling = 0;
+    int m_overshootConfirmTicks = 0;
+
     // The radio-strength reference that is the ONLY thing allowed to lift the
     // learned ceiling (allowExceedCeiling → environmentChanged). Held BY VALUE:
     // m_iface is const per instance, so the one-ref-per-interface mapping is
     // automatic and its lifetime rides the instance (no pointer to manage).
     NetworkReference m_networkRef;
+
+    // ── Phase 08 (C): ceiling-escape fallback state (PORT DEVIATION) ───────
+    // Used only while there is NO USABLE strength source
+    // (m_networkRef.hasUsableStrength() false).
+    // m_ceilingHoldSince: ms when the hold at the ceiling began (0 = not holding).
+    // m_ceilingReprobeBackoffMs: the current wait (base 30s, doubles on re-latch).
+    // m_reprobeInFlight: a FALLBACK lift happened; a later latch doubles the wait.
+    qint64 m_ceilingHoldSince = 0;
+    qint64 m_ceilingReprobeBackoffMs = CEILING_REPROBE_BASE_MS;
+    bool   m_reprobeInFlight = false;
 
     // ── Phase 07: settle window + zero-throughput debounce (PORT DEVIATION) ─
     // m_settleUntil: monotonic ms until which the algorithm HOLDs and accepts
@@ -325,6 +377,20 @@ private:
     // Cumulative tracking for the delta calculation (xbfirm).
     int _lastTcpiSegsout = 0;
     int _lastTelemetrySegsout = 0;
+
+    // Phase 08 (A): the VIDEO loss-percent sliding window — parallel vectors of
+    // the last LOSS_WINDOW_TICKS ticks' (lost, deltaSegsOut). Rebuilt from the
+    // router's raw counters (lost is a per-tick count, deltaSegsOut the delta of
+    // the cumulative segsOut), so the percent is the TRUE windowed loss rate.
+    QVector<int> m_lossWindowLost;
+    QVector<int> m_lossWindowSegs;
+    // Phase 08 (A): did THIS tick lose at least one packet? The windowed rate
+    // above stays elevated for LOSS_WINDOW_TICKS after a single burst, so without
+    // this a burst would re-fire haveLostPackets on every one of those ticks —
+    // five ×0.80 self-congestion decreases from ONE event, and B's "2 consecutive
+    // breaks" would be satisfied by the same burst. A break requires FRESH loss;
+    // the elevated-but-stale window is memory, not a new break.
+    bool m_videoLossThisTick = false;
 
     // Telemetry (C2) data (xbfirm).
     quint32 m_telemetryRtt = 0;
