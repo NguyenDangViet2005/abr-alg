@@ -69,6 +69,7 @@ const char *eventText(int e)
     case QS_EVT_C2_STATE_CHANGE: return "C2_STATE_CHANGE";
     case QS_EVT_STALE_WARN: return "STALE_WARN";
     case QS_EVT_SOCKET_RESET_REQUEST: return "SOCKET_RESET_REQUEST";
+    case QS_EVT_ABR_CEILING: return "ABR_CEILING";
     default: return "?";
     }
 }
@@ -79,7 +80,7 @@ constexpr qint64 DROP_LOG_INTERVAL_MS = 8000;
 // Build token: printed by startUdp() so a log PROVES which revision is running.
 // Bump on every change to the QS send path. If a log's "[QSDBG] UDP →" line has
 // no build=... tag, or a stale one, the binary predates the fix.
-constexpr char QSDBG_BUILD_TAG[] = "noisopen-2026-10-02";
+constexpr char QSDBG_BUILD_TAG[] = "ceiling-2026-10-07";
 
 } // namespace
 
@@ -207,6 +208,7 @@ void QoSDebugSender::logSample(const QsSample &s) const
         << " abr=" << branchText(s.abrBranch) << "/" << reasonText(s.abrReason)
         << " br=" << s.bitrateKbps << "kbps"
         << " max=" << s.maxAbrKbps
+        << " ceil=" << s.ceilingKbps
         << " V[score=" << fx(s.video.score, 1) << " thr=" << fx(s.video.thr, 0)
         << " loss=" << fx(s.video.loss, 3) << " rtt=" << fx(s.video.rtt, 1)
         << " qdelay=" << fx(s.video.qdelay, 1) << " jit=" << fx(s.video.jitter, 1) << "]"
@@ -288,6 +290,7 @@ QsSample QoSDebugSender::buildSample(const QString &iface) const
 
     s.bitrateKbps       = abr.bitrateKbps;
     s.maxAbrKbps        = abr.maxAbrKbps;
+    s.ceilingKbps       = abr.ceilingKbps;   // 0 = not yet found (wire sentinel)
     s.sinceLastChangeMs = 0;
 
     // thr/rtt/minRtt are METHODS on RouterInterfaceStat: the wire carries only
@@ -325,7 +328,7 @@ void QoSDebugSender::emitSample(const QString &iface, const QString &primaryIfac
 // ── ABR decision hook ───────────────────────────────────────────────────────
 
 void QoSDebugSender::handleAbrDecision(const QString &iface, int kbps, int c2Mode,
-                                       int branch, int reason, int maxAbr)
+                                       int branch, int reason, int maxAbr, int ceiling)
 {
     AbrState &st = m_decision[iface];
     st.present = true;
@@ -334,6 +337,19 @@ void QoSDebugSender::handleAbrDecision(const QString &iface, int kbps, int c2Mod
     st.branch = branch;
     st.reason = reason;
     st.maxAbrKbps = maxAbr;
+    st.ceilingKbps = ceiling;
+}
+
+void QoSDebugSender::handleAbrCeiling(const QString &iface, unsigned int kbps)
+{
+    // Store first so a SAMPLE built before the next decision still carries the
+    // new ceiling, then fire the EVENT now (the whole point of a separate slot).
+    AbrState &st = m_decision[iface];
+    st.present = true;
+    st.ceilingKbps = static_cast<int>(kbps);
+
+    handleEvent(iface, QS_EVT_ABR_CEILING,
+                QStringLiteral("ceiling %1 kbps").arg(kbps));
 }
 
 void QoSDebugSender::handleEvent(const QString &iface, quint8 type, const QString &detail)

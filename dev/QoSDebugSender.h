@@ -66,10 +66,16 @@ public slots:
 
     // ABR decision hook — connected to XBAdaptiveBitrateStreaming::decisionMade
     // (see XBQoSService::setupConnections). Stores the latest decision per
-    // interface so the next SAMPLE carries the branch/reason/maxAbr beside the
-    // inputs. Until the first decision arrives, samples say NOT_AVAILABLE.
+    // interface so the next SAMPLE carries the branch/reason/maxAbr/ceiling
+    // beside the inputs. Until the first decision arrives, samples say
+    // NOT_AVAILABLE and carry ceiling 0.
     void handleAbrDecision(const QString &iface, int kbps, int c2Mode,
-                           int branch, int reason, int maxAbr);
+                           int branch, int reason, int maxAbr, int ceiling);
+
+    // The instant the ABR learns a new ceiling (connected to ABRFactory::
+    // routerAbrCeiling). Stores it AND emits a QS_EVT_ABR_CEILING immediately,
+    // so the dashboard marks the moment without waiting for the next SAMPLE.
+    void handleAbrCeiling(const QString &iface, unsigned int kbps);
 
     // A discrete event (route switch, pause, stuck-reset request, …).
     void handleEvent(const QString &iface, quint8 type, const QString &detail);
@@ -86,6 +92,9 @@ private:
         int branch = static_cast<int>(QS_BR_NOT_AVAILABLE);
         int reason = static_cast<int>(QS_R_NONE);
         int maxAbrKbps = 0;
+        // Learned ceiling; 0 = not yet found (the wire's sentinel — never a
+        // literal 0 kbps ceiling). Updated by handleAbrDecision each tick.
+        int ceilingKbps = 0;
         bool present = false;
     };
 

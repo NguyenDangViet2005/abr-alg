@@ -133,8 +133,12 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_lastGoodKbps = 0;
     m_scoreAtStepUp = 0.0;
     m_trendAtStepUp = 0;
-    m_ticksSinceStepUp = 0;
-    m_lastStepUpMs = 0;
+
+    // Phase 07: a fresh session has no settle window, no zero-throughput run,
+    // and no telemetry-lossy run.
+    m_settleUntil = 0;
+    m_zeroThroughputTicks = 0;
+    m_telemetryLossyTicks = 0;
 }
 
 // === ROUTER WIRING (not xbfirm) ===
@@ -160,11 +164,6 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
     if (row.connType == ConnType::VIDEO) {
         m_video = row;
 
-        // Phase 01 (PORT DEVIATION): age the causal window. setNewBitrate()
-        // resets this to 0 on an increase, so at the moment a loss is
-        // classified it holds the ticks elapsed since our last step-up.
-        m_ticksSinceStepUp++;
-
         // VIDEO row -> xbfirm's 11-arg processTCPInfo. The router's raw block
         // (fields 7..16) is EXACTLY that argument list, positionally:
         //   rtt µs, deliveryRate B/s, tcpiLoss count, tcpiSegsout count,
@@ -187,9 +186,13 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
                        row.minRttUs);         // tcpiMinRtt (µs)
     } else if (row.connType == ConnType::C2) {
         m_c2 = row;
-        // The C2 subflow exists -> xbfirm's _haveTelemetry. Without this,
-        // rttHigh never fires and the telemetry-loss branch reads 0.
-        _haveTelemetry = true;
+        // PORT DEVIATION (Phase 01): xbfirm sets _haveTelemetry from the
+        // telemetry SOURCE's connection state via handleSerialStatus, NOT per
+        // row. This port has no serial link, so a C2 row stands in for "the
+        // telemetry source is connected". With no C2 source configured the flag
+        // stays at its default `false` and the telemetry slot is inert — the
+        // state the user asked for while telemetry is not yet wired.
+        handleSerialStatus(true);
 
         // C2 row -> xbfirm's telemetry slot (processTelemetryTCPInfo). Same raw
         // units as the video call: the router's 601 carries the real counters, so
@@ -221,9 +224,14 @@ void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterfac
     // dashboard decodes positionally); only the values are pinned to 0. Emitted
     // as plain ints (no include of the wire enum) so this class stays decoupled.
     Q_UNUSED(primaryInterface);
+    // ceilingKbps: 0 until an overshoot teaches one, else the learned value.
+    // m_ceilingKbps is initialised to m_maxAbr (ramp is free), which is NOT a
+    // "found" ceiling — report 0 so the dashboard draws no line and the wire
+    // says "not yet found" rather than a 2000kbps ceiling that means nothing.
+    const int ceiling = (m_ceilingKbps < m_maxAbr) ? static_cast<int>(m_ceilingKbps) : 0;
     emit decisionMade(m_iface, static_cast<int>(m_abrState.current_bitrate_kbps),
                       0, /*branch=HOLD*/ 0, /*reason=NONE*/ 0,
-                      static_cast<int>(m_maxAbr));
+                      static_cast<int>(m_maxAbr), ceiling);
 }
 
 void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
@@ -237,6 +245,20 @@ void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
                       << m_abrState.current_bitrate_kbps << "kbps)";
 }
 
+void XBAdaptiveBitrateStreaming::handleSerialStatus(bool isConnected)
+{
+    // xbfirm handleSerialStatus, verbatim (the commented-out qWarning is
+    // xbfirm's own). The telemetry source's connection state IS _haveTelemetry;
+    // losing it while _cameraStatus is pinned off resets the video path.
+    if (_haveTelemetry != isConnected) {
+        _haveTelemetry = isConnected;
+        if (!_haveTelemetry && !_cameraStatus) {
+            _cameraStatus = true;
+            reset(500);
+        }
+    }
+}
+
 // === xbfirm CORE — processTCPInfo ===
 
 void XBAdaptiveBitrateStreaming::processTCPInfo(const tcpInfo &tcpi)
@@ -245,6 +267,16 @@ void XBAdaptiveBitrateStreaming::processTCPInfo(const tcpInfo &tcpi)
     m_lastNetworkDataTime = m_clock.elapsed();
 
     bool bitrateChanged = false;
+
+    // PORT DEVIATION (Phase 07): settle window. After an overshoot we HOLD and
+    // ACCEPT the trailing loss for OVERSHOOT_SETTLE_MS — that loss is the queue
+    // draining, not a new break. Acting on it would decrease below the ceiling
+    // we just learned (and re-arm the classifier). Still update the UX status.
+    if (m_settleUntil != 0 && m_clock.elapsed() < m_settleUntil) {
+        updateStreamingStatus(tcpi, false);
+        return;
+    }
+    m_settleUntil = 0;   // expired (or never set)
 
     if (haveLostPackets(tcpi)) {
         bitrateChanged = true;
@@ -396,40 +428,95 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
 {
     // xbfirm haveLostPackets, verbatim, except the self-congestion branch (see
     // the PORT DEVIATION below). Trigger is unchanged: video loss > 0.8%.
-    if (tcpi.loss_rate <= 0.8) return false;
+    if (tcpi.loss_rate <= 0.8) {
+        // A clean video tick breaks any telemetry-lossy run (G3 debounce must be
+        // CONSECUTIVE, not "N lossy ticks within the session").
+        m_telemetryLossyTicks = 0;
+        return false;
+    }
 
-    if (m_telemetryLossRate > 0.3) {
+    if (m_telemetryLossRate > TELEMETRY_LOSSY_THRESHOLD_PCT) {
         // C2 (the independent link probe) is ALSO lossy -> the link itself is
         // weak. xbfirm, verbatim: drop to MIN.
-        qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
-                             << "% + Telemetry loss: " << m_telemetryLossRate
-                             << "% -> Network degraded, dropping to MIN";
-        setNewBitrate(MIN_BITRATE_KBPS);
+        //
+        // PORT DEVIATION (Phase 07, G3): require TELEMETRY_LOSSY_CONFIRM_TICKS
+        // consecutive lossy C2 samples first. The router's C2 flow is noisier
+        // than xbfirm's probe (the reason the threshold is 0.4 not 0.3), so a
+        // single noisy C2 tick must not drop the video straight to MIN — the
+        // same debounce rationale as ZERO_THROUGHPUT_CONFIRM_TICKS. While
+        // unconfirmed we HOLD (return true suppresses the self-congestion path
+        // below, which would wrongly frame a lossy C2 tick as our own queue);
+        // two consecutive lossy ticks confirm the weak link and drop to MIN.
+        // L1/L2: clamp at the threshold — symmetric with the zero-throughput
+        // counter; the count has done its job once confirmed and an unbounded ++
+        // is pointless (the wrap is fail-safe, but no reason to allow it).
+        if (m_telemetryLossyTicks < TELEMETRY_LOSSY_CONFIRM_TICKS) ++m_telemetryLossyTicks;
+        if (m_telemetryLossyTicks >= TELEMETRY_LOSSY_CONFIRM_TICKS) {
+            qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
+                                 << "% + Telemetry loss: " << m_telemetryLossRate
+                                 << "% (x" << m_telemetryLossyTicks
+                                 << ") -> Network degraded, dropping to MIN";
+            setNewBitrate(MIN_BITRATE_KBPS);
+        } else {
+            qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
+                                 << "% + Telemetry loss: " << m_telemetryLossRate
+                                 << "% (x" << m_telemetryLossyTicks << "/"
+                                 << TELEMETRY_LOSSY_CONFIRM_TICKS
+                                 << ") -> unconfirmed, holding one tick";
+        }
     } else if (isOvershoot()) {
+        m_telemetryLossyTicks = 0;
         // PORT DEVIATION (Phase 01): telemetry is CLEAN and the break landed
         // right after our own step-up -> this is our overshoot, not a weak
         // link. Fall back to last-good and remember it as the ceiling, so the
         // ramp holds there instead of halving-and-climbing again (the
         // sawtooth). xbfirm had no such memory; it halved unconditionally.
-        // M4: a loss event must never RAISE the bitrate. If another decrease
-        // already fired inside the window (e.g. rttHigh), current < last-good,
-        // and falling back "up" would undo it and re-arm the classifier. Take
-        // the lower of the two. The ceiling is floored at MIN+STEP so a
-        // recovery-from-MIN step-up can never pin it to a permanent stall.
-        const unsigned int target = qMin(m_lastGoodKbps, m_abrState.current_bitrate_kbps);
-        m_ceilingKbps = qMax(target, MIN_BITRATE_KBPS + BITRATE_STEP_KBPS);
+        // Shared with rttHigh (Phase 06) — see applyOvershootCeiling.
+        const unsigned int target = applyOvershootCeiling();
         qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
                              << "% + Telemetry OK (" << m_telemetryLossRate
-                             << "%), " << m_ticksSinceStepUp << " tick(s) after step-up -> overshoot;"
+                             << "%), still post-step-up -> overshoot;"
                              << " back to " << target << "kbps, ceiling=" << m_ceilingKbps << "kbps";
         setNewBitrate(target);
+        // H1: when target == current (current <= last-good) setNewBitrate is a
+        // no-op and leaves m_lastAbrAction == ABR_INCREASE, so isOvershoot() stays
+        // true and the next tick re-enters this branch — re-opening the settle
+        // forever under sustained loss. Record the decrease that DID happen.
+        if (m_lastAbrAction == ABR_INCREASE) m_lastAbrAction = ABR_DECREASE;
     } else {
         // Telemetry clean but the break did NOT follow a recent step-up: it is
-        // unrelated to our ramp. Keep xbfirm's self-congestion response.
-        unsigned int new_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * 0.50);
+        // unrelated to our ramp.
+        m_telemetryLossyTicks = 0;
+        //
+        // PORT DEVIATION (Phase 01, M5): xbfirm halves here (×0.50). We use
+        // ABR_DECREASE_FACTOR (0.80) instead — the SAME gentle factor xbfirm
+        // already applies in its rttHigh branch, so this is xbfirm's own
+        // constant, not an invention.
+        // Rationale: the field log shows #9 (tcpi_lost) is a 1-tick gauge, so a
+        // single noisy tick tripped a full halve and produced the ~1000 kbps
+        // sawtooth (1966 -> 983 -> ramp). A gentle step makes the cost of acting
+        // on a noisy tick cheap, so no 2-tick debounce is needed: the reaction
+        // is small enough that a false positive barely moves the bitrate, and a
+        // genuine sustained loss trips on every tick, so the steps still
+        // compound down to where they must. The overshoot branch (above) is what
+        // caps the ceiling; this branch only sets the recovery step.
+        unsigned int new_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * ABR_DECREASE_FACTOR);
+        // PORT DEVIATION (Phase 07): the ×0.80 step is dropped by setNewBitrate
+        // when it is < MIN_BITRATE_CHANGE_THRESHOLD, which happens for every
+        // current below ~150 kbps — the bitrate then STALLS at ~120 with loss
+        // still firing. On a sustained weak-loss break the intent IS to reach the
+        // floor, so fall straight to MIN when the gentle step would be a no-op.
+        bool flooredToMin = false;
+        if (m_abrState.current_bitrate_kbps - new_bitrate < MIN_BITRATE_CHANGE_THRESHOLD) {
+            new_bitrate = MIN_BITRATE_KBPS;
+            flooredToMin = true;
+        }
         qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
                              << "% but Telemetry OK (" << m_telemetryLossRate
-                             << "%) -> Self-congestion, reducing 50% to " << new_bitrate << "kbps";
+                             << "%) -> Self-congestion, "
+                             << (flooredToMin ? "gentle step below floor -> dropping to "
+                                              : "reducing 20% to ")
+                             << new_bitrate << "kbps";
         setNewBitrate(new_bitrate);
     }
     m_rttHistory.clear();
@@ -440,36 +527,85 @@ bool XBAdaptiveBitrateStreaming::isOvershoot() const
 {
     // PORT DEVIATION (Phase 01): the causal test. Both "our overshoot" and
     // "weak link" present as a low/falling video score, so a LEVEL comparison
-    // cannot tell them apart. The difference is TIMING: an overshoot break
-    // starts right after our own step-up, from a link that was healthy when we
-    // pushed. So the test is relative to the step-up, never an absolute score.
+    // cannot tell them apart. The difference is the ACTION HISTORY: an overshoot
+    // break happens while we are still in "we raised and nothing has lowered
+    // since" — i.e. m_lastAbrAction == ABR_INCREASE. The moment any decrease
+    // fires (this branch, rttHigh, the queue guard) the action becomes
+    // ABR_DECREASE and a following break is treated as a new, non-overshoot
+    // event. That single transition is the whole test.
     //
-    // Requires: (a) the last step-up recorded a healthy score AND a not-already
-    // falling trend, (b) the break is within the window of that step-up in BOTH
-    // tick count and wall-clock (so a data gap cannot freeze the counter and
-    // make an old step-up look recent), and (c) there IS a recorded last-good
-    // to fall back to (a step-up actually happened).
-    const qint64 sinceStepUpMs = m_clock.elapsed() - m_lastStepUpMs;
-    return m_lastGoodKbps > 0
-        && m_ticksSinceStepUp <= OVERSHOOT_WINDOW_TICKS
-        && sinceStepUpMs <= OVERSHOOT_WINDOW_MS
+    // DELIBERATELY NO time window. An earlier version required the break within
+    // N ticks / M ms of the step-up, but the field log (2026-10-07) proved the
+    // break lands ~26 s after the last step-up ("Cooldown check: 26016ms"), so
+    // any short window missed it and any wide one would call every break an
+    // overshoot. The action-history test has no clock to tune.
+    //
+    // Requires: (a) we are still in the post-step-up (INCREASE) state, (b) the
+    // step-up recorded a healthy score AND a not-already-falling trend, and
+    // (c) there IS a recorded last-good to fall back to.
+    return m_lastAbrAction == ABR_INCREASE
+        && m_lastGoodKbps > 0
         && m_scoreAtStepUp >= OVERSHOOT_MIN_SCORE_AT_STEPUP
         && m_trendAtStepUp <= OVERSHOOT_MAX_TREND_AT_STEPUP;
 }
 
 bool XBAdaptiveBitrateStreaming::rttHigh(const tcpInfo &tcpi)
 {
-    // xbfirm rttHigh, verbatim. NOTE: reads the TELEMETRY (C2) rtt, not the
-    // video socket's — tcpi is unused. The threshold is hardcoded 500 in xbfirm
-    // (RTT_HIGH_THRESHOLD_MS is declared but not used there either).
-    Q_UNUSED(tcpi);
-    quint32 queuing_delay = m_telemetryRtt - m_telemetryMinRtt;
-    if (queuing_delay <= 500) return false;
+    // PORT DEVIATION (Phase 06): xbfirm reads the TELEMETRY (C2) rtt here — a
+    // slot we have no source for (_haveTelemetry=false), so the delta stayed 0
+    // and this branch NEVER fired. Re-pointed at the VIDEO socket's own
+    // rtt-min_rtt: a delta (region-independent, not an absolute RTT) that the row
+    // already carries. This branch sits in processTCPInfo's `else if`, so it only
+    // runs when there is NO loss -> it is the PURE bufferbloat path (a queue
+    // building before any packet is dropped), independent of the loss path.
+    //
+    // min_rtt==0 means the kernel has not yet sampled a minimum (fresh socket):
+    // the delta would collapse to the FULL rtt, so a high-latency region would
+    // look like a huge queue -> a false decrease. Guard it out. rtt<min_rtt is a
+    // second inversion: the unsigned subtraction would WRAP to ~4.29e9 and fire
+    // this branch falsely (and block the ramp) — require rtt>=min_rtt too.
+    if (tcpi.min_rtt == 0 || tcpi.rtt < tcpi.min_rtt) return false;
+    const quint32 queuing_delay = tcpi.rtt - tcpi.min_rtt;
+    if (queuing_delay <= RTT_HIGH_THRESHOLD_MS) return false;
 
-    qWarning().nospace() << "[ABR][" << m_iface << "] High Telemetry RTT (Queuing Delay > 500ms): "
-                         << queuing_delay << "ms (RTT:" << m_telemetryRtt
-                         << "ms, MinRTT:" << m_telemetryMinRtt << "ms)";
-    unsigned int new_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * 0.80);
+    // Phase 06: bufferbloat right after our OWN step-up IS an overshoot (we
+    // pushed, the queue grew). Route it through the same ceiling logic as
+    // haveLostPackets — otherwise setNewBitrate would set m_lastAbrAction =
+    // ABR_DECREASE and the following loss break would look like a weak link,
+    // hiding the ceiling forever.
+    if (isOvershoot()) {
+        const unsigned int target = applyOvershootCeiling();
+        qWarning().nospace() << "[ABR][" << m_iface << "] Video queue delay > "
+                             << RTT_HIGH_THRESHOLD_MS << "ms (" << queuing_delay
+                             << "ms, RTT:" << tcpi.rtt << ", MinRTT:" << tcpi.min_rtt
+                             << ") post-step-up -> overshoot; back to " << target
+                             << "kbps, ceiling=" << m_ceilingKbps << "kbps";
+        setNewBitrate(target);
+        // H1: see haveLostPackets — a no-op target must still clear the
+        // ABR_INCREASE state or isOvershoot() never releases.
+        if (m_lastAbrAction == ABR_INCREASE) m_lastAbrAction = ABR_DECREASE;
+        m_rttHistory.clear();
+        return true;
+    }
+
+    qWarning().nospace() << "[ABR][" << m_iface << "] Video queue delay > "
+                         << RTT_HIGH_THRESHOLD_MS << "ms (" << queuing_delay
+                         << "ms, RTT:" << tcpi.rtt << ", MinRTT:" << tcpi.min_rtt
+                         << "), reducing 20%";
+    unsigned int new_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * ABR_DECREASE_FACTOR);
+    // PORT DEVIATION (Phase 07, G1): at a low current the ×0.80 step falls below
+    // MIN_BITRATE_CHANGE_THRESHOLD (diff<30 for current<=~145), so setNewBitrate
+    // would silently no-op and this bufferbloat path would stall. Unlike the
+    // weak-loss branch (which floors to MIN), a queueing-delay signal is a
+    // gentler hint than packet loss — step down by exactly the threshold instead,
+    // keeping the path alive without slamming to MIN. The current>=MIN guard
+    // (LOW-2) keeps the subtraction from underflowing if current is ever below
+    // the floor (reset() is public and does not clamp its input).
+    if (m_abrState.current_bitrate_kbps - new_bitrate < MIN_BITRATE_CHANGE_THRESHOLD) {
+        new_bitrate = (m_abrState.current_bitrate_kbps >= MIN_BITRATE_KBPS)
+                          ? m_abrState.current_bitrate_kbps - MIN_BITRATE_CHANGE_THRESHOLD
+                          : MIN_BITRATE_KBPS;
+    }
     setNewBitrate(new_bitrate);
     m_rttHistory.clear();
     return true;
@@ -504,10 +640,20 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
     const unsigned int current_throughput_Bps = static_cast<unsigned int>((tcpi.throughput * 1000) / 8);
 
     if (current_throughput_Bps == 0) {
-        qWarning().nospace() << "[ABR][" << m_iface << "] Throughput is 0! Dropping to MIN";
-        setNewBitrate(MIN_BITRATE_KBPS);
+        // PORT DEVIATION (Phase 07): require ZERO_THROUGHPUT_CONFIRM_TICKS
+        // consecutive zero ticks. A single 1-tick spike (a stale delivery_rate
+        // sample) must not drop the bitrate straight to MIN.
+        // L2: clamp at the threshold — once confirmed the count has done its job,
+        // and unbounded ++ would (theoretically) overflow int over a long outage.
+        if (m_zeroThroughputTicks < ZERO_THROUGHPUT_CONFIRM_TICKS) ++m_zeroThroughputTicks;
+        if (m_zeroThroughputTicks >= ZERO_THROUGHPUT_CONFIRM_TICKS) {
+            qWarning().nospace() << "[ABR][" << m_iface << "] Throughput 0 for "
+                                 << m_zeroThroughputTicks << " consecutive ticks! Dropping to MIN";
+            setNewBitrate(MIN_BITRATE_KBPS);
+        }
         return;
     }
+    m_zeroThroughputTicks = 0;
 
     const double queuing_delay_ms = (m_avgSiocoutq / static_cast<double>(current_throughput_Bps)) * 1000.0;
 
@@ -517,39 +663,75 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
         (m_lastAbrAction == ABR_DECREASE) ? RTT_STABLE_AFTER_DECREASE_MS : RTT_STABLE_THRESHOLD_MS;
 
     if (queuing_delay_ms > QUEUE_DELAY_HIGH_THRESHOLD_MS) {
+        // PORT DEVIATION (Phase 06): xbfirm multiplies by m_gainDown, which the
+        // (absent) CellularPredictive advisor drove. With no advisor m_gainDown
+        // stays 1.0, so this decrease was a NO-OP (diff 0 < MIN_CHANGE_THRESHOLD
+        // -> setNewBitrate returned early) — a dead congestion path. Use the
+        // shared ABR_DECREASE_FACTOR so a drained queue actually costs 20%.
+        //
+        // KNOWN RESIDUAL (M1, accepted): this branch does NOT check isOvershoot(),
+        // so a queue-led overshoot that drains before any loss (qdelay>400ms
+        // while rtt-min<700ms, so rttHigh has not fired) sets ABR_DECREASE and the
+        // ceiling is never learned for it -> a mild sawtooth on this one path.
+        // Left as-is deliberately (plan Phase 06 scoped only ×0.80 here); the
+        // rttHigh path DOES route through isOvershoot, so the loss- and
+        // bufferbloat-led overshoots still learn a ceiling.
         qWarning().nospace() << "[ABR][" << m_iface << "] Queued time >"
-                             << QUEUE_DELAY_HIGH_THRESHOLD_MS << "ms";
-        unsigned int decreased_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * m_gainDown);
+                             << QUEUE_DELAY_HIGH_THRESHOLD_MS << "ms, reducing 20%";
+        unsigned int decreased_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * ABR_DECREASE_FACTOR);
+        // PORT DEVIATION (Phase 07, G1): same low-bitrate no-op guard as rttHigh
+        // — a ×0.80 step below MIN_BITRATE_CHANGE_THRESHOLD would be dropped by
+        // setNewBitrate, silently killing this congestion path. Step down by
+        // exactly the threshold so the drain still happens. current>=MIN guard
+        // (LOW-2) prevents underflow if current is ever below the floor.
+        if (m_abrState.current_bitrate_kbps - decreased_bitrate < MIN_BITRATE_CHANGE_THRESHOLD) {
+            decreased_bitrate = (m_abrState.current_bitrate_kbps >= MIN_BITRATE_KBPS)
+                                    ? m_abrState.current_bitrate_kbps - MIN_BITRATE_CHANGE_THRESHOLD
+                                    : MIN_BITRATE_KBPS;
+        }
         setNewBitrate(decreased_bitrate);
         m_rttHistory.clear();
     } else if (queuing_delay_ms < increase_q_delay_threshold) {
         qWarning().nospace() << "[ABR][" << m_iface << "] Queued time <" << queuing_delay_ms << "ms";
-        const quint32 network_delay = tcpi.rtt - tcpi.min_rtt;
-        if (network_delay < increase_rtt_delay_threshold) {
-            qWarning().nospace() << "[ABR][" << m_iface << "] Network delay <" << network_delay << "ms";
-            if (jitter < JITTER_STABLE_THRESHOLD_MS) {
-                qWarning().nospace() << "[ABR][" << m_iface << "] RTT stable (" << network_delay
-                                     << "ms < " << increase_rtt_delay_threshold << "ms) & Jitter stable ("
-                                     << jitter << "ms < " << JITTER_STABLE_THRESHOLD_MS << "ms)";
-                const qint64 now = m_clock.elapsed();
-                const qint64 time_since_last_change = now - m_lastQualityChangeTime;
-                qWarning().nospace() << "[ABR][" << m_iface << "] Cooldown check: "
-                                     << time_since_last_change << "ms since last change (need >= "
-                                     << BITRATE_INCREASE_COOLDOWN_MS << "ms)";
-                if (time_since_last_change >= BITRATE_INCREASE_COOLDOWN_MS) {
-                    // Phase 01 (PORT DEVIATION): never ramp above the learned
-                    // ceiling. xbfirm had no ceiling, so this is what stops the
-                    // ramp-forever behaviour once an overshoot has set the
-                    // limit. While holding, m_lastQualityChangeTime does not
-                    // advance, so this warning repeats ~1 Hz — same cadence as
-                    // the other qWarnings in this loop, accepted.
-                    const unsigned int next_bitrate = m_abrState.current_bitrate_kbps
-                                                    + static_cast<unsigned int>(m_gainUp * BITRATE_STEP_KBPS);
-                    if (next_bitrate > m_ceilingKbps) {
-                        qWarning().nospace() << "[ABR][" << m_iface << "] At ceiling "
-                                             << m_ceilingKbps << "kbps — holding (no ramp)";
-                    } else {
-                        setNewBitrate(next_bitrate);
+        // Phase 06/07 guard: with min_rtt==0 the delta collapses to the full rtt,
+        // and rtt<min_rtt wraps unsigned — either would wrongly BLOCK the ramp in
+        // a high-latency region. Compute the subtraction only AFTER the guard
+        // (L3) so the wrapped value is never even formed; the short-circuit made
+        // it harmless before, but keeping it inside the guard is robust to a
+        // future reorder.
+        if (tcpi.min_rtt != 0 && tcpi.rtt >= tcpi.min_rtt) {
+            const quint32 network_delay = tcpi.rtt - tcpi.min_rtt;
+            if (network_delay < increase_rtt_delay_threshold) {
+                qWarning().nospace() << "[ABR][" << m_iface << "] Network delay <" << network_delay << "ms";
+                if (jitter < JITTER_STABLE_THRESHOLD_MS) {
+                    qWarning().nospace() << "[ABR][" << m_iface << "] RTT stable (" << network_delay
+                                         << "ms < " << increase_rtt_delay_threshold << "ms) & Jitter stable ("
+                                         << jitter << "ms < " << JITTER_STABLE_THRESHOLD_MS << "ms)";
+                    const qint64 now = m_clock.elapsed();
+                    const qint64 time_since_last_change = now - m_lastQualityChangeTime;
+                    qWarning().nospace() << "[ABR][" << m_iface << "] Cooldown check: "
+                                         << time_since_last_change << "ms since last change (need >= "
+                                         << BITRATE_INCREASE_COOLDOWN_MS << "ms)";
+                    if (time_since_last_change >= BITRATE_INCREASE_COOLDOWN_MS) {
+                        // Phase 01 (PORT DEVIATION): never ramp above the learned
+                        // ceiling. xbfirm had no ceiling, so this is what stops the
+                        // ramp-forever behaviour once an overshoot has set the
+                        // limit. While holding, m_lastQualityChangeTime does not
+                        // advance, so this warning repeats ~1 Hz — same cadence as
+                        // the other qWarnings in this loop, accepted.
+                        const unsigned int next_bitrate = m_abrState.current_bitrate_kbps
+                                                        + static_cast<unsigned int>(m_gainUp * BITRATE_STEP_KBPS);
+                        if (next_bitrate > m_ceilingKbps && !allowExceedCeiling()) {
+                            qWarning().nospace() << "[ABR][" << m_iface << "] At ceiling "
+                                                 << m_ceilingKbps << "kbps — holding (no ramp)";
+                        } else {
+                            // Phase 07: allowExceedCeiling() true (Phase 03) means the
+                            // environment changed — LIFT the ceiling (re-probe). Cleared
+                            // directly, no EVENT: the next SAMPLE reports 0 and the
+                            // dashboard line clears; a later overshoot learns a new one.
+                            if (next_bitrate > m_ceilingKbps) m_ceilingKbps = m_maxAbr;
+                            setNewBitrate(next_bitrate);
+                        }
                     }
                 }
             }
@@ -559,6 +741,52 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                              << increase_q_delay_threshold << " < " << queuing_delay_ms << "ms) < "
                              << QUEUE_DELAY_HIGH_THRESHOLD_MS << "ms). Holding bitrate.";
     }
+}
+
+unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
+{
+    // Shared by haveLostPackets (loss break) and rttHigh (bufferbloat break).
+    // M4: a break must never RAISE the bitrate. last-good is the value before our
+    // step-up; if the current bitrate is already below it, falling back "up"
+    // would undo a decrease and re-arm the classifier. Take the lower of the two.
+    // The ceiling is floored at MIN+STEP so a recovery-from-MIN step-up can never
+    // pin it to a permanent stall.
+    const unsigned int target = qMin(m_lastGoodKbps, m_abrState.current_bitrate_kbps);
+    setCeiling(qMax(target, MIN_BITRATE_KBPS + BITRATE_STEP_KBPS));
+    // Phase 07: open the settle window. The loss that trails this break is the
+    // queue draining; HOLD and accept it rather than decreasing below the ceiling.
+    m_settleUntil = m_clock.elapsed() + OVERSHOOT_SETTLE_MS;
+    // L1: processTCPInfo early-returns during settle, so haveLostPackets and
+    // checkSenderQueue never run — the confirmation counters would FREEZE and a
+    // pre-settle zero/lossy tick could pair with a post-settle one to look
+    // "consecutive". Clear them; a real collapse re-accumulates after settle.
+    m_zeroThroughputTicks = 0;
+    m_telemetryLossyTicks = 0;
+    return target;
+}
+
+bool XBAdaptiveBitrateStreaming::allowExceedCeiling() const
+{
+    // PORT DEVIATION (Phase 07): the single gate that may lift the learned
+    // ceiling. No NetworkReference source is wired yet, so the ceiling is held
+    // for the whole session — the conservative default. Phase 03 replaces this
+    // body with the signal-strength / GPS check: true only when the environment
+    // is proven to have changed (strength_baseline<=1 && strength_now>=2 &&
+    // GPS>30m, or strength==9 && GPS>100m).
+    return false;
+}
+
+void XBAdaptiveBitrateStreaming::setCeiling(unsigned int kbps)
+{
+    // Edge-triggered: the QS channel wants ONE QS_EVT_ABR_CEILING per change, not
+    // one per tick. Every write to m_ceilingKbps that represents a LEARNED limit
+    // goes through here; the ctor/reset/setMaxAbrBitrate assignments (which set
+    // it back to m_maxAbr = "no ceiling") do not, so they never fire a bogus
+    // "ceiling found" event.
+    if (m_ceilingKbps == kbps) return;
+    m_ceilingKbps = kbps;
+    qInfo().nospace() << "[ABR][" << m_iface << "] ceiling set to " << kbps << "kbps";
+    emit ceilingChanged(m_iface, kbps);
 }
 
 void XBAdaptiveBitrateStreaming::setNewBitrate(unsigned int new_bitrate_kbps)
@@ -588,10 +816,10 @@ void XBAdaptiveBitrateStreaming::setNewBitrate(unsigned int new_bitrate_kbps)
         m_lastAbrAction = ABR_DECREASE;
     } else {
         // PORT DEVIATION (Phase 01): record the value we are leaving as
-        // last-good, and snapshot the video score at the instant of the
-        // step-up — the causal pair isOvershoot() reads. Resetting
-        // m_ticksSinceStepUp / m_lastStepUpMs here anchors the window to THIS
-        // ramp.
+        // last-good, and snapshot the video score/trend at the instant of the
+        // step-up — the causal pair isOvershoot() reads. There is no tick/ms
+        // anchor: isOvershoot() keys on the action being ABR_INCREASE, set just
+        // below, which this step-up re-establishes.
         //
         // The MIN floor on last-good is a SAFETY, not bookkeeping: the telemetry
         // ABR kick ramps up from MIN after an outage, and if a break then lands
@@ -604,8 +832,6 @@ void XBAdaptiveBitrateStreaming::setNewBitrate(unsigned int new_bitrate_kbps)
         }
         m_scoreAtStepUp = m_video.score;
         m_trendAtStepUp = m_video.trend;
-        m_ticksSinceStepUp = 0;
-        m_lastStepUpMs = m_clock.elapsed();
         // PORT DEVIATION (Phase 01, H2): xbfirm set ABR_INCREASE ONLY inside
         // `else if (adjusted >= m_problematicBitrateThreshold)`, so during a
         // recovery ramp below the recorded threshold the action stayed

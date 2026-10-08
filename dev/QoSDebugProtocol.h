@@ -36,7 +36,13 @@
 // reject it. The bug is invisible to a C++ round-trip (writer and reader agree
 // with each other) and only a cross-language fixture catches it.
 constexpr char QS_MAGIC_BYTES[2] = { 'Q', 'S' };
-constexpr quint8  QS_VERSION = 1;
+// 2 (2026-10-07): QsSample gained `ceilingKbps`, which CHANGES the SAMPLE
+// payload size. The dashboard's parser.js reads SAMPLE positionally and ends
+// with a STRICT `offset !== length` check, so an un-bumped version would fail
+// decode LOUDLY rather than misread — that is the point of the byte. Producer
+// and consumers move in lockstep: this file, QoSDebugProtocol.cpp, parser.js,
+// tst_qs_encoder.cpp, qs-parser.test.js.
+constexpr quint8  QS_VERSION = 2;
 
 // Datagram header size: magic(2) + version(1) + type(1) + payloadLen(2).
 constexpr int QS_HEADER_SIZE = 6;
@@ -108,7 +114,13 @@ enum QsEventType : quint8 {
     QS_EVT_ABR_RESUME          = 3,
     QS_EVT_C2_STATE_CHANGE     = 4,
     QS_EVT_STALE_WARN          = 5,
-    QS_EVT_SOCKET_RESET_REQUEST = 6
+    QS_EVT_SOCKET_RESET_REQUEST = 6,
+    // 7 = APPENDED (2026-10-07), never inserted: the dashboard decodes eventType
+    // POSITIONALLY (`QS_EVENT_MAP[eventType - 1]`), so renumbering 1..6 would
+    // silently relabel every existing event. Fired the instant the ABR learns a
+    // new ceiling, so the dashboard can mark the moment without waiting for the
+    // next 1 Hz SAMPLE to carry it.
+    QS_EVT_ABR_CEILING         = 7
 };
 
 // The 7 raw metrics of ONE flow (video or C2). Kept as a struct, not 7 loose
@@ -151,6 +163,11 @@ struct QsSample {
 
     qint32 bitrateKbps       = 0;
     qint32 maxAbrKbps        = 0;
+    // The ABR's learned ceiling (Phase 01). 0 = NOT YET FOUND — the ramp is
+    // still free up to maxAbrKbps. A consumer MUST treat 0 as "unknown", never
+    // as a literal 0 kbps ceiling. Placed AFTER maxAbrKbps so the dashboard's
+    // positional reader takes it in the same order this encoder writes it.
+    qint32 ceilingKbps       = 0;
     qint32 sinceLastChangeMs = 0;
 
     QsFlow video;

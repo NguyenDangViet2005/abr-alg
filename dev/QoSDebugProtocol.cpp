@@ -122,6 +122,7 @@ QByteArray encodeQsSample(const QsSample &s)
 
     ds << s.bitrateKbps;
     ds << s.maxAbrKbps;
+    ds << s.ceilingKbps;                   // i32, v2 — after maxAbrKbps
     ds << s.sinceLastChangeMs;
 
     // VIDEO then C2, each the same 7 fields in a fixed order.
@@ -167,7 +168,7 @@ bool decodeQsSample(const QByteArray &payload, QsSample &s)
 
     ds >> s.videoTrend >> s.c2Trend >> s.videoQuality >> s.c2Quality;
     ds >> s.c2Mode >> s.abrBranch >> s.abrReason >> s.notUsableTicks;
-    ds >> s.bitrateKbps >> s.maxAbrKbps >> s.sinceLastChangeMs;
+    ds >> s.bitrateKbps >> s.maxAbrKbps >> s.ceilingKbps >> s.sinceLastChangeMs;
 
     float v[7] = {0};
     float c[7] = {0};

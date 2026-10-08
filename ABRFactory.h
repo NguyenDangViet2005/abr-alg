@@ -75,7 +75,12 @@ signals:
     // decisionMade), so a consumer can tap the decision without holding a
     // pointer to every instance. The QS debug channel connects here.
     void routerAbrDecision(const QString &iface, int kbps, int c2Mode,
-                           int branch, int reason, int maxAbr);
+                           int branch, int reason, int maxAbr, int ceiling);
+
+    // Relay of the instant a ceiling is learned (XBAdaptiveBitrateStreaming::
+    // ceilingChanged). Edge-triggered, so the QS channel can fire the ceiling
+    // EVENT without waiting for the next per-tick decision.
+    void routerAbrCeiling(const QString &iface, unsigned int kbps);
 
 private:
     static ABRFactory* _instance;

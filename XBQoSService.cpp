@@ -168,6 +168,10 @@ void XBQoSService::setupConnections()
             // is what fills abrBranch/abrReason/maxAbr in every SAMPLE.
             connect(m_abrFactory, &ABRFactory::routerAbrDecision,
                     m_qosDebug, &QoSDebugSender::handleAbrDecision);
+            // The ceiling EDGE, so QS_EVT_ABR_CEILING fires the moment it is
+            // learned, not on the next 1 Hz SAMPLE.
+            connect(m_abrFactory, &ABRFactory::routerAbrCeiling,
+                    m_qosDebug, &QoSDebugSender::handleAbrCeiling);
         }
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi

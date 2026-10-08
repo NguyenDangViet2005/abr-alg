@@ -57,10 +57,14 @@ void ABRFactory::startRouterAbr(const QStringList &ifaces, bool isC2Configured)
         _routerAbrs.insert(name, abr);
         connect(abr, &XBAdaptiveBitrateStreaming::bitrateProposed,
                 this, &ABRFactory::handleRouterAbrBitrate);
-        // Relay the full decision (with branch/reason/maxAbr) out of the
+        // Relay the full decision (with branch/reason/maxAbr/ceiling) out of the
         // factory, so a tap does not need the instance map.
         connect(abr, &XBAdaptiveBitrateStreaming::decisionMade,
                 this, &ABRFactory::routerAbrDecision);
+        // The ceiling edge, relayed the same way so the QS channel fires the
+        // EVENT the moment it is learned rather than a tick later.
+        connect(abr, &XBAdaptiveBitrateStreaming::ceilingChanged,
+                this, &ABRFactory::routerAbrCeiling);
     }
     qInfo().nospace() << "ABRFactory: router ABR started for " << _routerAbrs.size() << " ifaces";
 }
