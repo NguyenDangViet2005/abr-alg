@@ -9,6 +9,7 @@
 #include "IAdaptiveBitrateStreaming.h"
 #include "RouterInterfaceStat.h"
 #include "ABRConfigs.h"
+#include "NetworkReference.h"
 
 // One ABR instance per interface, fed by the router's per-interface rows
 // (UDP 12346, id-60). Distinct from SRTAdaptiveBitrateStreaming, which consumes
@@ -75,6 +76,11 @@ public slots:
     // input; kept only so the existing wiring compiles, and stored for logging.
     // It does NOT gate the algorithm (that would be non-xbfirm logic).
     void handleCameraReportedBitrate(int achievedKbps);
+
+    // Radio strength for THIS interface (packet 603), routed by name from the
+    // factory. Pushed straight into the NetworkReference; the ref owns all the
+    // interpretation (baseline, staleness, debounce).
+    void handleNetworkStrength(int strength);
 
     // xbfirm handleSerialStatus, verbatim. The telemetry SOURCE's connection
     // state drives _haveTelemetry. The router port has no serial link, so this
@@ -181,9 +187,11 @@ private:
     // Phase 07: the ONLY gate that lets the ramp cross m_ceilingKbps. Returns
     // false by default (no NetworkReference source wired yet), so a learned
     // ceiling is held for the whole session. Phase 03 overrides it from the
-    // signal-strength / GPS reference: when the environment is proven to have
-    // changed it returns true, the ceiling is LIFTED (re-probe) and a later
-    // overshoot learns a new one.
+    // NetworkReference's strength baseline: when the current strength is HIGHER
+    // than the strength recorded at ceiling-set time (and held past the
+    // debounce), the environment is proven better → true, the ceiling is LIFTED
+    // (re-probe) and a later overshoot learns a new one. GPS is a later extra
+    // gate. Absence of info (stale/9/no baseline) is false.
     bool allowExceedCeiling() const;
 
     // Phase 01 (PORT DEVIATION, not xbfirm): true when the current video-loss
@@ -203,10 +211,14 @@ private:
 
     // ── Algorithm parameters (xbfirm; *AFTER_DECREASE = Settings defaults) ──
     static constexpr int     RTT_HISTORY_SIZE = 10;
-    // Phase 06: raised 500 -> 700. rttHigh now reads the VIDEO rtt-min_rtt delta
-    // (a region-independent bufferbloat gauge); a higher bar tolerates a
-    // high-latency baseline and only brakes on a genuinely large queue.
-    static constexpr quint32 RTT_HIGH_THRESHOLD_MS = 700;
+    // xbfirm's own 500. rttHigh reads the VIDEO rtt-min_rtt delta (a
+    // region-independent bufferbloat gauge): 500ms of STANDING queue already
+    // means heavy lag, and the delta already discounts the baseline latency, so
+    // there is nothing to "tolerate" by raising it. Phase 06 briefly raised this
+    // to 700; reverted — it let the video lag almost a second before braking, and
+    // it sat out of tune with the sibling 400ms drain-time gate in checkSenderQueue.
+    // A false decrease is cheap (×0.80 + settle); a miss is dear.
+    static constexpr quint32 RTT_HIGH_THRESHOLD_MS = 500;
     // Phase 06: the ONE gentle-decrease factor, shared by the three decrease
     // paths (weak loss, rttHigh bufferbloat, qdelay congestion) so they cannot
     // drift. 0.80 is xbfirm's own rttHigh factor, not an invention.
@@ -276,6 +288,12 @@ private:
     unsigned int m_lastGoodKbps = 0;
     double m_scoreAtStepUp = 0.0;
     int m_trendAtStepUp = 0;
+
+    // The radio-strength reference that is the ONLY thing allowed to lift the
+    // learned ceiling (allowExceedCeiling → environmentChanged). Held BY VALUE:
+    // m_iface is const per instance, so the one-ref-per-interface mapping is
+    // automatic and its lifetime rides the instance (no pointer to manage).
+    NetworkReference m_networkRef;
 
     // ── Phase 07: settle window + zero-throughput debounce (PORT DEVIATION) ─
     // m_settleUntil: monotonic ms until which the algorithm HOLDs and accepts

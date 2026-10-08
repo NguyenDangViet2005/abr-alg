@@ -17,10 +17,15 @@
 //
 //   VIDEO / C2   -> 22 '#'-separated fields, see RouterInterfaceStat
 //   PRIMARY      -> ONE field: the chosen primary interface name, or "-"
+//   NETWORK_REF  -> TWO fields: <name>#<strength>, strength 0..4 (weak->strong),
+//                   9 = no info. The router reserves this kind but emits nothing
+//                   yet (no RSSI source), so it stays silent until a real value
+//                   exists — see NetworkReference.h.
 enum class ConnType : int {
-    VIDEO   = 0,   // 600
-    C2      = 1,   // 601
-    PRIMARY = 2    // 602
+    VIDEO       = 0,   // 600
+    C2          = 1,   // 601
+    PRIMARY     = 2,   // 602
+    NETWORK_REF = 3    // 603
 };
 
 // One VIDEO or C2 row from the router — its own per-interface view of the link.

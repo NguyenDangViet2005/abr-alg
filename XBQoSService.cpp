@@ -155,6 +155,9 @@ void XBQoSService::setupConnections()
                 m_abrFactory, &ABRFactory::handleRouterRow);
         connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
                 m_abrFactory, &ABRFactory::handleRouterTick);
+        // Radio strength (row 603) → the owning instance's NetworkReference.
+        connect(m_routerNetworkHandler, &RouterNetworkHandler::onNetworkStrength,
+                m_abrFactory, &ABRFactory::handleNetworkStrength);
 
         // QoS debug channel taps the SAME signals. It only reads, so the tap
         // order relative to the factory does not matter.

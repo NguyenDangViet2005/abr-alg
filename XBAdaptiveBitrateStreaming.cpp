@@ -134,6 +134,11 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_scoreAtStepUp = 0.0;
     m_trendAtStepUp = 0;
 
+    // Phase 03: a fresh session has no learned ceiling, so the strength anchor is
+    // meaningless — clear it (baseline, staleness, debounce) alongside the
+    // ceiling it belongs to.
+    m_networkRef.reset();
+
     // Phase 07: a fresh session has no settle window, no zero-throughput run,
     // and no telemetry-lossy run.
     m_settleUntil = 0;
@@ -243,6 +248,13 @@ void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
     qInfo().nospace() << "[ABR][" << m_iface << "] camera reported achieved="
                       << achievedKbps << "kbps (asked="
                       << m_abrState.current_bitrate_kbps << "kbps)";
+}
+
+void XBAdaptiveBitrateStreaming::handleNetworkStrength(int strength)
+{
+    // Radio strength for THIS interface (603), routed by name from the factory.
+    // The ref owns all interpretation; this slot is just the push point.
+    m_networkRef.setStrength(strength);
 }
 
 void XBAdaptiveBitrateStreaming::handleSerialStatus(bool isConnected)
@@ -671,11 +683,11 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
         //
         // KNOWN RESIDUAL (M1, accepted): this branch does NOT check isOvershoot(),
         // so a queue-led overshoot that drains before any loss (qdelay>400ms
-        // while rtt-min<700ms, so rttHigh has not fired) sets ABR_DECREASE and the
-        // ceiling is never learned for it -> a mild sawtooth on this one path.
-        // Left as-is deliberately (plan Phase 06 scoped only ×0.80 here); the
-        // rttHigh path DOES route through isOvershoot, so the loss- and
-        // bufferbloat-led overshoots still learn a ceiling.
+        // while rtt-min<RTT_HIGH_THRESHOLD_MS, so rttHigh has not fired) sets
+        // ABR_DECREASE and the ceiling is never learned for it -> a mild sawtooth
+        // on this one path. Left as-is deliberately (plan Phase 06 scoped only
+        // ×0.80 here); the rttHigh path DOES route through isOvershoot, so the
+        // loss- and bufferbloat-led overshoots still learn a ceiling.
         qWarning().nospace() << "[ABR][" << m_iface << "] Queued time >"
                              << QUEUE_DELAY_HIGH_THRESHOLD_MS << "ms, reducing 20%";
         unsigned int decreased_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * ABR_DECREASE_FACTOR);
@@ -753,6 +765,13 @@ unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
     // pin it to a permanent stall.
     const unsigned int target = qMin(m_lastGoodKbps, m_abrState.current_bitrate_kbps);
     setCeiling(qMax(target, MIN_BITRATE_KBPS + BITRATE_STEP_KBPS));
+    // Phase 03: capture the radio strength at THIS learn instant — the anchor
+    // environmentChanged() compares against. Taken HERE, not in setCeiling():
+    // setCeiling() is de-dup guarded (`if (m_ceilingKbps == kbps) return;`), so a
+    // re-learn at the same plateau would skip a baseline taken there and leave a
+    // stale one. applyOvershootCeiling() runs on EVERY break, so the anchor
+    // always refreshes at the true learn edge.
+    m_networkRef.markBaseline();
     // Phase 07: open the settle window. The loss that trails this break is the
     // queue draining; HOLD and accept it rather than decreasing below the ceiling.
     m_settleUntil = m_clock.elapsed() + OVERSHOOT_SETTLE_MS;
@@ -767,13 +786,14 @@ unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
 
 bool XBAdaptiveBitrateStreaming::allowExceedCeiling() const
 {
-    // PORT DEVIATION (Phase 07): the single gate that may lift the learned
-    // ceiling. No NetworkReference source is wired yet, so the ceiling is held
-    // for the whole session — the conservative default. Phase 03 replaces this
-    // body with the signal-strength / GPS check: true only when the environment
-    // is proven to have changed (strength_baseline<=1 && strength_now>=2 &&
-    // GPS>30m, or strength==9 && GPS>100m).
-    return false;
+    // PORT DEVIATION (Phase 03): the single gate that may lift the learned
+    // ceiling. True only when the radio has genuinely recovered since the
+    // ceiling was learned — the strength baseline recorded at the learn instant
+    // is LOWER than the current strength (baseline < now), held for a debounce
+    // window. Absence of info (stale 603, strength==9, or no baseline yet) is
+    // false, so the default is HOLD. GPS (packet 604) is deferred and becomes an
+    // EXTRA gate later, not a prerequisite.
+    return m_networkRef.environmentChanged();
 }
 
 void XBAdaptiveBitrateStreaming::setCeiling(unsigned int kbps)

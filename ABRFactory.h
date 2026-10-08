@@ -51,6 +51,11 @@ public slots:
     // whether it is the primary.
     void handleRouterTick(const QString &primaryInterface);
 
+    // A per-interface radio strength (row 603). Routed by name to the owning
+    // instance's NetworkReference, exactly as handleRouterRow is. An unmatched
+    // name is the declared-vs-seen mismatch — warn, do not swallow.
+    void handleNetworkStrength(const QString &name, int strength);
+
     // A per-interface router-ABR proposal. Only the PRIMARY interface's
     // proposal is effective; the others are logged as spare (future failover).
     // The effective one is relayed on routerAbrEffectiveBitrate, which is what

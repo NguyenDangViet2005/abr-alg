@@ -45,6 +45,13 @@ signals:
     // rather than on each row.
     void onRouterTick(const QString &primaryInterface);
 
+    // The NETWORK_REF row (603) — a per-interface radio strength: name + level.
+    // Separate from onRouterRow because a strength is a 2-field packet, not a
+    // 22-field metric row; cramming it into RouterInterfaceStat would be the
+    // arity mismatch the parser warns about. Mirrors how PRIMARY (602) is kept
+    // distinct. Routed by name to the owning ABR instance.
+    void onNetworkStrength(const QString &name, int strength);
+
 private slots:
     void handleUdpReadyRead();
 

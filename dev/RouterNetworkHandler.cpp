@@ -185,10 +185,10 @@ void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddr
     const QString payload = QString::fromUtf8(data.mid(DATAGRAM_ID_LEN + 1)).trimmed();
     const QStringList fields = payload.split('#');
 
-    if (connTypeRaw < 0 || connTypeRaw > 2) {
-        // A connType outside the three defined values means the router and this
-        // parser have diverged. Logged distinctly but parsing continues so the
-        // raw payload is visible to diagnose the mismatch.
+    if (connTypeRaw < 0 || connTypeRaw > 3) {
+        // A connType outside the defined values means the router and this parser
+        // have diverged. Logged distinctly but parsing continues so the raw
+        // payload is visible to diagnose the mismatch.
         qWarning().nospace() << "[ROUTER][RX] id=60 UNKNOWN connType=" << connTypeRaw
                              << " raw=" << payload;
     }
@@ -212,6 +212,25 @@ void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddr
         }
         qDebug().nospace() << "[ROUTER][RX]   primaryInterface=" << primary;
         emit onRouterTick(primary);
+        return;
+    }
+
+    if (connType == ConnType::NETWORK_REF) {
+        // NETWORK_REF's payload is <name>#<strength> — a 2-field packet, so like
+        // PRIMARY it self-returns and never enters emitRow's 22-field path.
+        // A malformed strength is fail-closed to 9 (no info), so a truncated 603
+        // can never cause a spurious ceiling lift.
+        const QString name = fields.value(0);
+        bool ok = false;
+        int strength = fields.value(1).toInt(&ok);
+        if (!ok) {
+            qWarning().nospace() << "[ROUTER][RX] NETWORK_REF bad strength '"
+                                 << fields.value(1) << "' — defaulting to 9 (no info)";
+            strength = 9;
+        }
+        qDebug().nospace() << "[ROUTER][RX]   networkStrength name=" << name
+                           << " strength=" << strength;
+        emit onNetworkStrength(name, strength);
         return;
     }
 

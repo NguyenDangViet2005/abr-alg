@@ -10,6 +10,7 @@ HEADERS += \
     ABRConfigs.h \
     ABRFactory.h \
     IAdaptiveBitrateStreaming.h \
+    NetworkReference.h \
     RouterInterfaceStat.h \
     SRTAdaptiveBitrateStreaming.h \
     SRTPeerStat.h \
@@ -27,6 +28,7 @@ SOURCES += \
     main.cpp \
     ABRFactory.cpp \
     IAdaptiveBitrateStreaming.cpp \
+    NetworkReference.cpp \
     SRTAdaptiveBitrateStreaming.cpp \
     SRTPeerStat.cpp \
     VideoResolutionAdapter.cpp \

@@ -114,6 +114,18 @@ void ABRFactory::handleRouterRow(const RouterInterfaceStat &row)
     (*it)->handleRouterRow(row);
 }
 
+void ABRFactory::handleNetworkStrength(const QString &name, int strength)
+{
+    // Route to the instance owning this interface (same key as handleRouterRow).
+    auto it = _routerAbrs.find(name);
+    if (it == _routerAbrs.end()) {
+        qWarning().nospace() << "[ROUTER] strength for unknown iface '" << name
+                             << "' — not in declared list";
+        return;
+    }
+    (*it)->handleNetworkStrength(strength);
+}
+
 void ABRFactory::handleRouterTick(const QString &primaryInterface)
 {
     qDebug().nospace() << "[ROUTER][TICK] primary=" << primaryInterface;
