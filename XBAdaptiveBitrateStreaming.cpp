@@ -615,12 +615,18 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
     if (m_lastAbrAction == ABR_INCREASE) m_lastAbrAction = ABR_DECREASE;
 
     // Settle: after a ladder decrease, HOLD and wait for the link to recover
-    // before decreasing again. NOT while an overshoot episode is open
-    // (m_pendingCeiling != 0) — a settle early-returns processTCPInfo, which
-    // would starve the 2-tick ceiling confirm. applyOvershootCeiling() closes
-    // the episode (m_pendingCeiling = 0) on the confirming tick, so settling
-    // there is correct and intended.
-    if (m_pendingCeiling == 0) {
+    // before decreasing again. Two guards:
+    //  (1) NOT while an overshoot episode is open (m_pendingCeiling != 0) — a
+    //      settle early-returns processTCPInfo, which would starve the 2-tick
+    //      ceiling confirm. applyOvershootCeiling() closes the episode on the
+    //      confirming tick, so settling there is correct and intended.
+    //  (2) NOT once the action has hit MIN. A settle only makes sense while the
+    //      ladder still has room to fall; at MIN the decrease is a no-op, so
+    //      holding would only delay recovery for nothing. Covers the 50-70 and
+    //      >70 bands, plus a floored 0.8-20/20-50 band. (When an overshoot
+    //      confirm armed the settle itself, that window still stands — this only
+    //      skips the ladder's own extension.)
+    if (m_pendingCeiling == 0 && action > static_cast<unsigned int>(ABR_MIN_BITRATE_KBPS)) {
         // Only EXTEND the settle, never shorten it: on the confirming tick
         // applyOvershootCeiling() already armed ABR_OVERSHOOT_SETTLE_MS, and a
         // shorter ladder settle (if the two constants ever diverge) must not
