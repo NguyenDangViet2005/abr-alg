@@ -1,4 +1,5 @@
 #include "XBAdaptiveBitrateStreaming.h"
+#include "ABRLossBand.h"     // Phase 11: pure loss-ladder band math
 #include <QDebug>
 #include <QtMath>
 
@@ -39,6 +40,14 @@ XBAdaptiveBitrateStreaming::XBAdaptiveBitrateStreaming(const QString &iface,
     m_abrState.current_bitrate_kbps = ABR_STARTUP_BITRATE_KBPS;
     m_problematicBitrateThreshold = m_maxAbr;
 
+    // PORT DEVIATION (Phase 11): xbfirm sets _haveTelemetry from a serial link
+    // via handleSerialStatus. The router port has no serial link, and "is the
+    // telemetry source deployed at all" is a DEPLOYMENT fact owned by main.cpp
+    // (isC2Configured), not a per-packet one. So seed it here — the C2 row no
+    // longer flips it (see handleRouterRow). With C2 off (the current default),
+    // the telemetry slot is inert: processTelemetryTCPInfo returns at its gate.
+    _haveTelemetry = m_isC2Configured;
+
     // PORT DEVIATION (timing): xbfirm uses QDateTime::currentMSecsSinceEpoch()
     // for every elapsed measurement. The epoch is irrelevant and non-monotonic;
     // QElapsedTimer measures the same elapsed ms without NTP-jump risk.
@@ -57,7 +66,8 @@ XBAdaptiveBitrateStreaming::XBAdaptiveBitrateStreaming(const QString &iface,
             this, &XBAdaptiveBitrateStreaming::onStatusBroadcastTimeout);
 
     qInfo().nospace() << "[ABR][" << m_iface << "] instance created (isC2Configured="
-                      << m_isC2Configured << ", maxAbr=" << m_maxAbr << ")";
+                      << m_isC2Configured << ", haveTelemetry=" << _haveTelemetry
+                      << ", maxAbr=" << m_maxAbr << ")";
 }
 
 XBAdaptiveBitrateStreaming::~XBAdaptiveBitrateStreaming()
@@ -163,11 +173,14 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     // ceiling it belongs to.
     m_networkRef.reset();
 
-    // Phase 07: a fresh session has no settle window, no zero-throughput run,
-    // and no telemetry-lossy run.
+    // Phase 07: a fresh session has no settle window and no zero-throughput run.
     m_settleUntil = 0;
     m_zeroThroughputTicks = 0;
-    m_telemetryLossyTicks = 0;
+    // Phase 11: a fresh session has not emitted a reset yet — restore the
+    // negative sentinel so the first >70% reset is not suppressed by a timestamp
+    // left over from a prior session (the M1-class discontinuity, same as the
+    // recovery-hold counter below).
+    m_lastResetMs = -ABR_RESET_RATE_LIMIT_MS;
     // Phase 10 (M1): a stale recovery-hold count must not survive a session
     // discontinuity (start()/handleSerialStatus->reset). It is reset only by a
     // break tick or a non-clean ramp tick, NEITHER of which is a reset() call —
@@ -234,14 +247,11 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
                        row.minRttUs);         // tcpiMinRtt (µs)
     } else if (row.connType == ConnType::C2) {
         m_c2 = row;
-        // PORT DEVIATION (Phase 01): xbfirm sets _haveTelemetry from the
-        // telemetry SOURCE's connection state via handleSerialStatus, NOT per
-        // row. This port has no serial link, so a C2 row stands in for "the
-        // telemetry source is connected". With no C2 source configured the flag
-        // stays at its default `false` and the telemetry slot is inert — the
-        // state the user asked for while telemetry is not yet wired.
-        handleSerialStatus(true);
-
+        // PORT DEVIATION (Phase 11): the C2 row no longer ENABLES the telemetry
+        // slot. _haveTelemetry is a config value (m_isC2Configured, set in the
+        // ctor) — the telemetry SOURCE's existence is a deployment fact, not a
+        // per-packet one. A C2 row still feeds the slot below; whether the slot
+        // is LIVE is decided by the gate inside processTelemetryTCPInfo.
         // C2 row -> xbfirm's telemetry slot (processTelemetryTCPInfo). Same raw
         // units as the video call: the router's 601 carries the real counters, so
         // xbfirm's own delta(tcpiLoss)/delta(tcpiSegsout) derives the telemetry
@@ -540,108 +550,85 @@ void XBAdaptiveBitrateStreaming::processTelemetryTCPInfo(double rtt, double deli
 
 bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
 {
-    // xbfirm haveLostPackets, verbatim, except the self-congestion branch (see
-    // the PORT DEVIATION below). Trigger is unchanged: video loss > 0.8%.
+    // PORT DEVIATION (Phase 11): the three loss-decrease branches (telemetry-
+    // lossy weak-link, overshoot-fallback, self-congestion) are replaced by a
+    // graduated LADDER keyed on VIDEO loss% (the pure band math lives in
+    // ABRLossBand.h). Trigger is unchanged: video loss > ABR_VIDEO_LOSS_TRIGGER_PCT.
+    //
+    // The ceiling-learn is KEPT as a SIDE-EFFECT (see below): an overshoot still
+    // sets the ceiling + baseline, but the BITRATE now follows the ladder, not
+    // last-good. This is the fix for the reported defect — the old code tested a
+    // telemetry-lossy branch (video+C2 both lossy -> MIN) BEFORE isOvershoot(), so
+    // a severe overshoot slammed to MIN and the ceiling was never learned.
     if (tcpi.loss_rate <= ABR_VIDEO_LOSS_TRIGGER_PCT) {
-        // A clean video tick breaks any telemetry-lossy run (G3 debounce must be
-        // CONSECUTIVE, not "N lossy ticks within the session").
-        m_telemetryLossyTicks = 0;
         return false;
     }
 
-    if (m_telemetryLossRate > ABR_TELEMETRY_LOSSY_THRESHOLD_PCT) {
-        // C2 (the independent link probe) is ALSO lossy -> the link itself is
-        // weak. xbfirm, verbatim: drop to MIN.
-        //
-        // PORT DEVIATION (Phase 07, G3): require ABR_TELEMETRY_LOSSY_CONFIRM_TICKS
-        // consecutive lossy C2 samples first. The router's C2 flow is noisier
-        // than xbfirm's probe (the reason the threshold is 0.4 not 0.3), so a
-        // single noisy C2 tick must not drop the video straight to MIN — the
-        // same debounce rationale as ABR_ZERO_THROUGHPUT_CONFIRM_TICKS. While
-        // unconfirmed we HOLD (return true suppresses the self-congestion path
-        // below, which would wrongly frame a lossy C2 tick as our own queue);
-        // two consecutive lossy ticks confirm the weak link and drop to MIN.
-        // L1/L2: clamp at the threshold — symmetric with the zero-throughput
-        // counter; the count has done its job once confirmed and an unbounded ++
-        // is pointless (the wrap is fail-safe, but no reason to allow it).
-        if (m_telemetryLossyTicks < ABR_TELEMETRY_LOSSY_CONFIRM_TICKS) ++m_telemetryLossyTicks;
-        if (m_telemetryLossyTicks >= ABR_TELEMETRY_LOSSY_CONFIRM_TICKS) {
-            qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
-                                 << "% + Telemetry loss: " << m_telemetryLossRate
-                                 << "% (x" << m_telemetryLossyTicks
-                                 << ") -> Network degraded, dropping to MIN";
-            setNewBitrate(ABR_MIN_BITRATE_KBPS);
-        } else {
-            qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
-                                 << "% + Telemetry loss: " << m_telemetryLossRate
-                                 << "% (x" << m_telemetryLossyTicks << "/"
-                                 << ABR_TELEMETRY_LOSSY_CONFIRM_TICKS
-                                 << ") -> unconfirmed, holding one tick";
-        }
-    } else if (!m_videoLossThisTick) {
-        // Phase 08 (A): the windowed video rate is still above 0.8% but THIS tick
-        // lost nothing — the elevated window is the memory of an earlier burst,
-        // not a fresh break. Return false (clean): it closes any open overshoot
-        // episode (B), lets checkSenderQueue run, and stops a single burst from
-        // re-firing the self-congestion path on every window tick. The
-        // telemetry-lossy branch above is deliberately NOT gated by this — C2 loss
-        // is fresh per tick and a weak link must still drop to MIN.
+    // Phase 08 (A): the windowed video rate is still above 0.8% but THIS tick
+    // lost nothing — the elevated window is the memory of an earlier burst, not
+    // a fresh break. Return false (clean): it closes any open overshoot episode,
+    // lets checkSenderQueue run, and stops a single burst from re-firing the
+    // decrease on every window tick.
+    if (!m_videoLossThisTick) {
         return false;
-    } else if (isOvershoot()) {
-        m_telemetryLossyTicks = 0;
-        // PORT DEVIATION (Phase 01): telemetry is CLEAN and the break landed
-        // right after our own step-up -> this is our overshoot, not a weak
-        // link. Fall back to last-good and remember it as the ceiling, so the
-        // ramp holds there instead of halving-and-climbing again (the
-        // sawtooth). xbfirm had no such memory; it halved unconditionally.
-        // Shared with rttHigh (Phase 06) — see applyOvershootCeiling.
-        const unsigned int target = applyOvershootCeiling();
-        qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
-                             << "% + Telemetry OK (" << m_telemetryLossRate
-                             << "%), still post-step-up -> overshoot;"
-                             << " back to " << target << "kbps, ceiling=" << m_ceilingKbps << "kbps";
-        setNewBitrate(target);
-        // H1: when target == current (current <= last-good) setNewBitrate is a
-        // no-op and leaves m_lastAbrAction == ABR_INCREASE, so isOvershoot() stays
-        // true and the next tick re-enters this branch — re-opening the settle
-        // forever under sustained loss. Record the decrease that DID happen.
-        if (m_lastAbrAction == ABR_INCREASE) m_lastAbrAction = ABR_DECREASE;
-    } else {
-        // Telemetry clean but the break did NOT follow a recent step-up: it is
-        // unrelated to our ramp.
-        m_telemetryLossyTicks = 0;
-        //
-        // PORT DEVIATION (Phase 01, M5): xbfirm halves here (×0.50). We use
-        // ABR_DECREASE_FACTOR (0.80) instead — the SAME gentle factor xbfirm
-        // already applies in its rttHigh branch, so this is xbfirm's own
-        // constant, not an invention.
-        // Rationale: the field log shows #9 (tcpi_lost) is a 1-tick gauge, so a
-        // single noisy tick tripped a full halve and produced the ~1000 kbps
-        // sawtooth (1966 -> 983 -> ramp). A gentle step makes the cost of acting
-        // on a noisy tick cheap, so no 2-tick debounce is needed: the reaction
-        // is small enough that a false positive barely moves the bitrate, and a
-        // genuine sustained loss trips on every tick, so the steps still
-        // compound down to where they must. The overshoot branch (above) is what
-        // caps the ceiling; this branch only sets the recovery step.
-        unsigned int new_bitrate = static_cast<unsigned int>(m_abrState.current_bitrate_kbps * ABR_DECREASE_FACTOR);
-        // PORT DEVIATION (Phase 07): the ×0.80 step is dropped by setNewBitrate
-        // when it is < ABR_MIN_BITRATE_CHANGE_THRESHOLD, which happens for every
-        // current below ~150 kbps — the bitrate then STALLS at ~120 with loss
-        // still firing. On a sustained weak-loss break the intent IS to reach the
-        // floor, so fall straight to MIN when the gentle step would be a no-op.
-        bool flooredToMin = false;
-        if (m_abrState.current_bitrate_kbps - new_bitrate < ABR_MIN_BITRATE_CHANGE_THRESHOLD) {
-            new_bitrate = ABR_MIN_BITRATE_KBPS;
-            flooredToMin = true;
-        }
-        qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
-                             << "% but Telemetry OK (" << m_telemetryLossRate
-                             << "%) -> Self-congestion, "
-                             << (flooredToMin ? "gentle step below floor -> dropping to "
-                                              : "reducing 20% to ")
-                             << new_bitrate << "kbps";
-        setNewBitrate(new_bitrate);
     }
+
+    // Ceiling-learn side-effect (Phase 01/11): a break right after our own
+    // step-up is our overshoot. applyOvershootCeiling() recognises the ceiling
+    // (setCeiling + markBaseline) and opens its 2-tick confirm episode, but its
+    // returned target is NOT used — the ladder below decides the bitrate. The
+    // episode stays open (m_pendingCeiling != 0) until confirmed, which the
+    // settle guard below respects.
+    const bool overshoot = isOvershoot();
+    if (overshoot) {
+        applyOvershootCeiling();
+    }
+
+    bool isReset = false;
+    const unsigned int action = abrLossDecreaseAction(tcpi.loss_rate,
+                                                      m_abrState.current_bitrate_kbps,
+                                                      isReset);
+    qWarning().nospace() << "[ABR][" << m_iface << "] High video loss: " << tcpi.loss_rate
+                         << "% (telemetry " << m_telemetryLossRate << "%)"
+                         << (overshoot ? " post-step-up (overshoot, ceiling learned)" : "")
+                         << " -> ladder: " << m_abrState.current_bitrate_kbps << "kbps -> "
+                         << action << "kbps" << (isReset ? " + RESET" : "");
+    setNewBitrate(action);
+
+    // The >70% band asks the camera to refresh the stream (PART B executor is
+    // wired in XBQoSService). Rate-limited at the EMIT site so the signal itself
+    // is already throttled — a loss oscillating around 70% cannot spam refresh.
+    if (isReset) {
+        const qint64 now = m_clock.elapsed();
+        if (now - m_lastResetMs >= static_cast<qint64>(ABR_RESET_RATE_LIMIT_MS)) {
+            m_lastResetMs = now;
+            qWarning().nospace() << "[ABR][" << m_iface << "] loss " << tcpi.loss_rate
+                                 << "% > " << ABR_LOSS_RESET_PCT << "% — requesting stream reset";
+            emit requestStreamReset(m_iface, QStringLiteral("loss>70"));
+        }
+    }
+
+    // H1: when the ladder action == current (e.g. already at MIN) setNewBitrate
+    // is a no-op and leaves m_lastAbrAction == ABR_INCREASE, so isOvershoot()
+    // stays true and the next tick re-enters this branch — re-opening the settle
+    // forever under sustained loss. Record the decrease that DID happen.
+    if (m_lastAbrAction == ABR_INCREASE) m_lastAbrAction = ABR_DECREASE;
+
+    // Settle: after a ladder decrease, HOLD and wait for the link to recover
+    // before decreasing again. NOT while an overshoot episode is open
+    // (m_pendingCeiling != 0) — a settle early-returns processTCPInfo, which
+    // would starve the 2-tick ceiling confirm. applyOvershootCeiling() closes
+    // the episode (m_pendingCeiling = 0) on the confirming tick, so settling
+    // there is correct and intended.
+    if (m_pendingCeiling == 0) {
+        // Only EXTEND the settle, never shorten it: on the confirming tick
+        // applyOvershootCeiling() already armed ABR_OVERSHOOT_SETTLE_MS, and a
+        // shorter ladder settle (if the two constants ever diverge) must not
+        // override it. Equal today (both 3000), so this is belt-and-braces.
+        const qint64 deadline = m_clock.elapsed() + ABR_LOSS_DECREASE_SETTLE_MS;
+        if (deadline > m_settleUntil) m_settleUntil = deadline;
+    }
+
     m_rttHistory.clear();
     return true;
 }
@@ -1035,11 +1022,10 @@ unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
     // queue draining; HOLD and accept it rather than decreasing below the ceiling.
     m_settleUntil = m_clock.elapsed() + ABR_OVERSHOOT_SETTLE_MS;
     // L1: processTCPInfo early-returns during settle, so haveLostPackets and
-    // checkSenderQueue never run — the confirmation counters would FREEZE and a
-    // pre-settle zero/lossy tick could pair with a post-settle one to look
-    // "consecutive". Clear them; a real collapse re-accumulates after settle.
+    // checkSenderQueue never run — the confirmation counter would FREEZE and a
+    // pre-settle zero tick could pair with a post-settle one to look
+    // "consecutive". Clear it; a real collapse re-accumulates after settle.
     m_zeroThroughputTicks = 0;
-    m_telemetryLossyTicks = 0;
     // Episode complete — the next break starts a fresh one.
     m_pendingCeiling = 0;
     m_overshootConfirmTicks = 0;

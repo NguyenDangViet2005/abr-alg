@@ -92,11 +92,10 @@ public slots:
     void handleNetworkStrength(int strength);
 
     // xbfirm handleSerialStatus, verbatim. The telemetry SOURCE's connection
-    // state drives _haveTelemetry. The router port has no serial link, so this
-    // is fed from the C2 flow's presence (see handleRouterRow) — or left at its
-    // default `false` when no telemetry source is wired. It is deliberately NOT
-    // a per-row "C2 arrived" toggle: xbfirm gates the slot on the SOURCE's
-    // connection, not on a sample.
+    // state drives _haveTelemetry. The router port has no serial link, so the
+    // ctor seeds _haveTelemetry from m_isC2Configured (a DEPLOYMENT fact set in
+    // main.cpp, not a per-packet one) — see the ctor. This setter is kept for a
+    // future real serial link but is NOT called per C2 row any more (Phase 11).
     void handleSerialStatus(bool isConnected);
 
 signals:
@@ -123,8 +122,10 @@ signals:
     // WITHOUT waiting for the next 1 Hz SAMPLE to carry the field.
     void ceilingChanged(const QString &iface, unsigned int kbps);
 
-    // PART B — a reset is warranted. No executor exists (XBQoSService owns no
-    // video socket), so this is detect + emit only.
+    // PART B — a reset is warranted. The executor lives in XBQoSService (this
+    // class owns no video socket): the factory relays this signal and the
+    // service maps it to CameraControl::requestStreamRefresh. Emitted from the
+    // ladder's >70% band, rate-limited at the emit site (m_lastResetMs).
     void requestStreamReset(const QString &iface, const QString &reason);
 
 private:
@@ -294,11 +295,10 @@ private:
     // ABR_OVERSHOOT_SETTLE_MS (3000): after an overshoot, HOLD and ACCEPT the
     // loss — the loss trailing a step-up is the queue draining, not a new break.
     // Without it the next tick re-decreases and the ceiling ends up one step short.
-    // ABR_TELEMETRY_LOSSY_THRESHOLD_PCT (0.4; xbfirm 0.3): telemetry (C2) loss
-    // above which the LINK itself is called weak — the router's C2 flow is noisier.
-    // ABR_TELEMETRY_LOSSY_CONFIRM_TICKS (2) / ABR_ZERO_THROUGHPUT_CONFIRM_TICKS
-    // (2): a 1-tick C2 spike or a 1-tick zero-throughput must not drop the video
-    // straight to MIN — each needs this many CONSECUTIVE ticks.
+    // ABR_ZERO_THROUGHPUT_CONFIRM_TICKS (2): a 1-tick zero-throughput must not
+    // drop the video straight to MIN — it needs this many CONSECUTIVE ticks.
+    // (Phase 11 removed the telemetry-lossy branch entirely — C2 no longer
+    // triggers a weak-link drop; the ladder keys on video loss only.)
     // ABR_LOSS_WINDOW_TICKS (5, Phase 08 A): the VIDEO loss percent is a
     // Σlost/ΣsegsOut over this many ticks. The video flow sends only ~70-80 segs
     // per tick, so a single lost packet reads as ~1.3% — over the 0.8% trigger.
@@ -369,13 +369,11 @@ private:
 
     // ── Phase 07: settle window + zero-throughput debounce (PORT DEVIATION) ─
     // m_settleUntil: monotonic ms until which the algorithm HOLDs and accepts
-    // loss after an overshoot (0 = inactive). m_zeroThroughputTicks: consecutive
-    // throughput==0 ticks (must reach ABR_ZERO_THROUGHPUT_CONFIRM_TICKS to act).
-    // m_telemetryLossyTicks: consecutive telemetry-lossy ticks (must reach
-    // ABR_TELEMETRY_LOSSY_CONFIRM_TICKS before the weak-link→MIN branch acts).
+    // loss after an overshoot OR after a ladder decrease (0 = inactive).
+    // m_zeroThroughputTicks: consecutive throughput==0 ticks (must reach
+    // ABR_ZERO_THROUGHPUT_CONFIRM_TICKS to act).
     qint64 m_settleUntil = 0;
     int    m_zeroThroughputTicks = 0;
-    int    m_telemetryLossyTicks = 0;
     // Phase 10 (recovery-hold, PORT DEVIATION): consecutive CLEAN ticks while
     // PINNED at MIN (current <= MIN). The ramp only resumes once this reaches
     // ABR_RECOVERY_CONFIRM_TICKS, so a lone clean tick after a drop to MIN cannot
@@ -428,12 +426,13 @@ private:
     qint64  m_telemetryStableSince = 0;
 
     // Gate on the telemetry slot (xbfirm's _haveTelemetry). xbfirm sets it from
-    // the telemetry SOURCE's connection state via handleSerialStatus; here a C2
-    // row stands in for that (see handleRouterRow). Defaults to `false`: with no
-    // telemetry source wired, the telemetry-loss branch reads 0 (dead) and the
-    // telemetry-derived inputs (m_telemetryRtt/minRtt, m_telemetryLossRate) stay
-    // 0. rttHigh no longer depends on this gate — Phase 06 re-pointed it at the
-    // VIDEO row — so bufferbloat detection works without a C2 source.
+    // the telemetry SOURCE's connection state via handleSerialStatus; here it is
+    // seeded in the ctor from m_isC2Configured (a DEPLOYMENT fact from main.cpp),
+    // NOT from a C2 row (Phase 11). Defaults to `false`: with no telemetry source
+    // wired, the telemetry-derived inputs (m_telemetryRtt/minRtt,
+    // m_telemetryLossRate) stay 0. rttHigh no longer depends on this gate —
+    // Phase 06 re-pointed it at the VIDEO row — so bufferbloat detection works
+    // without a C2 source.
     bool _haveTelemetry = false;
     // xbfirm's _cameraStatus: false pins the video path off while telemetry loss
     // is severe. Set false by processTelemetryTCPInfo on >1% loss; restored
@@ -449,7 +448,12 @@ private:
     RouterInterfaceStat m_video;   // last VIDEO row
     RouterInterfaceStat m_c2;      // last C2 row
     qint64 m_lastNetworkDataTime = 0;
-    qint64 m_lastResetMs = 0;      // 0 = never emitted a reset (Part B rate-limit)
+    // Part B reset rate-limit. Sentinel: -ABR_RESET_RATE_LIMIT_MS, NOT 0 — with 0
+    // the "now - m_lastResetMs >= WINDOW" test reads 0 as clock t=0 and silently
+    // SUPPRESSES the first reset for the first 30s of instance life (a service
+    // restarted because the link collapsed would miss its first reset). The
+    // negative sentinel makes the first emit always pass.
+    qint64 m_lastResetMs = -ABR_RESET_RATE_LIMIT_MS;
 
     // Camera closed loop — stored for logging only (see handleCameraReportedBitrate).
     int m_lastAchievedKbps = 0;

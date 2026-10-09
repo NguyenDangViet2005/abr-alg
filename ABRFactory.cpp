@@ -77,6 +77,24 @@ void ABRFactory::startRouterAbr(const QStringList &ifaces, bool isC2Configured)
         // EVENT the moment it is learned rather than a tick later.
         connect(abr, &XBAdaptiveBitrateStreaming::ceilingChanged,
                 this, &ABRFactory::routerAbrCeiling);
+        // Phase 11: the >70% loss-ladder reset request. The instance emits it
+        // rate-limited; the factory relays it so the executor (XBQoSService) does
+        // not need a pointer to every instance.
+        //
+        // PRIMARY-GATED, like handleRouterAbrBitrate: the camera streams over the
+        // PRIMARY interface, so a SPARE interface collapsing >70% must NOT refresh
+        // the camera (that is a failover signal, not a camera action). The lambda
+        // filters by name (the instance owns exactly `name`), consistent with the
+        // "only the effective interface drives the camera" rule.
+        connect(abr, &XBAdaptiveBitrateStreaming::requestStreamReset,
+                this, [this](const QString &iface, const QString &reason) {
+                    if (iface == _primaryIface) {
+                        emit routerAbrResetRequested(iface, reason);
+                    } else {
+                        qInfo().nospace() << "[ABR][RESET] " << iface
+                                          << " (" << reason << ") — spare iface, not refreshing camera";
+                    }
+                });
     }
     qInfo().nospace() << "ABRFactory: router ABR started for " << _routerAbrs.size() << " ifaces";
 }

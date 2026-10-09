@@ -148,6 +148,23 @@ void XBQoSService::setupConnections()
         // the primary's number — a spare interface's proposal never lands here.
         connect(m_abrFactory, &ABRFactory::routerAbrEffectiveBitrate, this, handleBitrateChange);
 
+        // ── Router ABR stream-reset → camera refresh (Phase 11) ──────────
+        // The loss ladder's >70% band asks the camera to refresh the stream.
+        // The instance owns no socket, so the executor lives here — mirroring the
+        // SRT requestKeyframe → requestStreamRefresh connect above. Already
+        // rate-limited at the instance's emit site (ABR_RESET_RATE_LIMIT_MS), so
+        // this lambda stays dumb. Guarded on a live bitrate: no refresh while the
+        // camera is disabled (PAUSE).
+        connect(m_abrFactory, &ABRFactory::routerAbrResetRequested, this,
+                [this](const QString &iface, const QString &reason) {
+            if (m_cameraControl && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+                qWarning().noquote() << QString("[QoS Engine] ABR reset requested (iface=%1, %2) "
+                                                "— refreshing camera stream at %3 kbps")
+                                            .arg(iface).arg(reason).arg(m_currentBitrate);
+                m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
+            }
+        });
+
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
 

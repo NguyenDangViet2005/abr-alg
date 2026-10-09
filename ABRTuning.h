@@ -113,11 +113,35 @@
 // Ngưỡng loss VIDEO (%) để coi là "mất gói": vượt mức này → xét giảm.
 // [xbfirm] (xbfirm dùng 0.8).
 #define ABR_VIDEO_LOSS_TRIGGER_PCT             0.8
-// Loss telemetry (C2) (%) vượt mức này → coi LINK yếu (không phải overshoot).
-// [PORT DEVIATION] xbfirm 0.3 → 0.4: flow C2 của router nhiễu hơn probe xbfirm.
-#define ABR_TELEMETRY_LOSSY_THRESHOLD_PCT      0.4
 // Loss (%) coi là "sụp" nặng → đưa status về BUFFERING. [xbfirm]
 #define ABR_SEVERE_LOSS_PCT                    5.0
+
+// ── Phase 11: LOSS LADDER (PORT DEVIATION) ───────────────────────────────
+// Video loss% -> bước giảm (bảng dải; logic thuần ở ABRLossBand.h):
+//   <= 0.8      sạch (ABR_VIDEO_LOSS_TRIGGER_PCT; không đổi)
+//   0.8 .. 20   current - ABR_LOSS_MILD_STEP_KBPS (sàn MIN)
+//   20 .. 50    current * ABR_LOSS_HALVE_FACTOR   (sàn MIN)
+//   50 .. 70    MIN
+//   > 70        MIN + requestStreamReset (rate-limit ABR_RESET_RATE_LIMIT_MS)
+// Bước giảm "nhẹ" (kbps) cho dải 0.8..20%. Trừ THẲNG, không theo tỉ lệ — ở
+// bitrate thấp (<= 230) sẽ chạm sàn MIN; chấp nhận theo luật người dùng.
+#define ABR_LOSS_MILD_STEP_KBPS                200
+// Trần dải "nhẹ" (%). loss > mức này -> giảm 50%.
+#define ABR_LOSS_MILD_MAX_PCT                  20
+// Trần dải "giảm 50%" (%). loss > mức này -> về MIN.
+#define ABR_LOSS_HALVE_MAX_PCT                 50
+// Hệ số giảm dải giữa. 0.50 = giảm một nửa.
+#define ABR_LOSS_HALVE_FACTOR                  0.50
+// Ngưỡng reset video socket (%). loss > mức này -> MIN + requestStreamReset;
+// loss trong (HALVE_MAX, mức này] -> MIN (không reset). Đây là MỘT biên duy
+// nhất — helper (ABRLossBand.h) lẫn log ở caller đều dùng macro này, nên không
+// thể trôi nghĩa (không tách thành 2 knob cùng giá trị).
+#define ABR_LOSS_RESET_PCT                     70
+// Sau mỗi bước giảm của ladder, HOLD (ms) trước khi cho giảm tiếp (chờ link hồi).
+#define ABR_LOSS_DECREASE_SETTLE_MS            3000
+// Rate-limit (ms) giữa 2 lần emit requestStreamReset (chống loss dao động quanh
+// 70% spam refresh camera). Đặt ở site emit để tín hiệu tự nó đã bị chặn.
+#define ABR_RESET_RATE_LIMIT_MS                30000
 
 // ─────────────────────────────────────────────────────────────────────────
 // NHÓM 3 — OVERSHOOT + TRẦN (PORT DEVIATION: xbfirm không có trần)
@@ -152,9 +176,6 @@
 // chỉ ~70-80 seg/tick nên 1 gói mất đọc thành ~1.3% (>0.8% trigger) — sai. Với
 // 5×70=350 seg thì 1 gói = 0.29%. VIDEO only. [PORT DEVIATION]
 #define ABR_LOSS_WINDOW_TICKS                  5
-// Số tick LIÊN TIẾP telemetry-lossy mới coi LINK yếu (chống C2 spike 1 tick).
-// [PORT DEVIATION]
-#define ABR_TELEMETRY_LOSSY_CONFIRM_TICKS      2
 // Số tick LIÊN TIẾP throughput==0 mới coi là sụp thật. [PORT DEVIATION]
 #define ABR_ZERO_THROUGHPUT_CONFIRM_TICKS      2
 // Recovery-hold: khi đang KẸT ở MIN (current <= MIN), phải có bấy nhiêu tick

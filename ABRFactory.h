@@ -93,6 +93,12 @@ signals:
     // EVENT without waiting for the next per-tick decision.
     void routerAbrCeiling(const QString &iface, unsigned int kbps);
 
+    // Relay of a per-interface router-ABR stream-reset request (Phase 11; the
+    // >70% loss-ladder band). The instance owns no socket, so the executor lives
+    // in XBQoSService, which maps this to CameraControl::requestStreamRefresh.
+    // Already rate-limited at the instance's emit site.
+    void routerAbrResetRequested(const QString &iface, const QString &reason);
+
 private:
     static ABRFactory* _instance;
     SRTAdaptiveBitrateStreaming* _srtAdaptiveBitrateStreaming;
