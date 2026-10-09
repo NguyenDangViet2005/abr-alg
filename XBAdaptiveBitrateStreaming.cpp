@@ -73,6 +73,23 @@ void XBAdaptiveBitrateStreaming::setMaxAbrBitrate(unsigned int newMaxAbrBitrate)
     m_ceilingKbps = m_maxAbr;
 }
 
+void XBAdaptiveBitrateStreaming::setHeadroomFactor(double factor)
+{
+    // Phase 09 (headroom, PORT DEVIATION): clamp to [0.5, 1.0]. Below 0.5 the
+    // reservation wastes half the link; above 1.0 the cap would exceed the
+    // ceiling and defeat the ceiling itself. Clamp + log so a bad --abr-headroom
+    // (or a 0 from a non-numeric arg) is visible, not silent.
+    const double clamped = qBound(0.5, factor, 1.0);
+    if (clamped != factor) {
+        qWarning().nospace() << "[ABR][" << m_iface << "] headroom factor " << factor
+                             << " out of range — clamped to " << clamped;
+    }
+    m_headroomFactor = clamped;
+    qInfo().nospace() << "[ABR][" << m_iface << "] steady-state headroom factor = "
+                      << m_headroomFactor << " (ramp holds at "
+                      << static_cast<int>(m_headroomFactor * 100) << "% of the ceiling)";
+}
+
 void XBAdaptiveBitrateStreaming::start()
 {
     // xbfirm start(), verbatim. Resets to 1000 and starts the two 5s timers.
@@ -248,9 +265,13 @@ void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterfac
     // "found" ceiling — report 0 so the dashboard draws no line and the wire
     // says "not yet found" rather than a 2000kbps ceiling that means nothing.
     const int ceiling = (m_ceilingKbps < m_maxAbr) ? static_cast<int>(m_ceilingKbps) : 0;
+    // capKbps (Phase 09): the steady-state cap the ramp holds at. Always a real
+    // value (no 0 sentinel) — the dashboard draws a second reference line from
+    // it. Reported alongside the ceiling so the two lines share one tick.
+    const int cap = static_cast<int>(steadyCapKbps());
     emit decisionMade(m_iface, static_cast<int>(m_abrState.current_bitrate_kbps),
                       0, /*branch=HOLD*/ 0, /*reason=NONE*/ 0,
-                      static_cast<int>(m_maxAbr), ceiling);
+                      static_cast<int>(m_maxAbr), ceiling, cap);
 }
 
 void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
@@ -800,31 +821,34 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                                          << time_since_last_change << "ms since last change (need >= "
                                          << ABR_BITRATE_INCREASE_COOLDOWN_MS << "ms)";
                     if (time_since_last_change >= ABR_BITRATE_INCREASE_COOLDOWN_MS) {
-                        // Phase 01 (PORT DEVIATION): never ramp above the learned
-                        // ceiling. xbfirm had no ceiling, so this is what stops the
+                        // Phase 01 (PORT DEVIATION): never ramp above the ceiling.
+                        // xbfirm had no ceiling, so this is what stops the
                         // ramp-forever behaviour once an overshoot has set the
                         // limit. While holding, m_lastQualityChangeTime does not
                         // advance, so this warning repeats ~1 Hz — same cadence as
                         // the other qWarnings in this loop, accepted.
+                        //
+                        // Phase 09 (headroom): the ramp now holds at the HEADROOM
+                        // CAP, not the ceiling — steadyCapKbps() = factor × ceiling,
+                        // reserving the rest of the link for other tasks. The cap
+                        // applies even at m_maxAbr (no learned ceiling) so a healthy
+                        // link keeps its reservation too.
                         const unsigned int next_bitrate = m_abrState.current_bitrate_kbps
                                                         + static_cast<unsigned int>(m_gainUp * ABR_BITRATE_STEP_KBPS);
-                        // Phase 08 (C): the "blocked at a LEARNED ceiling" state is
-                        // `m_ceilingKbps < m_maxAbr`. At m_maxAbr there is nothing
-                        // learned to hold or lift (handleRouterTick reports 0 too),
-                        // so the escape clock must NOT arm there — else every
-                        // healthy link at MAX would spuriously arm it and latch
-                        // m_reprobeInFlight, doubling the backoff on the first real
-                        // ceiling (H2).
-                        if (next_bitrate > m_ceilingKbps
-                            && m_ceilingKbps < m_maxAbr
-                            && !allowExceedCeiling()) {
-                            // Phase 08 (C): remember when the hold began, for the
-                            // no-strength-source re-probe backoff. Lazy (set only if
-                            // not already holding) so it measures the hold, not the
-                            // last ramp tick.
-                            if (m_ceilingHoldSince == 0) m_ceilingHoldSince = m_clock.elapsed();
-                            qWarning().nospace() << "[ABR][" << m_iface << "] At ceiling "
-                                                 << m_ceilingKbps << "kbps — holding (no ramp)";
+                        const unsigned int cap = steadyCapKbps();
+                        // Phase 08 (C) / H2: the "blocked at a LEARNED ceiling" state
+                        // is `m_ceilingKbps < m_maxAbr`. At m_maxAbr there is nothing
+                        // learned to hold or lift, so the escape clock must NOT arm
+                        // there — else every healthy link at MAX would spuriously arm
+                        // it and latch m_reprobeInFlight, doubling the backoff on the
+                        // first real ceiling. The CAP still blocks at MAX (that is the
+                        // headroom reservation); only the escape clock is gated.
+                        if (next_bitrate > cap && !allowExceedCeiling()) {
+                            if (m_ceilingKbps < m_maxAbr && m_ceilingHoldSince == 0)
+                                m_ceilingHoldSince = m_clock.elapsed();
+                            qWarning().nospace() << "[ABR][" << m_iface << "] At headroom cap "
+                                                 << cap << "kbps (ceiling " << m_ceilingKbps
+                                                 << "kbps) — holding (no ramp)";
                         } else {
                             // Phase 07: allowExceedCeiling() true (Phase 03) means the
                             // environment changed — LIFT the ceiling (re-probe). Cleared
@@ -895,6 +919,23 @@ unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
     m_pendingCeiling = 0;
     m_overshootConfirmTicks = 0;
     return target;
+}
+
+unsigned int XBAdaptiveBitrateStreaming::steadyCapKbps() const
+{
+    // Phase 09 (headroom, PORT DEVIATION): the value the steady-state ramp holds
+    // at. factor × min(ceiling, maxAbr). The min() matters at MAX: with no
+    // learned ceiling m_ceilingKbps == m_maxAbr, so the cap is factor×maxAbr
+    // (e.g. 1600 at 2000) — the reservation applies on a healthy link too, which
+    // is the whole point of the request. Always a real number (no 0 sentinel):
+    // the wire reports it unconditionally.
+    //
+    // qMin over the two limits, NOT m_ceilingKbps alone: a learned ceiling can
+    // only be <= m_maxAbr, so this is belt-and-braces against a stale ceiling
+    // left above a lowered max. cast after the multiply so the product is
+    // computed in double, then floored — never rounds UP past the cap.
+    const double cap = m_headroomFactor * static_cast<double>(qMin(m_ceilingKbps, m_maxAbr));
+    return static_cast<unsigned int>(cap);
 }
 
 bool XBAdaptiveBitrateStreaming::allowExceedCeiling() const

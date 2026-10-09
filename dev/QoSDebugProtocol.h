@@ -42,7 +42,10 @@ constexpr char QS_MAGIC_BYTES[2] = { 'Q', 'S' };
 // decode LOUDLY rather than misread — that is the point of the byte. Producer
 // and consumers move in lockstep: this file, QoSDebugProtocol.cpp, parser.js,
 // tst_qs_encoder.cpp, qs-parser.test.js.
-constexpr quint8  QS_VERSION = 2;
+// 3 (2026-10-09): QsSample gained `capKbps` (Phase 09 headroom) — the
+// steady-state ramp cap (factor × ceiling), drawn as a SECOND reference line.
+// Same lockstep + strict-length rule; a v2 consumer rejects v3 by version.
+constexpr quint8  QS_VERSION = 3;
 
 // Datagram header size: magic(2) + version(1) + type(1) + payloadLen(2).
 constexpr int QS_HEADER_SIZE = 6;
@@ -168,6 +171,13 @@ struct QsSample {
     // as a literal 0 kbps ceiling. Placed AFTER maxAbrKbps so the dashboard's
     // positional reader takes it in the same order this encoder writes it.
     qint32 ceilingKbps       = 0;
+    // Phase 09 (headroom): the steady-state ramp CAP = factor × min(ceiling,
+    // maxAbr). The ramp holds here, below the ceiling, reserving the remainder
+    // for other tasks. UNLIKE ceilingKbps there is NO 0 sentinel: the cap is
+    // always a real value (factor × maxAbr even before a ceiling is learned), so
+    // a consumer always draws the line. Placed AFTER ceilingKbps to keep the
+    // positional layout in encode order.
+    qint32 capKbps           = 0;
     qint32 sinceLastChangeMs = 0;
 
     QsFlow video;

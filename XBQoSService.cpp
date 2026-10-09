@@ -45,6 +45,11 @@ void XBQoSService::setQosDebug(bool enabled, const QString &host, quint16 port,
     m_qosDebugLogDir = logDir;
 }
 
+void XBQoSService::setAbrHeadroomPct(int pct)
+{
+    m_abrHeadroomPct = pct;
+}
+
 void XBQoSService::printStartupBanner()
 {
     qInfo() << "============================================================";
@@ -224,6 +229,10 @@ void XBQoSService::start()
 
     m_abrFactory = ABRFactory::instance();
     m_abrFactory->init();
+    // Phase 09 (headroom): hand the configured percent to the factory BEFORE the
+    // router ABR instances are created (startRouterAbr), so each is built with
+    // the right cap. Router ABR only; the SRT engine is untouched.
+    m_abrFactory->setHeadroomPct(m_abrHeadroomPct);
     m_abrFactory->startCameraSocketAbr();
 
     // Per-interface router ABR. Declared list comes from main.cpp (see

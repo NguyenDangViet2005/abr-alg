@@ -63,6 +63,7 @@ static QsSample makeSample()
     s.bitrateKbps = 1000;
     s.maxAbrKbps = 6000;
     s.ceilingKbps = 4800;         // v2: learned ceiling (0 would mean "not found")
+    s.capKbps = 3840;             // v3: headroom cap = 0.8 × ceiling (always real)
     s.sinceLastChangeMs = 2000;
     s.video = QsFlow{ 90.0, 3000.0, 1.5, 30.0, 20.0, 10.0, 3.0 };
     s.c2    = QsFlow{ 88.0, 2500.0, 0.1, 40.0, 25.0, 5.0, 2.0 };
@@ -93,7 +94,7 @@ int main()
     {
         const QsSample in = makeSample();
         const QByteArray payload = encodeQsSample(in);
-        expectEq(payload.size(), 102, "SAMPLE payload = 102 bytes (v2: +ceilingKbps)");
+        expectEq(payload.size(), 106, "SAMPLE payload = 106 bytes (v3: +capKbps)");
 
         QsSample out;
         expectTrue(decodeQsSample(payload, out), "decodeQsSample ok");
@@ -108,6 +109,7 @@ int main()
         expectTrue(out.abrReason == in.abrReason, "abrReason round-trips");
         expectTrue(out.bitrateKbps == in.bitrateKbps, "bitrate round-trips");
         expectTrue(out.ceilingKbps == in.ceilingKbps, "ceilingKbps round-trips");
+        expectTrue(out.capKbps == in.capKbps, "capKbps round-trips");
         expectTrue(out.video.score == in.video.score, "video.score round-trips");
         expectTrue(out.video.qdelay == in.video.qdelay, "video.qdelay round-trips");
         expectTrue(out.c2.jitter == in.c2.jitter, "c2.jitter round-trips");

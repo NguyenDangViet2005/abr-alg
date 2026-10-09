@@ -33,6 +33,12 @@ public slots:
     void startRouterAbr(const QStringList &ifaces, bool isC2Configured);
     void stopRouterAbr();
 
+    // Phase 09 (headroom): the steady-state cap percent, applied to every router
+    // ABR instance at creation (startRouterAbr). Set from main.cpp's
+    // --abr-headroom before start(); defaults to ABR_HEADROOM_FACTOR_PCT. Router
+    // ABR only — the SRT/camera engine keeps its own 0.85 headroom.
+    void setHeadroomPct(int pct);
+
     // The router's own per-interface view, from RouterNetworkHandler (UDP
     // 12346, id-60 rows). Distinct from handleC2Data above, which carries
     // XBSRTFactory's QoS measurements of the SRT stream on port 12345 — the
@@ -80,7 +86,7 @@ signals:
     // decisionMade), so a consumer can tap the decision without holding a
     // pointer to every instance. The QS debug channel connects here.
     void routerAbrDecision(const QString &iface, int kbps, int c2Mode,
-                           int branch, int reason, int maxAbr, int ceiling);
+                           int branch, int reason, int maxAbr, int ceiling, int cap);
 
     // Relay of the instant a ceiling is learned (XBAdaptiveBitrateStreaming::
     // ceilingChanged). Edge-triggered, so the QS channel can fire the ceiling
@@ -93,6 +99,9 @@ private:
 
     QHash<QString, XBAdaptiveBitrateStreaming*> _routerAbrs;
     QString _primaryIface;
+    // Phase 09 (headroom): steady-state cap percent, applied per instance at
+    // creation. Default matches the compile-time #define.
+    int _headroomPct = ABR_HEADROOM_FACTOR_PCT;
 };
 
 #endif // ABRFACTORY_H

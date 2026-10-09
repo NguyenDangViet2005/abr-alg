@@ -53,6 +53,14 @@ public:
     ~XBAdaptiveBitrateStreaming() override;
 
     void setMaxAbrBitrate(unsigned int newMaxAbrBitrate) override;
+
+    // Phase 09 (headroom): set the steady-state cap fraction (0.5..1.0). Called
+    // once at creation from ABRFactory (from --abr-headroom / the #define). Not
+    // live-tunable: maxAbr is also create-time, and a mid-session change would
+    // move the cap under a ramp already parked. Out-of-range is clamped + logged
+    // so a CLI typo is visible rather than silently snapping to the floor.
+    void setHeadroomFactor(double factor);
+
     void start() override;
     void stop()  override;
     void reset(int bitrateKbps) override;
@@ -104,8 +112,10 @@ signals:
     // 0 while none has been found (the ramp is still free to m_maxAbr), else the
     // value the ramp is held to. 0 is the wire's "not yet found" sentinel — it
     // is never a literal 0 kbps ceiling (a real ceiling is always >= MIN+STEP).
+    // `cap` (Phase 09) is the steady-state ramp cap = factor × min(ceiling,
+    // maxAbr); always a real value (no sentinel).
     void decisionMade(const QString &iface, int kbps, int c2Mode,
-                      int branch, int reason, int maxAbr, int ceiling);
+                      int branch, int reason, int maxAbr, int ceiling, int cap);
 
     // The instant a new ceiling is learned (Phase 01 overshoot). Distinct from
     // decisionMade, which is per-tick: this is edge-triggered at the moment
@@ -201,6 +211,16 @@ private:
     // allowExceedCeiling().
     bool ceilingReprobeDue() const;
 
+    // Phase 09 (headroom, PORT DEVIATION): the STEADY-STATE ramp cap. The video
+    // ramp holds at `m_headroomFactor × min(ceiling, maxAbr)` instead of at the
+    // ceiling itself, reserving the remainder of the link for other tasks
+    // (C2/SRT, control traffic, bursts). Derived, NOT stored: m_ceilingKbps stays
+    // the TRUE ceiling (the wire/dashboard report it unchanged), so headroom is a
+    // separate policy layered on top. Consumed by the ramp gate AND the decision
+    // report. Applies even at m_maxAbr (no learned ceiling) — the user wants the
+    // reservation on a healthy link too.
+    unsigned int steadyCapKbps() const;
+
     // Phase 01 (PORT DEVIATION, not xbfirm): true when the current video-loss
     // break started right after OUR own step-up, i.e. the loss is our
     // overshoot rather than a weak link. Causal/timing test, never an absolute
@@ -285,14 +305,25 @@ private:
     unsigned int m_maxAbr;
 
     // ── Phase 01: ceiling + causal overshoot state (PORT DEVIATION) ───────
-    // m_ceilingKbps: the STEADY-STATE ramp never exceeds this. Found once on
-    // overshoot, then respected (Phase 03's NetworkReference is the only thing
-    // that lifts it). One documented exception: the telemetry ABR kick in
+    // m_ceilingKbps: the TRUE learned link ceiling. Found once on overshoot,
+    // then respected (Phase 03's NetworkReference is the only thing that lifts
+    // it). The STEADY-STATE ramp is NOT held here directly any more — Phase 09
+    // holds it at steadyCapKbps() = m_headroomFactor × min(this, m_maxAbr), a
+    // headroom-reserving cap BELOW this. The wire/dashboard still report THIS
+    // (the real ceiling). One documented exception: the telemetry ABR kick in
     // processTelemetryTCPInfo may exceed it (a post-outage probe, see there).
     // m_lastGoodKbps: the bitrate immediately BEFORE the break-causing step-up
     // — the value we fall back to. m_scoreAtStepUp / m_trendAtStepUp are the
     // causal pair isOvershoot() reads.
     unsigned int m_ceilingKbps = ABR_MAX_BITRATE_KBPS;
+
+    // Phase 09 (headroom, PORT DEVIATION): the fraction of the ceiling the
+    // steady-state ramp is allowed to reach. 0.80 = reserve 20% of the link for
+    // other tasks. SEPARATE from ABR_DECREASE_FACTOR (also 0.80 today) — that is
+    // the break step-DOWN multiplier; this is the steady-state UP cap. Same
+    // value, different meaning: never alias them. Configurable at runtime via
+    // setHeadroomFactor() (--abr-headroom). Clamped to [0.5, 1.0].
+    double m_headroomFactor = 0.80;
     unsigned int m_lastGoodKbps = 0;
     double m_scoreAtStepUp = 0.0;
     int m_trendAtStepUp = 0;

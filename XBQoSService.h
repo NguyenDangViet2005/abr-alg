@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QStringList>
 #include "VideoResolutionAdapter.h"
+#include "ABRConfigs.h"   // → ABRTuning.h (ABR_HEADROOM_FACTOR_PCT headroom default)
 
 class ABRFactory;
 class NetworkHandler;
@@ -24,6 +25,11 @@ public:
     // flag every instance needs (report §6b). Adding/removing an interface is
     // one line here — see main.cpp.
     void setRouterAbrInterfaces(const QStringList &ifaces, bool isC2Configured);
+
+    // Phase 09 (headroom): the steady-state cap percent for the router ABR
+    // (--abr-headroom). Declared before start(); forwarded to ABRFactory, which
+    // applies it per instance at creation. Router ABR only.
+    void setAbrHeadroomPct(int pct);
 
     // QoS debug channel. Default OFF. When on, taps the SAME router rows the
     // ABR reads and publishes them (QS format) to qos-dashboard. Never feeds
@@ -54,6 +60,8 @@ private:
 
     QStringList m_routerAbrIfaces;
     bool m_isC2Configured = false;
+    // Phase 09 (headroom): steady-state cap percent, from --abr-headroom.
+    int m_abrHeadroomPct = ABR_HEADROOM_FACTOR_PCT;
 
     unsigned int m_currentBitrate;
     bool m_cameraNeedsSync;

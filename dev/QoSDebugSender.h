@@ -70,7 +70,7 @@ public slots:
     // beside the inputs. Until the first decision arrives, samples say
     // NOT_AVAILABLE and carry ceiling 0.
     void handleAbrDecision(const QString &iface, int kbps, int c2Mode,
-                           int branch, int reason, int maxAbr, int ceiling);
+                           int branch, int reason, int maxAbr, int ceiling, int cap);
 
     // The instant the ABR learns a new ceiling (connected to ABRFactory::
     // routerAbrCeiling). Stores it AND emits a QS_EVT_ABR_CEILING immediately,
@@ -95,6 +95,9 @@ private:
         // Learned ceiling; 0 = not yet found (the wire's sentinel — never a
         // literal 0 kbps ceiling). Updated by handleAbrDecision each tick.
         int ceilingKbps = 0;
+        // Phase 09 (headroom): the steady-state ramp cap (factor × ceiling).
+        // Always a real value (no sentinel). Updated by handleAbrDecision.
+        int capKbps = 0;
         bool present = false;
     };
 

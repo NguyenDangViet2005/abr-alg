@@ -45,15 +45,27 @@ void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
     emit onC2TelemetryData(peers);
 }
 
+void ABRFactory::setHeadroomPct(int pct)
+{
+    // Phase 09 (headroom): store for the next startRouterAbr. No validation here
+    // — the ABR instance clamps to [0.5, 1.0] and logs, so the single source of
+    // truth for the valid range lives with the consumer.
+    _headroomPct = pct;
+}
+
 void ABRFactory::startRouterAbr(const QStringList &ifaces, bool isC2Configured)
 {
     qInfo().nospace() << "ABRFactory: start router ABR for " << ifaces.size()
-                      << " interface(s), isC2Configured=" << isC2Configured;
+                      << " interface(s), isC2Configured=" << isC2Configured
+                      << ", headroom=" << _headroomPct << "%";
 
     for (const QString &name : ifaces) {
         if (_routerAbrs.contains(name)) continue;
         auto *abr = new XBAdaptiveBitrateStreaming(name, isC2Configured, this);
         abr->setMaxAbrBitrate(ABR_DEFAULT_MAX_ABR_BITRATE);
+        // Phase 09 (headroom): percent -> factor, applied before start() so the
+        // first ramp tick already respects the cap.
+        abr->setHeadroomFactor(_headroomPct / 100.0);
         _routerAbrs.insert(name, abr);
         connect(abr, &XBAdaptiveBitrateStreaming::bitrateProposed,
                 this, &ABRFactory::handleRouterAbrBitrate);

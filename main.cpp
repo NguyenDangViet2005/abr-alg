@@ -32,6 +32,14 @@ int main(int argc, char *argv[])
     cli.addOption(optHost);
     cli.addOption(optPort);
     cli.addOption(optDir);
+
+    // Phase 09 (headroom): the router ABR's steady-state cap, as a PERCENT of the
+    // learned ceiling (or of maxAbr when none is learned). Default 80 = reserve
+    // 20% of the link for other tasks. Clamped to [50,100] by the ABR instance.
+    const QCommandLineOption optHeadroom(
+        "abr-headroom", "Router-ABR steady-state cap as a percent of the ceiling (50-100).",
+        "pct", QString::number(ABR_HEADROOM_FACTOR_PCT));
+    cli.addOption(optHeadroom);
     cli.process(a);
 
     qRegisterMetaType<SRTPeerStat>("SRTPeerStat");
@@ -66,6 +74,9 @@ int main(int argc, char *argv[])
     // so the topology fact reaches the instance; there is no switch to flip yet.
     constexpr bool C2_DEPLOYED = false;
     qosService.setRouterAbrInterfaces({"eth1"}, C2_DEPLOYED);
+
+    // Phase 09 (headroom): apply the CLI override (or the #define default).
+    qosService.setAbrHeadroomPct(cli.value(optHeadroom).toInt());
 
     qosService.setQosDebug(cli.isSet(optQosDebug),
                            cli.value(optHost),

@@ -209,6 +209,7 @@ void QoSDebugSender::logSample(const QsSample &s) const
         << " br=" << s.bitrateKbps << "kbps"
         << " max=" << s.maxAbrKbps
         << " ceil=" << s.ceilingKbps
+        << " cap=" << s.capKbps
         << " V[score=" << fx(s.video.score, 1) << " thr=" << fx(s.video.thr, 0)
         << " loss=" << fx(s.video.loss, 3) << " rtt=" << fx(s.video.rtt, 1)
         << " qdelay=" << fx(s.video.qdelay, 1) << " jit=" << fx(s.video.jitter, 1) << "]"
@@ -291,6 +292,7 @@ QsSample QoSDebugSender::buildSample(const QString &iface) const
     s.bitrateKbps       = abr.bitrateKbps;
     s.maxAbrKbps        = abr.maxAbrKbps;
     s.ceilingKbps       = abr.ceilingKbps;   // 0 = not yet found (wire sentinel)
+    s.capKbps           = abr.capKbps;       // Phase 09: always a real value
     s.sinceLastChangeMs = 0;
 
     // thr/rtt/minRtt are METHODS on RouterInterfaceStat: the wire carries only
@@ -328,7 +330,7 @@ void QoSDebugSender::emitSample(const QString &iface, const QString &primaryIfac
 // ── ABR decision hook ───────────────────────────────────────────────────────
 
 void QoSDebugSender::handleAbrDecision(const QString &iface, int kbps, int c2Mode,
-                                       int branch, int reason, int maxAbr, int ceiling)
+                                       int branch, int reason, int maxAbr, int ceiling, int cap)
 {
     AbrState &st = m_decision[iface];
     st.present = true;
@@ -338,6 +340,7 @@ void QoSDebugSender::handleAbrDecision(const QString &iface, int kbps, int c2Mod
     st.reason = reason;
     st.maxAbrKbps = maxAbr;
     st.ceilingKbps = ceiling;
+    st.capKbps = cap;
 }
 
 void QoSDebugSender::handleAbrCeiling(const QString &iface, unsigned int kbps)
