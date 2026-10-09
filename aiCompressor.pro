@@ -8,6 +8,7 @@ TARGET = aiCompressor
 
 HEADERS += \
     ABRConfigs.h \
+    ABRTuning.h \
     ABRFactory.h \
     IAdaptiveBitrateStreaming.h \
     NetworkReference.h \

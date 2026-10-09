@@ -9,6 +9,7 @@
 #include "IAdaptiveBitrateStreaming.h"
 #include "RouterInterfaceStat.h"
 #include "ABRConfigs.h"
+#include "ABRTuning.h"       // mọi tham số ABR (ABR_*) — xem ABRTuning.h
 #include "NetworkReference.h"
 
 // One ABR instance per interface, fed by the router's per-interface rows
@@ -209,36 +210,26 @@ private:
     void onNetworkDataTimeout();
     void onStatusBroadcastTimeout();
 
-    // ── Bitrate constraints (xbfirm) ─────────────────────────────────────
-    static constexpr unsigned int MIN_BITRATE_KBPS  = 30;
-    static constexpr unsigned int MAX_BITRATE_KBPS  = 2000;
-    static constexpr unsigned int BITRATE_STEP_KBPS = 100;
-    static constexpr unsigned int MIN_BITRATE_CHANGE_THRESHOLD = 30;
-
-    // ── Algorithm parameters (xbfirm; *AFTER_DECREASE = Settings defaults) ──
-    static constexpr int     RTT_HISTORY_SIZE = 10;
-    // xbfirm's own 500. rttHigh reads the VIDEO rtt-min_rtt delta (a
-    // region-independent bufferbloat gauge): 500ms of STANDING queue already
-    // means heavy lag, and the delta already discounts the baseline latency, so
-    // there is nothing to "tolerate" by raising it. Phase 06 briefly raised this
-    // to 700; reverted — it let the video lag almost a second before braking, and
-    // it sat out of tune with the sibling 400ms drain-time gate in checkSenderQueue.
-    // A false decrease is cheap (×0.80 + settle); a miss is dear.
-    static constexpr quint32 RTT_HIGH_THRESHOLD_MS = 500;
-    // Phase 06: the ONE gentle-decrease factor, shared by the three decrease
-    // paths (weak loss, rttHigh bufferbloat, qdelay congestion) so they cannot
-    // drift. 0.80 is xbfirm's own rttHigh factor, not an invention.
-    static constexpr double  ABR_DECREASE_FACTOR = 0.80;
-    static constexpr double  QUEUE_DELAY_HIGH_THRESHOLD_MS = 400.0;
-    static constexpr double  QUEUE_DELAY_LOW_THRESHOLD_MS  = 100.0;
-    static constexpr double  QUEUE_DELAY_LOW_AFTER_DECREASE_MS = 20.0;
-    static constexpr double  RTT_STABLE_THRESHOLD_MS = 50.0;
-    static constexpr double  RTT_STABLE_AFTER_DECREASE_MS = 20.0;
-    static constexpr double  JITTER_STABLE_THRESHOLD_MS = 15.0;
-    static constexpr double  TELEMETRY_STABLE_TIMEOUT_MS = 3000.0;
-    static constexpr unsigned int TELEMETRY_KICK_BITRATE_KBPS = 500;
-    static constexpr qint64  BITRATE_INCREASE_COOLDOWN_MS = 2000;
-
+    // ── Tuning constants: see ABRTuning.h ────────────────────────────────
+    // Every numeric tunable (bitrate limits, thresholds, factors, tick counts)
+    // now lives in ABRTuning.h as an ABR_-prefixed #define — one place to edit,
+    // grouped most-edited-first, with Vietnamese comments. The class no longer
+    // declares them as members: a #define of the same name would rewrite the
+    // declaration itself. The prose below keeps the REASONING (why each value
+    // is what it is); the value itself is in ABRTuning.h.
+    //
+    // ABR_RTT_HIGH_THRESHOLD_MS (500, xbfirm): rttHigh reads the VIDEO rtt−min_rtt
+    // delta (a region-independent bufferbloat gauge) — 500ms of STANDING queue is
+    // heavy lag, and the delta already discounts baseline latency, so there is
+    // nothing to "tolerate" by raising it. Phase 06 briefly raised it to 700;
+    // reverted (let video lag ~1s before braking, out of tune with the 400ms
+    // drain-time gate in checkSenderQueue). A false decrease is cheap (×0.80 +
+    // settle); a miss is dear.
+    //
+    // ABR_DECREASE_FACTOR (0.80, xbfirm): the ONE gentle-decrease factor, shared
+    // by the three decrease paths (weak loss, rttHigh bufferbloat, qdelay
+    // congestion) so they cannot drift.
+    //
     // ── Phase 01: overshoot classifier + ceiling (PORT DEVIATION) ─────────
     // The classifier is EVENT-causal, NOT time-windowed: a break counts as
     // "our overshoot" when the most recent bitrate action was an INCREASE (we
@@ -247,62 +238,48 @@ private:
     // proved the break can land ~26 s after the step-up, which no short window
     // covers, and a wide one would call every break an overshoot.
     //
-    // The score at step-up must have been at least this good: a margin, not an
-    // absolute grade — it separates "we pushed from a healthy link" from "we
-    // pushed from an already-poor one".
-    static constexpr double OVERSHOOT_MIN_SCORE_AT_STEPUP = 70.0;
-    // The wire trend at step-up must NOT already be falling, or the link was
-    // degrading BEFORE we pushed — that is a weak link, not our overshoot. Trend
-    // ordinals match ScoringModule: 0=RAPID_INCREASE..2=STABLE, 3=DECREASE,
-    // 4=RAPID_DECREASE.
-    static constexpr int OVERSHOOT_MAX_TREND_AT_STEPUP = 2;   // <= STABLE
-
-    // Phase 08 (B): a break must repeat this many CONSECUTIVE ticks before the
-    // CEILING latches. The decrease is immediate and recoverable; the ceiling is
-    // permanent (it holds the ramp for the session), so it waits for confirmation.
-    // The field log's 5% spike was a one-tick artifact that pinned the ramp at
-    // 431 kbps forever. A clean tick in between discards the candidate.
-    static constexpr int OVERSHOOT_CONFIRM_TICKS = 2;
-
-    // Phase 08 (C): with NO strength source, environmentChanged() is permanently
-    // false, so a learned ceiling would never lift (permanent underuse — worse
-    // than an occasional re-probe dip). After this long holding at the ceiling
-    // the ABR takes one probing step; if that re-overshoots, the ceiling re-latches
-    // and the wait DOUBLES (backoff), thinning the sawtooth. The wait is capped
-    // at CEILING_REPROBE_MAX_MS. The fallback is disabled once any 603 arrives —
-    // the primary environmentChanged() path owns the escape then.
-    static constexpr qint64  CEILING_REPROBE_BASE_MS = 30000;
-    static constexpr qint64  CEILING_REPROBE_MAX_MS  = 120000;
-
+    // ABR_OVERSHOOT_MIN_SCORE_AT_STEPUP (70): the score at step-up must have been
+    // at least this good — a margin, not an absolute grade; it separates "we
+    // pushed from a healthy link" from "we pushed from an already-poor one".
+    // ABR_OVERSHOOT_MAX_TREND_AT_STEPUP (2 = STABLE): the wire trend at step-up
+    // must NOT already be falling, or the link was degrading BEFORE we pushed —
+    // that is a weak link, not our overshoot. Ordinals match ScoringModule:
+    // 0=RAPID_INCREASE..2=STABLE, 3=DECREASE, 4=RAPID_DECREASE.
+    //
+    // Phase 08 (B): ABR_OVERSHOOT_CONFIRM_TICKS (2) — a break must repeat this
+    // many CONSECUTIVE ticks before the CEILING latches. The decrease is
+    // immediate and recoverable; the ceiling is permanent (it holds the ramp for
+    // the session), so it waits for confirmation. The field log's 5% spike was a
+    // one-tick artifact that pinned the ramp at 431 kbps forever; a clean tick in
+    // between discards the candidate.
+    //
+    // Phase 08 (C): ABR_CEILING_REPROBE_BASE_MS (30000) / _MAX_MS (120000) — with
+    // NO strength source, environmentChanged() is permanently false, so a learned
+    // ceiling would never lift (permanent underuse). After BASE_MS holding at the
+    // ceiling the ABR takes one probing step; if that re-overshoots, the ceiling
+    // re-latches and the wait DOUBLES, capped at MAX_MS. The fallback is disabled
+    // once any 603 arrives — the primary environmentChanged() path owns the escape.
+    //
     // ── Phase 07: behavior hardening (PORT DEVIATION) ─────────────────────
-    // After an overshoot, HOLD for this long and ACCEPT the loss: the loss that
-    // trails a step-up is the queue draining, not a new break. Without it the
-    // next tick re-decreases and the ceiling ends up one step short of capacity.
-    static constexpr qint64  OVERSHOOT_SETTLE_MS = 3000;
-    // Telemetry (C2) loss percent above which the LINK itself is called weak
-    // (xbfirm 0.3 -> 0.4: the router's C2 flow is noisier than xbfirm's probe).
-    static constexpr double  TELEMETRY_LOSSY_THRESHOLD_PCT = 0.4;
-    // A telemetry-lossy tick only means the link is weak after this many
-    // CONSECUTIVE lossy C2 samples — a 1-tick C2 spike must not drop the video
-    // straight to MIN (G3). Mirrors ZERO_THROUGHPUT_CONFIRM_TICKS.
-    static constexpr int     TELEMETRY_LOSSY_CONFIRM_TICKS = 2;
-    // throughput==0 is a real collapse only after this many CONSECUTIVE zero
-    // ticks — a 1-tick spike must not drop straight to MIN.
-    static constexpr int     ZERO_THROUGHPUT_CONFIRM_TICKS = 2;
-    // Phase 08 (A): the VIDEO loss percent is a Σlost/ΣsegsOut over this many
-    // ticks, not one. The video flow sends only ~70-80 segments per tick, so a
-    // single lost packet reads as ~1.3% — over the 0.8% trigger — and every
-    // retransmit was a false "high loss". At 5x70=350 segments one packet is
-    // 0.29%. A real collapse (>50%) still trips on the first tick; only
-    // near-threshold loss is slowed, which is the correct thing to slow. VIDEO
-    // only — the C2 slot's ~550 segs/tick denominator is already adequate.
-    static constexpr int     LOSS_WINDOW_TICKS = 5;
+    // ABR_OVERSHOOT_SETTLE_MS (3000): after an overshoot, HOLD and ACCEPT the
+    // loss — the loss trailing a step-up is the queue draining, not a new break.
+    // Without it the next tick re-decreases and the ceiling ends up one step short.
+    // ABR_TELEMETRY_LOSSY_THRESHOLD_PCT (0.4; xbfirm 0.3): telemetry (C2) loss
+    // above which the LINK itself is called weak — the router's C2 flow is noisier.
+    // ABR_TELEMETRY_LOSSY_CONFIRM_TICKS (2) / ABR_ZERO_THROUGHPUT_CONFIRM_TICKS
+    // (2): a 1-tick C2 spike or a 1-tick zero-throughput must not drop the video
+    // straight to MIN — each needs this many CONSECUTIVE ticks.
+    // ABR_LOSS_WINDOW_TICKS (5, Phase 08 A): the VIDEO loss percent is a
+    // Σlost/ΣsegsOut over this many ticks. The video flow sends only ~70-80 segs
+    // per tick, so a single lost packet reads as ~1.3% — over the 0.8% trigger.
+    // At 5×70=350 segments one packet is 0.29%. VIDEO only — the C2 slot's ~550
+    // segs/tick denominator is already adequate.
 
     // ── Core state (xbfirm) ──────────────────────────────────────────────
     AbrState m_abrState;
     QVector<quint32> m_rttHistory;
     LastAction m_lastAbrAction = ABR_NONE;
-    unsigned int m_problematicBitrateThreshold = MAX_BITRATE_KBPS;
+    unsigned int m_problematicBitrateThreshold = ABR_MAX_BITRATE_KBPS;
     qint64 m_lastQualityChangeTime = 0;
     double m_avgSiocoutq = 0.0;
     unsigned int m_maxAbr;
@@ -315,7 +292,7 @@ private:
     // m_lastGoodKbps: the bitrate immediately BEFORE the break-causing step-up
     // — the value we fall back to. m_scoreAtStepUp / m_trendAtStepUp are the
     // causal pair isOvershoot() reads.
-    unsigned int m_ceilingKbps = MAX_BITRATE_KBPS;
+    unsigned int m_ceilingKbps = ABR_MAX_BITRATE_KBPS;
     unsigned int m_lastGoodKbps = 0;
     double m_scoreAtStepUp = 0.0;
     int m_trendAtStepUp = 0;
@@ -344,22 +321,22 @@ private:
     // m_ceilingReprobeBackoffMs: the current wait (base 30s, doubles on re-latch).
     // m_reprobeInFlight: a FALLBACK lift happened; a later latch doubles the wait.
     qint64 m_ceilingHoldSince = 0;
-    qint64 m_ceilingReprobeBackoffMs = CEILING_REPROBE_BASE_MS;
+    qint64 m_ceilingReprobeBackoffMs = ABR_CEILING_REPROBE_BASE_MS;
     bool   m_reprobeInFlight = false;
 
     // ── Phase 07: settle window + zero-throughput debounce (PORT DEVIATION) ─
     // m_settleUntil: monotonic ms until which the algorithm HOLDs and accepts
     // loss after an overshoot (0 = inactive). m_zeroThroughputTicks: consecutive
-    // throughput==0 ticks (must reach ZERO_THROUGHPUT_CONFIRM_TICKS to act).
+    // throughput==0 ticks (must reach ABR_ZERO_THROUGHPUT_CONFIRM_TICKS to act).
     // m_telemetryLossyTicks: consecutive telemetry-lossy ticks (must reach
-    // TELEMETRY_LOSSY_CONFIRM_TICKS before the weak-link→MIN branch acts).
+    // ABR_TELEMETRY_LOSSY_CONFIRM_TICKS before the weak-link→MIN branch acts).
     qint64 m_settleUntil = 0;
     int    m_zeroThroughputTicks = 0;
     int    m_telemetryLossyTicks = 0;
 
     // Advisor coefficients. xbfirm's CellularPredictive drove these; with no
     // predictor they stay at xbfirm's ctor defaults (1.0). gainUp=1.0 gives the
-    // plain +BITRATE_STEP_KBPS step. m_gainDown is now UNUSED by the qdelay path
+    // plain +ABR_BITRATE_STEP_KBPS step. m_gainDown is now UNUSED by the qdelay path
     // (Phase 06 replaced it with ABR_DECREASE_FACTOR, which is always applied);
     // kept as a member for parity so an advisor can be re-wired later.
     double m_alpha = 1.0;
@@ -379,13 +356,13 @@ private:
     int _lastTelemetrySegsout = 0;
 
     // Phase 08 (A): the VIDEO loss-percent sliding window — parallel vectors of
-    // the last LOSS_WINDOW_TICKS ticks' (lost, deltaSegsOut). Rebuilt from the
+    // the last ABR_LOSS_WINDOW_TICKS ticks' (lost, deltaSegsOut). Rebuilt from the
     // router's raw counters (lost is a per-tick count, deltaSegsOut the delta of
     // the cumulative segsOut), so the percent is the TRUE windowed loss rate.
     QVector<int> m_lossWindowLost;
     QVector<int> m_lossWindowSegs;
     // Phase 08 (A): did THIS tick lose at least one packet? The windowed rate
-    // above stays elevated for LOSS_WINDOW_TICKS after a single burst, so without
+    // above stays elevated for ABR_LOSS_WINDOW_TICKS after a single burst, so without
     // this a burst would re-fire haveLostPackets on every one of those ticks —
     // five ×0.80 self-congestion decreases from ONE event, and B's "2 consecutive
     // breaks" would be satisfied by the same burst. A break requires FRESH loss;
@@ -408,7 +385,7 @@ private:
     bool _haveTelemetry = false;
     // xbfirm's _cameraStatus: false pins the video path off while telemetry loss
     // is severe. Set false by processTelemetryTCPInfo on >1% loss; restored
-    // after TELEMETRY_STABLE_TIMEOUT_MS of clean telemetry.
+    // after ABR_TELEMETRY_STABLE_TIMEOUT_MS of clean telemetry.
     bool _cameraStatus = true;
 
     // ── Router wiring (not xbfirm) ───────────────────────────────────────

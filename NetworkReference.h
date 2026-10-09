@@ -2,6 +2,7 @@
 #define NETWORKREFERENCE_H
 
 #include <QElapsedTimer>
+#include "ABRTuning.h"   // ABR_STRENGTH_STALE_MS / _CONFIRM_TICKS
 
 // Per-interface radio-strength reference for the ABR's ceiling gate.
 //
@@ -50,16 +51,14 @@ public:
     static constexpr int STRENGTH_MAX = 4;  // strongest
 
 private:
-    // No 603 within this window ⇒ no info (fail-closed).
-    static constexpr qint64 STALE_MS = 5000;
-
-    // The raw condition must hold for this many CONSECUTIVE fresh ticks.
-    // Tick-count, NOT wall-clock: a wall-clock "held since" timer keeps AGING
-    // while ticks stop arriving, so a short blip followed by sender silence would
-    // satisfy "held 5s" once wall time passes with no tick to falsify it.
+    // Tuning: ABR_STRENGTH_STALE_MS / ABR_STRENGTH_CONFIRM_TICKS (see ABRTuning.h).
+    // ABR_STRENGTH_STALE_MS: no 603 within this window ⇒ no info (fail-closed).
+    // ABR_STRENGTH_CONFIRM_TICKS: the raw condition must hold for this many CONSECUTIVE fresh
+    // ticks. Tick-count, NOT wall-clock: a wall-clock "held since" timer keeps
+    // AGING while ticks stop arriving, so a short blip followed by sender silence
+    // would satisfy "held 5s" once wall time passes with no tick to falsify it.
     // Counting fresh ticks freezes under silence, and environmentChanged() also
     // fails when stale — so a blip+silence can never confirm.
-    static constexpr int CONFIRM_TICKS = 5;
 
     bool isStale() const;
 

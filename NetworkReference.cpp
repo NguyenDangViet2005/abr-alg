@@ -8,7 +8,7 @@ NetworkReference::NetworkReference()
 bool NetworkReference::isStale() const
 {
     if (m_lastStrengthMs == 0) return true;              // never got a 603
-    return (m_clock.elapsed() - m_lastStrengthMs) > STALE_MS;
+    return (m_clock.elapsed() - m_lastStrengthMs) > ABR_STRENGTH_STALE_MS;
 }
 
 void NetworkReference::setStrength(int strength)
@@ -55,9 +55,9 @@ void NetworkReference::markBaseline()
 bool NetworkReference::environmentChanged() const
 {
     if (m_lastStrengthMs == 0) return false;                          // never got 603
-    if ((m_clock.elapsed() - m_lastStrengthMs) > STALE_MS) return false; // stale
+    if ((m_clock.elapsed() - m_lastStrengthMs) > ABR_STRENGTH_STALE_MS) return false; // stale
     if (!m_hasBaseline) return false;                                 // nothing learned
-    return m_condTicks >= CONFIRM_TICKS;
+    return m_condTicks >= ABR_STRENGTH_CONFIRM_TICKS;
 }
 
 void NetworkReference::reset()

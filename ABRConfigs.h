@@ -1,6 +1,10 @@
 #ifndef ABRCONFIGS_H
 #define ABRCONFIGS_H
 
+// Hạ tầng (infrastructure) cho XBQoSService: port / host / path / debug.
+// Các tham số THUẬT TOÁN ABR (ngưỡng, hệ số, tick) nằm ở ABRTuning.h.
+#include "ABRTuning.h"
+
 // ── SRT QoS UDP listener ──
 // UDP port for receiving QoS connection stats from an external XBSRTFactory.
 #define SRT_ABR_QOS_UDP_PORT 12345
@@ -16,17 +20,16 @@
 #define CAMERA_ADAPT_BITRATE_PORT 4002
 #define CAMERA_ADAPT_BITRATE_PATH "/api/camera/adapt-bitrate"
 
-// ── ABR defaults ──
-// Ceiling on any proposed bitrate. SHARED by both ABR engines — the SRT/camera
-// socket one (ABRFactory::startCameraSocketAbr) and the router-telemetry one
-// (ABRFactory::startRouterAbr) — so this single value caps both.
+// ── ABR aliases / SRT plumbing ──
+// Router-ABR TUNING lives in ABRTuning.h (included above). These four are NOT
+// router-ABR tunables: they are shared by the SRT engine + the service. Kept here
+// so no SRT/dev code has to change.
 //
-// Set to xbfirm's MAX_BITRATE_KBPS (2000) so the router ABR's clamp matches the
-// reference standard. NOTE: because the constant is shared, this also lowers the
-// SRT engine's ceiling 3000 -> 2000. That engine is the one being superseded by
-// the router ABR, so the lower cap is the intended direction — but it is a
-// cross-engine effect, not a router-ABR-local one.
-#define ABR_DEFAULT_MAX_ABR_BITRATE           2000
+// ABR_DEFAULT_MAX_ABR_BITRATE is now an ALIAS of the single source
+// ABR_MAX_BITRATE_KBPS (ABRTuning.h) — the ceiling SHARED by both ABR engines
+// (SRT/camera socket + router telemetry), so the two cannot drift. (Merging the
+// former duplicate 2000 here.)
+#define ABR_DEFAULT_MAX_ABR_BITRATE           ABR_MAX_BITRATE_KBPS
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
 #define VIDEO_DISABLED_BITRATE_KBPS           0
