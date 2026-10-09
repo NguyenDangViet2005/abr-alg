@@ -31,7 +31,12 @@ XBAdaptiveBitrateStreaming::XBAdaptiveBitrateStreaming(const QString &iface,
     , m_isC2Configured(isC2Configured)
 {
     // xbfirm ctor: m_abrState.current_bitrate_kbps = 800; maxAbr = ABR_MAX_BITRATE_KBPS.
-    m_abrState.current_bitrate_kbps = 800;
+    // PORT DEVIATION: 800 -> ABR_STARTUP_BITRATE_KBPS (1000). The router ABR is
+    // dispatched to the camera on the FIRST tick (switch edge "" -> primary, see
+    // ABRFactory::handleRouterTick), so this ctor value IS the on-entry bitrate
+    // the camera sees — start() (which resets to 1000) is never called on these
+    // instances. At 800, entry looked like "nothing set yet" then ramped up.
+    m_abrState.current_bitrate_kbps = ABR_STARTUP_BITRATE_KBPS;
     m_problematicBitrateThreshold = m_maxAbr;
 
     // PORT DEVIATION (timing): xbfirm uses QDateTime::currentMSecsSinceEpoch()
@@ -86,16 +91,18 @@ void XBAdaptiveBitrateStreaming::setHeadroomFactor(double factor)
     }
     m_headroomFactor = clamped;
     qInfo().nospace() << "[ABR][" << m_iface << "] steady-state headroom factor = "
-                      << m_headroomFactor << " (ramp holds at "
-                      << static_cast<int>(m_headroomFactor * 100) << "% of the ceiling)";
+                      << m_headroomFactor << " (default-tier ramp cap = "
+                      << static_cast<int>(m_headroomFactor * 100)
+                      << "% of the ceiling; low ceilings use the 60/50% tiers)";
 }
 
 void XBAdaptiveBitrateStreaming::start()
 {
-    // xbfirm start(), verbatim. Resets to 1000 and starts the two 5s timers.
+    // xbfirm start(), verbatim. Resets to the startup bitrate and starts the two
+    // 5s timers. Same value as the ctor (ABR_STARTUP_BITRATE_KBPS) — one source.
     if (m_isStarted) return;
 
-    reset(1000);
+    reset(ABR_STARTUP_BITRATE_KBPS);
 
     m_isStarted = true;
     m_lastNetworkDataTime = m_clock.elapsed();
@@ -161,6 +168,11 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_settleUntil = 0;
     m_zeroThroughputTicks = 0;
     m_telemetryLossyTicks = 0;
+    // Phase 10 (M1): a stale recovery-hold count must not survive a session
+    // discontinuity (start()/handleSerialStatus->reset). It is reset only by a
+    // break tick or a non-clean ramp tick, NEITHER of which is a reset() call —
+    // a frozen 1 would make the next floor episode ramp on its 1st clean tick.
+    m_cleanRecoveryTicks = 0;
 
     // Phase 08 (A): a fresh session has no loss history to average over.
     m_lossWindowLost.clear();
@@ -341,6 +353,10 @@ void XBAdaptiveBitrateStreaming::processTCPInfo(const tcpInfo &tcpi)
         unsigned int oldBitrate = m_abrState.current_bitrate_kbps;
         checkSenderQueue(tcpi);
         bitrateChanged = (oldBitrate != m_abrState.current_bitrate_kbps);
+    } else {
+        // Phase 10: a break tick is never "clean" — the floor recovery-hold
+        // counter must reset so "consecutive clean ticks" stays honest.
+        m_cleanRecoveryTicks = 0;
     }
 
     updateStreamingStatus(tcpi, bitrateChanged);
@@ -468,6 +484,12 @@ void XBAdaptiveBitrateStreaming::processTelemetryTCPInfo(double rtt, double deli
         // discontinuity the plan never considered (H3).
         m_pendingCeiling = 0;
         m_overshootConfirmTicks = 0;
+        // Phase 10 (M2): this branch forces MIN and flips _cameraStatus off, so the
+        // 7-arg checkSenderQueue early-returns (and its end-reset never runs) for
+        // the whole ABR_TELEMETRY_STABLE_TIMEOUT_MS window. A stale recovery-hold
+        // count would ride through the collapse AND the recovery kick — clear it
+        // here, same class of discontinuity as reset() (M1).
+        m_cleanRecoveryTicks = 0;
         emit bitrateProposed(m_iface, 0);
         return;
     } else {
@@ -737,6 +759,13 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
 {
     // xbfirm checkSenderQueue, verbatim. (The stray unused
     // `bool testNetworkDelay = ...` in xbfirm is dropped — it is dead.)
+    //
+    // Phase 10 (D2): the recovery-hold counter counts CONSECUTIVE fully-clean
+    // ramp ticks. `rampClean` is set true ONLY where every ramp gate passes
+    // (bottom of the nesting); the single reset at the end of this function
+    // clears the counter on any tick that is not fully clean. A break tick never
+    // reaches here (processTCPInfo resets it directly).
+    bool rampClean = false;
     m_rttHistory.append(tcpi.rtt);
     if (m_rttHistory.size() > ABR_RTT_HISTORY_SIZE) m_rttHistory.removeFirst();
 
@@ -759,6 +788,7 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                                  << m_zeroThroughputTicks << " consecutive ticks! Dropping to MIN";
             setNewBitrate(ABR_MIN_BITRATE_KBPS);
         }
+        m_cleanRecoveryTicks = 0;   // Phase 10: early return bypasses the end reset
         return;
     }
     m_zeroThroughputTicks = 0;
@@ -821,6 +851,12 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                                          << time_since_last_change << "ms since last change (need >= "
                                          << ABR_BITRATE_INCREASE_COOLDOWN_MS << "ms)";
                     if (time_since_last_change >= ABR_BITRATE_INCREASE_COOLDOWN_MS) {
+                        // Reaching here means EVERY ramp gate passed this tick
+                        // (qdelay, rtt-min, jitter, cooldown) — the "everything ok"
+                        // test. Flag it so the recovery-hold counter at the floor
+                        // accumulates; any other exit leaves rampClean false and the
+                        // end-of-function reset clears the counter.
+                        rampClean = true;
                         // Phase 01 (PORT DEVIATION): never ramp above the ceiling.
                         // xbfirm had no ceiling, so this is what stops the
                         // ramp-forever behaviour once an overshoot has set the
@@ -833,37 +869,119 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                         // reserving the rest of the link for other tasks. The cap
                         // applies even at m_maxAbr (no learned ceiling) so a healthy
                         // link keeps its reservation too.
-                        const unsigned int next_bitrate = m_abrState.current_bitrate_kbps
-                                                        + static_cast<unsigned int>(m_gainUp * ABR_BITRATE_STEP_KBPS);
-                        const unsigned int cap = steadyCapKbps();
-                        // Phase 08 (C) / H2: the "blocked at a LEARNED ceiling" state
-                        // is `m_ceilingKbps < m_maxAbr`. At m_maxAbr there is nothing
-                        // learned to hold or lift, so the escape clock must NOT arm
-                        // there — else every healthy link at MAX would spuriously arm
-                        // it and latch m_reprobeInFlight, doubling the backoff on the
-                        // first real ceiling. The CAP still blocks at MAX (that is the
-                        // headroom reservation); only the escape clock is gated.
-                        if (next_bitrate > cap && !allowExceedCeiling()) {
-                            if (m_ceilingKbps < m_maxAbr && m_ceilingHoldSince == 0)
-                                m_ceilingHoldSince = m_clock.elapsed();
-                            qWarning().nospace() << "[ABR][" << m_iface << "] At headroom cap "
-                                                 << cap << "kbps (ceiling " << m_ceilingKbps
-                                                 << "kbps) — holding (no ramp)";
+                        //
+                        // Phase 10 (D2, recovery-hold): arriving here means EVERY
+                        // ramp gate is clean THIS tick (qdelay, rtt-min, jitter,
+                        // cooldown) — the "everything is ok" test. At MIN we
+                        // additionally require ABR_RECOVERY_CONFIRM_TICKS such ticks
+                        // in a ROW before ramping: one clean tick after a drop to MIN
+                        // can still hide a receiver buffer that has not drained (the
+                        // qdelay proxy is the SENDER write queue, EMA-smoothed), and
+                        // ramping into it is the "đơ đơ". Above MIN the normal 1-tick
+                        // ramp is unchanged.
+                        //
+                        // <unsigned int> cast: the ABR_* macros are UNTYPED int,
+                        // current_bitrate_kbps is unsigned — a bare comparison would
+                        // trip -Wsign-compare. MIN is positive, so exact.
+                        //
+                        // Floor = MIN only (30), NOT MIN+STEP: the recovery-hold
+                        // guards the state of being PINNED at MIN. Once the first
+                        // clean step lifts us off MIN (to 130) the normal 1-tick
+                        // ramp resumes — otherwise every near-floor step would be
+                        // gated again, tripling the climb time (the 2s cooldown
+                        // already spaces steps ~2 ticks apart).
+                        const unsigned int floorKbps = static_cast<unsigned int>(ABR_MIN_BITRATE_KBPS);
+                        const bool atFloor = m_abrState.current_bitrate_kbps <= floorKbps;
+                        // Count THIS clean tick first, then decide: ramp on the tick
+                        // that REACHES the requirement (K=2 -> ramp on the 2nd clean
+                        // tick), not the one after — otherwise K clean ticks would
+                        // wait K+1 ticks.
+                        if (atFloor) ++m_cleanRecoveryTicks;
+                        if (atFloor && m_cleanRecoveryTicks < ABR_RECOVERY_CONFIRM_TICKS) {
+                            qWarning().nospace() << "[ABR][" << m_iface << "] Recovery hold: clean tick "
+                                                 << m_cleanRecoveryTicks << "/" << ABR_RECOVERY_CONFIRM_TICKS
+                                                 << " at floor — not ramping yet";
                         } else {
-                            // Phase 07: allowExceedCeiling() true (Phase 03) means the
-                            // environment changed — LIFT the ceiling (re-probe). Cleared
-                            // directly, no EVENT: the next SAMPLE reports 0 and the
-                            // dashboard line clears; a later overshoot learns a new one.
-                            //
-                            // Phase 08 (C): if the lift came from the FALLBACK (no
-                            // strength source) rather than a real strength recovery,
-                            // flag it — a re-latch then doubles the backoff.
-                            if (next_bitrate > m_ceilingKbps && m_ceilingKbps < m_maxAbr) {
-                                m_reprobeInFlight = !m_networkRef.environmentChanged();
-                                m_ceilingKbps = m_maxAbr;
+                            if (atFloor) m_cleanRecoveryTicks = 0;   // confirmed — ramp, count afresh next drop
+                            const unsigned int next_bitrate = m_abrState.current_bitrate_kbps
+                                                            + static_cast<unsigned int>(m_gainUp * ABR_BITRATE_STEP_KBPS);
+                            const unsigned int cap = steadyCapKbps();
+                            // Phase 08 (C) / H2: the "blocked at a LEARNED ceiling" state
+                            // is `m_ceilingKbps < m_maxAbr`. At m_maxAbr there is nothing
+                            // learned to hold or lift, so the escape clock must NOT arm
+                            // there — else every healthy link at MAX would spuriously arm
+                            // it and latch m_reprobeInFlight, doubling the backoff on the
+                            // first real ceiling. The CAP still blocks at MAX (that is the
+                            // headroom reservation); only the escape clock is gated.
+                            const bool capBlocks = next_bitrate > cap && !allowExceedCeiling();
+                            // Phase 10 (D3): while current < cap the ramp may STEP UP
+                            // toward the cap even though `next` would overshoot it — take
+                            // the cap. Without this, a low learned ceiling whose cap
+                            // (factor×ceiling) sits below current+STEP (e.g. 0.5×130 = 65
+                            // vs 30+100 = 130) would HOLD at MIN forever until the 30s
+                            // fallback. Only when the step is >= the deadband (else
+                            // setNewBitrate no-ops and the log would repeat pointlessly)
+                            // and current is still strictly below cap.
+                            const bool canStepToCap = capBlocks
+                                && m_abrState.current_bitrate_kbps < cap
+                                && (cap - m_abrState.current_bitrate_kbps)
+                                       >= static_cast<unsigned int>(ABR_MIN_BITRATE_CHANGE_THRESHOLD);
+                            if (canStepToCap) {
+                                qWarning().nospace() << "[ABR][" << m_iface << "] Below headroom cap "
+                                                     << cap << "kbps — stepping up from "
+                                                     << m_abrState.current_bitrate_kbps << "kbps to cap";
+                                // Phase 10 (M3): do NOT clear m_ceilingHoldSince here,
+                                // unlike the lift branch below. The ceiling is NOT lifted —
+                                // we are only walking back UP to the cap, so the Phase 08(C)
+                                // reprobe clock must keep running across the dip. Clearing it
+                                // would restart the clock on every dip-and-recover shorter
+                                // than the backoff and starve the escape that exists so a
+                                // learned ceiling can never hold forever.
+                                setNewBitrate(cap);
+                            } else if (capBlocks) {
+                                // Phase 10 (Finding A, PORT DEVIATION): the cap must also PULL
+                                // current DOWN, not only block the ramp up. After an overshoot
+                                // learn the bitrate sits at last-good (= the CEILING), which is
+                                // HIGHER than the cap (cap = factor × ceiling < ceiling), so
+                                // pre-fix this branch HELD there until the 30s+ reprobe — the cap
+                                // never actually applied. When current overshoots the cap by at
+                                // least the deadband, jump straight to the cap (mirror of D3,
+                                // which steps UP to the cap): the ramp branch now converges on
+                                // the cap from BOTH sides. Reaching here with current < cap is
+                                // only possible within the deadband (next = current+100 > cap),
+                                // so the down-step is deadband-guarded to avoid setNewBitrate
+                                // no-oping on a sub-30 gap. m_ceilingHoldSince is NOT touched:
+                                // the hold branch below re-arms it on arrival at the cap.
+                                const unsigned int aboveCap = m_abrState.current_bitrate_kbps > cap
+                                    ? (m_abrState.current_bitrate_kbps - cap) : 0u;
+                                if (aboveCap >= static_cast<unsigned int>(ABR_MIN_BITRATE_CHANGE_THRESHOLD)) {
+                                    qWarning().nospace() << "[ABR][" << m_iface << "] Above headroom cap "
+                                                         << cap << "kbps — pulling down from "
+                                                         << m_abrState.current_bitrate_kbps << "kbps to cap";
+                                    setNewBitrate(cap);
+                                } else {
+                                    if (m_ceilingKbps < m_maxAbr && m_ceilingHoldSince == 0)
+                                        m_ceilingHoldSince = m_clock.elapsed();
+                                    qWarning().nospace() << "[ABR][" << m_iface << "] At headroom cap "
+                                                         << cap << "kbps (ceiling " << m_ceilingKbps
+                                                         << "kbps) — holding (no ramp)";
+                                }
+                            } else {
+                                // Phase 07: allowExceedCeiling() true (Phase 03) means the
+                                // environment changed — LIFT the ceiling (re-probe). Cleared
+                                // directly, no EVENT: the next SAMPLE reports 0 and the
+                                // dashboard line clears; a later overshoot learns a new one.
+                                //
+                                // Phase 08 (C): if the lift came from the FALLBACK (no
+                                // strength source) rather than a real strength recovery,
+                                // flag it — a re-latch then doubles the backoff.
+                                if (next_bitrate > m_ceilingKbps && m_ceilingKbps < m_maxAbr) {
+                                    m_reprobeInFlight = !m_networkRef.environmentChanged();
+                                    m_ceilingKbps = m_maxAbr;
+                                }
+                                m_ceilingHoldSince = 0;
+                                setNewBitrate(next_bitrate);
                             }
-                            m_ceilingHoldSince = 0;
-                            setNewBitrate(next_bitrate);
                         }
                     }
                 }
@@ -874,6 +992,13 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                              << increase_q_delay_threshold << " < " << queuing_delay_ms << "ms) < "
                              << ABR_QUEUE_DELAY_HIGH_THRESHOLD_MS << "ms). Holding bitrate.";
     }
+
+    // Phase 10 (D2): single reset point. `rampClean` is true ONLY on the
+    // fully-clean ramp tick (all gates passed); every other path — decrease,
+    // hold, moderate queue, a failed sub-gate — leaves it false and the counter
+    // restarts. Placed after the branch so the floor increment (done above)
+    // survives this tick and is only cleared on a genuinely non-clean one.
+    if (!rampClean) m_cleanRecoveryTicks = 0;
 }
 
 unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
@@ -924,18 +1049,49 @@ unsigned int XBAdaptiveBitrateStreaming::applyOvershootCeiling()
 unsigned int XBAdaptiveBitrateStreaming::steadyCapKbps() const
 {
     // Phase 09 (headroom, PORT DEVIATION): the value the steady-state ramp holds
-    // at. factor × min(ceiling, maxAbr). The min() matters at MAX: with no
-    // learned ceiling m_ceilingKbps == m_maxAbr, so the cap is factor×maxAbr
-    // (e.g. 1600 at 2000) — the reservation applies on a healthy link too, which
-    // is the whole point of the request. Always a real number (no 0 sentinel):
-    // the wire reports it unconditionally.
+    // at. effectiveHeadroomFactor() × min(ceiling, maxAbr). The min() matters at
+    // MAX: with no learned ceiling m_ceilingKbps == m_maxAbr, so the cap is
+    // factor×maxAbr (e.g. 1600 at 2000) — the reservation applies on a healthy
+    // link too, which is the whole point of the request. Always a real number (no
+    // 0 sentinel): the wire reports it unconditionally.
     //
     // qMin over the two limits, NOT m_ceilingKbps alone: a learned ceiling can
     // only be <= m_maxAbr, so this is belt-and-braces against a stale ceiling
     // left above a lowered max. cast after the multiply so the product is
     // computed in double, then floored — never rounds UP past the cap.
-    const double cap = m_headroomFactor * static_cast<double>(qMin(m_ceilingKbps, m_maxAbr));
+    const double cap = effectiveHeadroomFactor()
+                     * static_cast<double>(qMin(m_ceilingKbps, m_maxAbr));
     return static_cast<unsigned int>(cap);
+}
+
+double XBAdaptiveBitrateStreaming::effectiveHeadroomFactor() const
+{
+    // Phase 09b (2-tier headroom, PORT DEVIATION): a WEAK link reserves MORE, by
+    // ratio — a low ceiling leaves little absolute slack, so the burst headroom
+    // must be a bigger fraction of it. Thresholds/values live in ABRTuning.h.
+    //
+    // Keyed on min(m_ceilingKbps, m_maxAbr) — the SAME base steadyCapKbps()
+    // multiplies. Never key on the cap itself: cap = factor × base, so a
+    // cap-based threshold would be circular (factor depends on cap depends on
+    // factor). Order matters: the <500 tier is checked first so it wins over the
+    // <1000 tier (500 is also <1000).
+    //
+    // int, not unsigned: the thresholds are untyped int macros; an unsigned base
+    // would trip -Wsign-compare. Values are bounded by m_maxAbr (2000), so int is
+    // safe.
+    const int base = static_cast<int>(qMin(m_ceilingKbps, m_maxAbr));
+    double tier = m_headroomFactor;                                   // healthy-link default
+    if (base < ABR_CRITICAL_CEILING_THRESHOLD_KBPS) tier = ABR_CRITICAL_CEILING_HEADROOM_FACTOR;
+    else if (base < ABR_LOW_CEILING_THRESHOLD_KBPS) tier = ABR_LOW_CEILING_HEADROOM_FACTOR;
+
+    // A tier may only make the reservation STRICTER, never looser than the
+    // operator's --abr-headroom. The tier constants (0.60/0.50) are hardcoded, so
+    // without this a --abr-headroom 50 (factor 0.50) would be RELAXED to 0.60 at a
+    // 500..1000 ceiling — the opposite of what the user asked. min() keeps the
+    // stricter of the two: default 0.80 gives 0.60/0.50 as designed; an explicit
+    // 0.50 stays 0.50 at every tier. (m_headroomFactor is clamped [0.5,1.0] in
+    // setHeadroomFactor, so the result is always in range.)
+    return qMin(tier, m_headroomFactor);
 }
 
 bool XBAdaptiveBitrateStreaming::allowExceedCeiling() const

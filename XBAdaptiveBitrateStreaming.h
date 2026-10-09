@@ -212,14 +212,24 @@ private:
     bool ceilingReprobeDue() const;
 
     // Phase 09 (headroom, PORT DEVIATION): the STEADY-STATE ramp cap. The video
-    // ramp holds at `m_headroomFactor × min(ceiling, maxAbr)` instead of at the
-    // ceiling itself, reserving the remainder of the link for other tasks
+    // ramp holds at `effectiveHeadroomFactor() × min(ceiling, maxAbr)` instead of
+    // at the ceiling itself, reserving the remainder of the link for other tasks
     // (C2/SRT, control traffic, bursts). Derived, NOT stored: m_ceilingKbps stays
     // the TRUE ceiling (the wire/dashboard report it unchanged), so headroom is a
     // separate policy layered on top. Consumed by the ramp gate AND the decision
     // report. Applies even at m_maxAbr (no learned ceiling) — the user wants the
     // reservation on a healthy link too.
     unsigned int steadyCapKbps() const;
+
+    // Phase 09b (2-tier headroom, PORT DEVIATION): pick the headroom factor for
+    // the CURRENT ceiling — a WEAK link reserves more. Thresholds/values live in
+    // ABRTuning.h (ABR_LOW/CRITICAL_CEILING_*). Keyed on min(m_ceilingKbps,
+    // m_maxAbr), the same base steadyCapKbps() multiplies — never on the cap
+    // itself (cap depends on this factor → circular). Below 500 -> 0.50; below
+    // 1000 -> 0.60; else m_headroomFactor (0.80, or --abr-headroom). The tier is
+    // then min()-clamped by m_headroomFactor so it can only be STRICTER, never
+    // looser, than the operator's --abr-headroom.
+    double effectiveHeadroomFactor() const;
 
     // Phase 01 (PORT DEVIATION, not xbfirm): true when the current video-loss
     // break started right after OUR own step-up, i.e. the loss is our
@@ -308,8 +318,8 @@ private:
     // m_ceilingKbps: the TRUE learned link ceiling. Found once on overshoot,
     // then respected (Phase 03's NetworkReference is the only thing that lifts
     // it). The STEADY-STATE ramp is NOT held here directly any more — Phase 09
-    // holds it at steadyCapKbps() = m_headroomFactor × min(this, m_maxAbr), a
-    // headroom-reserving cap BELOW this. The wire/dashboard still report THIS
+    // holds it at steadyCapKbps() = effectiveHeadroomFactor() × min(this, m_maxAbr),
+    // a headroom-reserving cap BELOW this. The wire/dashboard still report THIS
     // (the real ceiling). One documented exception: the telemetry ABR kick in
     // processTelemetryTCPInfo may exceed it (a post-outage probe, see there).
     // m_lastGoodKbps: the bitrate immediately BEFORE the break-causing step-up
@@ -322,7 +332,9 @@ private:
     // other tasks. SEPARATE from ABR_DECREASE_FACTOR (also 0.80 today) — that is
     // the break step-DOWN multiplier; this is the steady-state UP cap. Same
     // value, different meaning: never alias them. Configurable at runtime via
-    // setHeadroomFactor() (--abr-headroom). Clamped to [0.5, 1.0].
+    // setHeadroomFactor() (--abr-headroom). Clamped to [0.5, 1.0]. This is the
+    // DEFAULT (healthy-link) tier only — a low ceiling overrides it via
+    // effectiveHeadroomFactor() (Phase 09b, see ABR_LOW/CRITICAL_CEILING_*).
     double m_headroomFactor = 0.80;
     unsigned int m_lastGoodKbps = 0;
     double m_scoreAtStepUp = 0.0;
@@ -364,6 +376,15 @@ private:
     qint64 m_settleUntil = 0;
     int    m_zeroThroughputTicks = 0;
     int    m_telemetryLossyTicks = 0;
+    // Phase 10 (recovery-hold, PORT DEVIATION): consecutive CLEAN ticks while
+    // PINNED at MIN (current <= MIN). The ramp only resumes once this reaches
+    // ABR_RECOVERY_CONFIRM_TICKS, so a lone clean tick after a drop to MIN cannot
+    // ramp straight back into a link whose buffer has not drained ("đơ đơ").
+    // Reset to 0 by any break tick (processTCPInfo), by any non-clean ramp tick
+    // (checkSenderQueue end-reset), and by the two discontinuity paths that bypass
+    // both — reset() (M1) and the telemetry-collapse branch (M2). Inert above MIN
+    // — the normal 1-tick ramp is unchanged there.
+    int    m_cleanRecoveryTicks = 0;
 
     // Advisor coefficients. xbfirm's CellularPredictive drove these; with no
     // predictor they stay at xbfirm's ctor defaults (1.0). gainUp=1.0 gives the

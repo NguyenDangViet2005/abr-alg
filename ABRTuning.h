@@ -40,12 +40,31 @@
 // [xbfirm]
 #define ABR_MIN_BITRATE_KBPS                   30
 
-// Hệ số headroom trạng thái ổn định (%). Ramp giữ ở `pct% × trần`, chừa phần
-// còn lại của link cho việc khác (C2/SRT, điều khiển, burst). 80 = dùng 80%
-// trần, chừa 20%. CHỈ router ABR — engine SRT có headroom riêng (0.85).
-// Override runtime: `--abr-headroom <pct>` (main.cpp). Clamp [50,100].
+// Bitrate KHỞI ĐỘNG (kbps) — giá trị instance nhận ngay khi tạo (ctor) VÀ khi
+// start()/reset(). Router ABR được dispatch tới camera ngay tick đầu (switch
+// edge "" -> primary), nên đây CHÍNH LÀ bitrate camera thấy lúc vào, không chờ
+// ramp. 1000 = vào thẳng 1000 thay vì 800 rồi bò lên (+100/2s).
+// [PORT DEVIATION] (xbfirm ctor = 800, start() = 1000 — lệch nhau; đây gộp về 1).
+#define ABR_STARTUP_BITRATE_KBPS               1000
+
+// Hệ số headroom trạng thái ổn định (%) — MỨC MẶC ĐỊNH (link khỏe). Ramp giữ ở
+// `pct% × trần`, chừa phần còn lại của link cho việc khác (C2/SRT, điều khiển,
+// burst). 80 = dùng 80% trần, chừa 20%. Khi trần thấp (link yếu) hệ số bị THAY
+// bởi 2 tầng bên dưới — xem ABR_LOW/CRITICAL_CEILING_*. CHỈ router ABR — engine
+// SRT có headroom riêng (0.85). Override runtime: `--abr-headroom <pct>`
+// (main.cpp). Clamp [50,100].
 // [PORT DEVIATION] (xbfirm không có khái niệm trần/headroom).
 #define ABR_HEADROOM_FACTOR_PCT                80
+
+// ── Headroom 2 TẦNG theo trần (khi link yếu thì chừa nhiều hơn) ──────────
+// Trần càng thấp → chừa càng nhiều theo TỈ LỆ (link yếu cần dư địa lớn hơn để
+// hấp thụ burst). Ngưỡng so trên CEILING = min(m_ceilingKbps, m_maxAbr) — KHÔNG
+// phải cap (cap lại phụ thuộc hệ số này → vòng lặp). Thứ tự xét: <500 → <1000 →
+// mặc định. Trần < 1000 → 60%; trần < 500 → 50%. [PORT DEVIATION]
+#define ABR_LOW_CEILING_THRESHOLD_KBPS         1000
+#define ABR_LOW_CEILING_HEADROOM_FACTOR        0.60
+#define ABR_CRITICAL_CEILING_THRESHOLD_KBPS     500
+#define ABR_CRITICAL_CEILING_HEADROOM_FACTOR   0.50
 
 // Ngưỡng bufferbloat (ms) cho rttHigh = video (rtt − min_rtt). 500ms hàng đợi
 // ĐỨNG yên đã là lag nặng; delta đã trừ độ trễ nền nên không cần "nới" thêm.
@@ -138,6 +157,11 @@
 #define ABR_TELEMETRY_LOSSY_CONFIRM_TICKS      2
 // Số tick LIÊN TIẾP throughput==0 mới coi là sụp thật. [PORT DEVIATION]
 #define ABR_ZERO_THROUGHPUT_CONFIRM_TICKS      2
+// Recovery-hold: khi đang KẸT ở MIN (current <= MIN), phải có bấy nhiêu tick
+// SẠCH LIÊN TIẾP (mọi gate ramp-up đều ok: loss/qdelay/rtt/jitter/cooldown) mới
+// cho leo lên lại. Chống "đơ đơ" — 1 tick sạch đơn lẻ (buffer chưa đẩy hết) vẫn
+// leo vào link còn nghẽn. Bất kỳ tick break nào reset về 0. [PORT DEVIATION]
+#define ABR_RECOVERY_CONFIRM_TICKS             2
 // Số điều kiện xấu liên tiếp để hạ status về POOR_NETWORK. [xbfirm]
 #define ABR_POOR_CONDITIONS_TICKS              2
 // Đổi bitrate phải khác ít nhất (kbps) này, nếu không thì bỏ qua (no-op). [xbfirm]
