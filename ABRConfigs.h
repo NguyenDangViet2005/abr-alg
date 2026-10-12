@@ -20,6 +20,15 @@
 #define CAMERA_ADAPT_BITRATE_PORT 4002
 #define CAMERA_ADAPT_BITRATE_PATH "/api/camera/adapt-bitrate"
 
+// ── CameraControl (xbfirm video-socket restart) ──
+// xbfirm's HTTP API (SERVER_HTTP_XBFIRM = 3009) exposes /connections/video/restart,
+// which drops + reopens the camera's video WebSocket — the only userspace fix for
+// TCP retransmit head-of-line blocking. Same box as the adapt-bitrate API (both
+// 127.0.0.1 on the QoS service host).
+#define CAMERA_VIDEO_RESTART_HOST "127.0.0.1"
+#define CAMERA_VIDEO_RESTART_PORT 3009
+#define CAMERA_VIDEO_RESTART_PATH "/connections/video/restart"
+
 // ── ABR aliases / SRT plumbing ──
 // Router-ABR TUNING lives in ABRTuning.h (included above). These four are NOT
 // router-ABR tunables: they are shared by the SRT engine + the service. Kept here

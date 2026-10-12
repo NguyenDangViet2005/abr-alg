@@ -149,8 +149,26 @@
 // Sau mỗi bước giảm của ladder, HOLD (ms) trước khi cho giảm tiếp (chờ link hồi).
 #define ABR_LOSS_DECREASE_SETTLE_MS            3000
 // Rate-limit (ms) giữa 2 lần emit requestStreamReset (chống loss dao động quanh
-// 70% spam refresh camera). Đặt ở site emit để tín hiệu tự nó đã bị chặn.
+// ngưỡng reset — nay 45% — spam refresh camera). Đặt ở site emit để tín hiệu tự nó đã bị chặn.
+// Dùng CHUNG cho cả đường score-cliff bên dưới (m_lastResetMs là 1 token duy nhất).
 #define ABR_RESET_RATE_LIMIT_MS                30000
+
+// ── Score-cliff -> TCP socket restart (PORT DEVIATION, Phase 12) ─────────
+// Khi score VIDEO của router (row [17], 0..100) TỤT xuống dưới ĐỈNH GẦN ĐÂY một
+// khoảng >= ABR_SCORE_CLIFF_DELTA thì coi là "stream kẹt" (TCP retransmit
+// head-of-line blocking: gói cũ gửi mãi, chặn realtime) -> xin restart socket
+// video. Đây là fix DUY NHẤT từ userspace cho ca đó — hạ bitrate KHÔNG rút được
+// gói ĐÃ GỬI khỏi retransmit queue.
+// Đỉnh nền = max score trong ABR_SCORE_CLIFF_WINDOW_TICKS tick gần nhất (chống
+// 1 tick nhiễu đơn lẻ làm đỉnh nền tụt). Toán thuần ở ABRScoreCliff.h.
+#define ABR_SCORE_CLIFF_DELTA                  50.0
+// Số mẫu score VIDEO giữ lại để tính đỉnh nền (max).
+#define ABR_SCORE_CLIFF_WINDOW_TICKS           5
+// Số tick LIÊN TIẾP phải "cliff" trước khi fire. Score lên dây ĐÃ là EMA(α=0.5)
+// nên 1 tick nhiễu không đủ sập; nhưng nhiễu dai 2-3 tick liên tiếp thì đủ. Đòi
+// 2 tick liên tiếp chặn nhiễu ngắn mà vẫn bắt được sập thật (vốn dai dẳng).
+// Cùng tinh thần ABR_OVERSHOOT_CONFIRM_TICKS.
+#define ABR_SCORE_CLIFF_CONFIRM_TICKS          2
 
 // ─────────────────────────────────────────────────────────────────────────
 // NHÓM 3 — OVERSHOOT + TRẦN (PORT DEVIATION: xbfirm không có trần)
@@ -182,7 +200,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 // Cửa sổ loss VIDEO (số tick): loss% = Σlost/ΣsegsOut trên bấy nhiêu tick. Video
-// chỉ ~70-80 seg/tick nên 1 gói mất đọc thành ~1.3% (>0.8% trigger) — sai. Với
+// chỉ ~70-80 seg/tick nên 1 gói mất đọc thành ~1.3% (>0.5% trigger) — sai. Với
 // 5×70=350 seg thì 1 gói = 0.29%. VIDEO only. [PORT DEVIATION]
 #define ABR_LOSS_WINDOW_TICKS                  5
 // Số tick LIÊN TIẾP throughput==0 mới coi là sụp thật. [PORT DEVIATION]

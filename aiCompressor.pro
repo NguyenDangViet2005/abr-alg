@@ -9,6 +9,7 @@ TARGET = aiCompressor
 HEADERS += \
     ABRConfigs.h \
     ABRLossBand.h \
+    ABRScoreCliff.h \
     ABRTuning.h \
     ABRFactory.h \
     IAdaptiveBitrateStreaming.h \

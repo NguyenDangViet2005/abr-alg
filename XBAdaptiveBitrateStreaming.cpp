@@ -1,5 +1,6 @@
 #include "XBAdaptiveBitrateStreaming.h"
 #include "ABRLossBand.h"     // Phase 11: pure loss-ladder band math
+#include "ABRScoreCliff.h"   // Phase 12: pure score-cliff predicate
 #include <QDebug>
 #include <QtMath>
 
@@ -177,9 +178,9 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_settleUntil = 0;
     m_zeroThroughputTicks = 0;
     // Phase 11: a fresh session has not emitted a reset yet — restore the
-    // negative sentinel so the first >70% reset is not suppressed by a timestamp
-    // left over from a prior session (the M1-class discontinuity, same as the
-    // recovery-hold counter below).
+    // negative sentinel so the first reset-band (>ABR_LOSS_RESET_PCT) emit is not
+    // suppressed by a timestamp left over from a prior session (the M1-class
+    // discontinuity, same as the recovery-hold counter below).
     m_lastResetMs = -ABR_RESET_RATE_LIMIT_MS;
     // Phase 10 (M1): a stale recovery-hold count must not survive a session
     // discontinuity (start()/handleSerialStatus->reset). It is reset only by a
@@ -200,6 +201,12 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_ceilingHoldSince = 0;
     m_ceilingReprobeBackoffMs = ABR_CEILING_REPROBE_BASE_MS;
     m_reprobeInFlight = false;
+
+    // Phase 12: a fresh session has no score history and no in-flight cliff — a
+    // stale latch would suppress the first restart request of the new session.
+    m_scoreHistory.clear();
+    m_scoreCliffStreak = 0;
+    m_scoreCliffFired = false;
 }
 
 // === ROUTER WIRING (not xbfirm) ===
@@ -224,6 +231,51 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
 
     if (row.connType == ConnType::VIDEO) {
         m_video = row;
+
+        // ── Phase 12: score-cliff -> TCP video socket restart (PORT DEVIATION) ──
+        // A ≥ABR_SCORE_CLIFF_DELTA drop from the recent peak means the stream is
+        // likely wedged (TCP retransmit head-of-line blocking); a socket restart is
+        // the only userspace fix. Two guards keep it from firing on noise:
+        //   * SKIP a non-MPTCP row. Score is 0.0 BY DESIGN then (ScoringModule
+        //     comment: "score 0 says known-bad when the truth is not applicable"),
+        //     written straight into the EMA that goes on the wire — so a lone MPTCP
+        //     blip would otherwise look like a 90->0 cliff. Appending it would also
+        //     poison the peak baseline. Skip both: no append, no fire.
+        //   * REQUIRE ABR_SCORE_CLIFF_CONFIRM_TICKS consecutive cliff ticks. The
+        //     wire score is already EMA(alpha=0.5), so one noisy tick cannot drop it
+        //     50; but 2-3 consecutive bad ticks can. A real collapse is persistent,
+        //     so demanding a short streak costs nothing real and filters the noise.
+        // Fires once per collapse (m_scoreCliffFired latch resets only when the
+        // cliff clears), rate-limited by the SHARED 30s token (m_lastResetMs) so it
+        // can never double with the loss>45% path.
+        if (row.isMptcp) {
+            m_scoreHistory.append(row.score);
+            while (m_scoreHistory.size() > static_cast<int>(ABR_SCORE_CLIFF_WINDOW_TICKS))
+                m_scoreHistory.removeFirst();
+            double baseline = 0.0;
+            for (double s : m_scoreHistory) baseline = qMax(baseline, s);
+
+            const bool cliff = abrScoreCliff(baseline, row.score,
+                                             static_cast<double>(ABR_SCORE_CLIFF_DELTA));
+            if (cliff) {
+                if (m_scoreCliffStreak < ABR_SCORE_CLIFF_CONFIRM_TICKS) ++m_scoreCliffStreak;
+                if (m_scoreCliffStreak >= ABR_SCORE_CLIFF_CONFIRM_TICKS && !m_scoreCliffFired) {
+                    m_scoreCliffFired = true;
+                    const qint64 now = m_clock.elapsed();
+                    if (now - m_lastResetMs >= static_cast<qint64>(ABR_RESET_RATE_LIMIT_MS)) {
+                        m_lastResetMs = now;
+                        qWarning().nospace() << "[ABR][" << m_iface << "] score cliff: peak "
+                                             << baseline << " -> " << row.score << " (delta >= "
+                                             << ABR_SCORE_CLIFF_DELTA << ") — requesting video socket restart";
+                        emit requestStreamReset(m_iface, QStringLiteral("score-cliff"));
+                    }
+                }
+            } else {
+                // Recovered above the cliff: re-arm the detector for the next collapse.
+                m_scoreCliffStreak = 0;
+                m_scoreCliffFired = false;
+            }
+        }
 
         // VIDEO row -> xbfirm's 11-arg processTCPInfo. The router's raw block
         // (fields 7..16) is EXACTLY that argument list, positionally:
@@ -398,7 +450,7 @@ void XBAdaptiveBitrateStreaming::processTCPInfo(quint32 rtt, quint32 min_rtt,
     // loss_rate arrives as a lost-packet COUNT; the percent is Σlost/ΣsegsOut
     // over the last ABR_LOSS_WINDOW_TICKS ticks. Phase 08 (A): xbfirm divides by the
     // ONE tick's deltaSegsout, but the video flow sends only ~70-80 segments per
-    // tick, so a single lost packet read as ~1.3% — over the 0.8% trigger — and
+    // tick, so a single lost packet read as ~1.3% — over the 0.5% trigger — and
     // every retransmit was a false "high loss" that walked the bitrate down
     // (field log: 2/69=2.90%, 1/69=1.45%, 4/80=5%). The window restores the true
     // loss rate (the definition TCP itself uses) and scales with bitrate; a real
@@ -564,7 +616,7 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
         return false;
     }
 
-    // Phase 08 (A): the windowed video rate is still above 0.8% but THIS tick
+    // Phase 08 (A): the windowed video rate is still above 0.5% but THIS tick
     // lost nothing — the elevated window is the memory of an earlier burst, not
     // a fresh break. Return false (clean): it closes any open overshoot episode,
     // lets checkSenderQueue run, and stops a single burst from re-firing the
@@ -595,9 +647,10 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
                          << action << "kbps" << (isReset ? " + RESET" : "");
     setNewBitrate(action);
 
-    // The >70% band asks the camera to refresh the stream (PART B executor is
-    // wired in XBQoSService). Rate-limited at the EMIT site so the signal itself
-    // is already throttled — a loss oscillating around 70% cannot spam refresh.
+    // The reset band (>ABR_LOSS_RESET_PCT) asks the camera to refresh the stream
+    // (PART B executor is wired in XBQoSService). Rate-limited at the EMIT site so
+    // the signal itself is already throttled — a loss oscillating around the
+    // reset boundary cannot spam refresh.
     if (isReset) {
         const qint64 now = m_clock.elapsed();
         if (now - m_lastResetMs >= static_cast<qint64>(ABR_RESET_RATE_LIMIT_MS)) {
@@ -622,8 +675,8 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
     //      confirming tick, so settling there is correct and intended.
     //  (2) NOT once the action has hit MIN. A settle only makes sense while the
     //      ladder still has room to fall; at MIN the decrease is a no-op, so
-    //      holding would only delay recovery for nothing. Covers the 50-70 and
-    //      >70 bands, plus a floored 0.8-20/20-50 band. (When an overshoot
+    //      holding would only delay recovery for nothing. Covers the 25-45 and
+    //      >45 bands, plus a floored 0.5-10/10-25 band. (When an overshoot
     //      confirm armed the settle itself, that window still stands — this only
     //      skips the ladder's own extension.)
     if (m_pendingCeiling == 0 && action > static_cast<unsigned int>(ABR_MIN_BITRATE_KBPS)) {
@@ -801,7 +854,7 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
         // shared ABR_DECREASE_FACTOR so a drained queue actually costs 20%.
         //
         // KNOWN RESIDUAL (M1, accepted): this branch does NOT check isOvershoot(),
-        // so a queue-led overshoot that drains before any loss (qdelay>400ms
+        // so a queue-led overshoot that drains before any loss (qdelay>200ms
         // while rtt-min<ABR_RTT_HIGH_THRESHOLD_MS, so rttHigh has not fired) sets
         // ABR_DECREASE and the ceiling is never learned for it -> a mild sawtooth
         // on this one path. Left as-is deliberately (plan Phase 06 scoped only

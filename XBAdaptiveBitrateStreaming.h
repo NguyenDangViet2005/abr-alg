@@ -125,7 +125,7 @@ signals:
     // PART B — a reset is warranted. The executor lives in XBQoSService (this
     // class owns no video socket): the factory relays this signal and the
     // service maps it to CameraControl::requestStreamRefresh. Emitted from the
-    // ladder's >70% band, rate-limited at the emit site (m_lastResetMs).
+    // ladder's reset band (> ABR_LOSS_RESET_PCT), rate-limited at the emit site (m_lastResetMs).
     void requestStreamReset(const QString &iface, const QString &reason);
 
 private:
@@ -253,9 +253,9 @@ private:
     // delta (a region-independent bufferbloat gauge) — 500ms of STANDING queue is
     // heavy lag, and the delta already discounts baseline latency, so there is
     // nothing to "tolerate" by raising it. Phase 06 briefly raised it to 700;
-    // reverted (let video lag ~1s before braking, out of tune with the 400ms
-    // drain-time gate in checkSenderQueue). A false decrease is cheap (×0.80 +
-    // settle); a miss is dear.
+    // reverted (let video lag ~1s before braking, out of tune with the drain-time
+    // gate in checkSenderQueue — now 200ms after 2026-10-12). A false decrease is
+    // cheap (×0.80 + settle); a miss is dear.
     //
     // ABR_DECREASE_FACTOR (0.80, xbfirm): the ONE gentle-decrease factor, shared
     // by the three decrease paths (weak loss, rttHigh bufferbloat, qdelay
@@ -301,7 +301,7 @@ private:
     // triggers a weak-link drop; the ladder keys on video loss only.)
     // ABR_LOSS_WINDOW_TICKS (5, Phase 08 A): the VIDEO loss percent is a
     // Σlost/ΣsegsOut over this many ticks. The video flow sends only ~70-80 segs
-    // per tick, so a single lost packet reads as ~1.3% — over the 0.8% trigger.
+    // per tick, so a single lost packet reads as ~1.3% — over the 0.5% trigger.
     // At 5×70=350 segments one packet is 0.29%. VIDEO only — the C2 slot's ~550
     // segs/tick denominator is already adequate.
 
@@ -383,6 +383,20 @@ private:
     // both — reset() (M1) and the telemetry-collapse branch (M2). Inert above MIN
     // — the normal 1-tick ramp is unchanged there.
     int    m_cleanRecoveryTicks = 0;
+
+    // ── Phase 12: score-cliff -> TCP video socket restart (PORT DEVIATION) ──
+    // m_scoreHistory: last ABR_SCORE_CLIFF_WINDOW_TICKS VIDEO scores; its max() is
+    // the "recent peak" baseline. Fed in handleRouterRow (VIDEO branch) ONLY when
+    // isMptcp is true — a non-MPTCP row carries score=0 by design (see
+    // ScoringModule), which is "not applicable", not a collapse; feeding it would
+    // fire a spurious restart on every MPTCP blip.
+    // m_scoreCliffStreak: consecutive ticks whose drop-from-peak >= delta. Fires
+    // once the streak reaches ABR_SCORE_CLIFF_CONFIRM_TICKS (rising-edge + debounce),
+    // then stays latched (m_scoreCliffFired) until the cliff clears, so one collapse
+    // = one restart.
+    QVector<double> m_scoreHistory;
+    int  m_scoreCliffStreak = 0;
+    bool m_scoreCliffFired  = false;
 
     // Advisor coefficients. xbfirm's CellularPredictive drove these; with no
     // predictor they stay at xbfirm's ctor defaults (1.0). gainUp=1.0 gives the

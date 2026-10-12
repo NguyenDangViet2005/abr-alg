@@ -148,19 +148,22 @@ void XBQoSService::setupConnections()
         // the primary's number — a spare interface's proposal never lands here.
         connect(m_abrFactory, &ABRFactory::routerAbrEffectiveBitrate, this, handleBitrateChange);
 
-        // ── Router ABR stream-reset → camera refresh (Phase 11) ──────────
-        // The loss ladder's >70% band asks the camera to refresh the stream.
-        // The instance owns no socket, so the executor lives here — mirroring the
-        // SRT requestKeyframe → requestStreamRefresh connect above. Already
-        // rate-limited at the instance's emit site (ABR_RESET_RATE_LIMIT_MS), so
-        // this lambda stays dumb. Guarded on a live bitrate: no refresh while the
-        // camera is disabled (PAUSE).
+        // ── Router ABR stream-reset → camera video-socket restart (Phase 11/12) ──
+        // Two emit sites reach here, both rate-limited by the SHARED 30s token at
+        // the instance (ABR_RESET_RATE_LIMIT_MS): the loss ladder's reset band
+        // (> ABR_LOSS_RESET_PCT) and the Phase-12 score cliff. requestStreamRefresh
+        // is now a HARD socket restart (POST /connections/video/restart), NOT an
+        // adapt-bitrate re-apply — the ladder owns the bitrate. The instance owns no
+        // socket, so the executor lives here — mirroring the SRT requestKeyframe →
+        // requestStreamRefresh connect above. Lambda stays dumb (already rate-limited
+        // at the emit site). Guarded on a live bitrate: no restart while the camera
+        // is disabled (PAUSE).
         connect(m_abrFactory, &ABRFactory::routerAbrResetRequested, this,
                 [this](const QString &iface, const QString &reason) {
             if (m_cameraControl && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
                 qWarning().noquote() << QString("[QoS Engine] ABR reset requested (iface=%1, %2) "
-                                                "— refreshing camera stream at %3 kbps")
-                                            .arg(iface).arg(reason).arg(m_currentBitrate);
+                                                "— restarting camera video socket")
+                                            .arg(iface).arg(reason);
                 m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
             }
         });

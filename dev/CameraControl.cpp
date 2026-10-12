@@ -14,6 +14,14 @@ static const QString CAMERA_ADAPT_BITRATE_URL = QString("http://%1:%2%3")
     .arg(CAMERA_ADAPT_BITRATE_PORT)
     .arg(CAMERA_ADAPT_BITRATE_PATH);
 
+// xbfirm video-socket restart endpoint (HTTP POST, no body). Drops + reopens the
+// camera's video WebSocket, which sends an RST and clears the TCP retransmit
+// queue — the only userspace cure for retransmit head-of-line blocking.
+static const QString CAMERA_VIDEO_RESTART_URL = QString("http://%1:%2%3")
+    .arg(CAMERA_VIDEO_RESTART_HOST)
+    .arg(CAMERA_VIDEO_RESTART_PORT)
+    .arg(CAMERA_VIDEO_RESTART_PATH);
+
 CameraControl::CameraControl(QObject *parent)
     : QObject{parent}
     , m_nam(new QNetworkAccessManager(this))
@@ -104,5 +112,39 @@ void CameraControl::sendAdaptBitrate(int bitrate)
 
 void CameraControl::requestStreamRefresh(int currentBitrateKbps)
 {
-    sendAdaptBitrate(currentBitrateKbps);
+    // Phase 12 (PORT DEVIATION): a stream "refresh" is now a HARD TCP socket
+    // restart, not an adapt-bitrate re-apply. Restarting the socket aborts the old
+    // connection (RST) and discards its retransmit queue — the only userspace fix
+    // for TCP retransmit HOL blocking that starves realtime video. The bitrate is
+    // NOT changed here; the ladder owns the bitrate decision.
+    Q_UNUSED(currentBitrateKbps);
+
+    // Supersede any in-flight restart (same rationale as sendAdaptBitrate: the
+    // camera would otherwise act on both, older reply landing last).
+    if (m_currentReply && m_currentReply->isRunning()) {
+        m_currentReply->disconnect();
+        m_currentReply->abort();
+        m_currentReply->deleteLater();
+        m_currentReply = nullptr;
+    }
+
+    const QString url = CAMERA_VIDEO_RESTART_URL;
+    QNetworkRequest request{QUrl(url)};
+    request.setTransferTimeout(2000);
+
+    qWarning().noquote() << QString("[CameraControl] -> POST %1 (video socket restart)").arg(url);
+
+    QNetworkReply *reply = m_nam->post(request, QByteArray());   // empty body
+    m_currentReply = reply;
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
+        if (m_currentReply == reply) m_currentReply = nullptr;
+        if (reply->error() != QNetworkReply::NoError
+            && reply->error() != QNetworkReply::OperationCanceledError) {
+            qWarning().noquote() << QString("[CameraControl] video restart FAILED (%1): %2")
+                                        .arg(url).arg(reply->errorString());
+        } else {
+            qInfo().noquote() << QString("[CameraControl] <- video socket restart OK (%1)").arg(url);
+        }
+        reply->deleteLater();
+    });
 }
