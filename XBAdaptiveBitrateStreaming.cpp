@@ -604,7 +604,7 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
             m_lastResetMs = now;
             qWarning().nospace() << "[ABR][" << m_iface << "] loss " << tcpi.loss_rate
                                  << "% > " << ABR_LOSS_RESET_PCT << "% — requesting stream reset";
-            emit requestStreamReset(m_iface, QStringLiteral("loss>70"));
+            emit requestStreamReset(m_iface, QStringLiteral("loss>reset_pct"));
         }
     }
 

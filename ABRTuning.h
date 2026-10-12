@@ -69,7 +69,8 @@
 // Ngưỡng bufferbloat (ms) cho rttHigh = video (rtt − min_rtt). 500ms hàng đợi
 // ĐỨNG yên đã là lag nặng; delta đã trừ độ trễ nền nên không cần "nới" thêm.
 // [xbfirm] (Phase 06 từng nâng lên 700 rồi hoàn nguyên — để video lag gần 1s
-// mới phanh, và lệch với cổng drain-time 400ms ở checkSenderQueue).
+// mới phanh, và lệch với cổng drain-time ở checkSenderQueue: nay 200ms sau
+// [PORT DEVIATION 2026-10-12]).
 #define ABR_RTT_HIGH_THRESHOLD_MS              500
 
 // Hệ số giảm "nhẹ nhàng" DUY NHẤT, dùng chung cho 3 đường giảm (loss yếu,
@@ -87,8 +88,11 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 // Ngưỡng qdelay CAO (ms): hàng đợi sender vượt mức này → coi là tắc nghẽn.
-// [xbfirm]
-#define ABR_QUEUE_DELAY_HIGH_THRESHOLD_MS      400.0
+// [PORT DEVIATION 2026-10-12] 400 → 200: field test cho thấy drain-time ~150ms
+// đã gây đơ/giật (drain-time là proxy độ trễ hàng đợi gửi, không phải RTT−minRtt).
+// 400 để lọt vùng 150–400 vào nhánh "moderate" (chỉ HOLD, không giảm). Hạ về 200
+// để phanh sớm; giữ LOW=100 nên đệm HIGH−LOW = 100ms (chống rung giảm↔tăng).
+#define ABR_QUEUE_DELAY_HIGH_THRESHOLD_MS      200.0
 // Ngưỡng qdelay THẤP (ms): dưới mức này → link thông. [xbfirm]
 #define ABR_QUEUE_DELAY_LOW_THRESHOLD_MS       100.0
 // Sau khi giảm bitrate, qdelay phải tụt xuống dưới mức này mới coi là hết tắc.
@@ -111,32 +115,37 @@
 // Số mẫu RTT giữ lại để tính jitter. [xbfirm]
 #define ABR_RTT_HISTORY_SIZE                   10
 // Ngưỡng loss VIDEO (%) để coi là "mất gói": vượt mức này → xét giảm.
-// [xbfirm] (xbfirm dùng 0.8).
-#define ABR_VIDEO_LOSS_TRIGGER_PCT             0.8
+// [PORT DEVIATION 2026-10-12] 0.8 → 0.5: phản ứng sớm hơn (~2 gói/5-tick thay
+// vì ~3). Vẫn trên sàn nhiễu 1 gói = 1/350 ≈ 0.29% (ABR_LOSS_WINDOW_TICKS=5).
+// Đây là biên "clean" của ladder (ABRLossBand.h) VÀ cổng vào haveLostPackets.
+#define ABR_VIDEO_LOSS_TRIGGER_PCT             0.5
 // Loss (%) coi là "sụp" nặng → đưa status về BUFFERING. [xbfirm]
 #define ABR_SEVERE_LOSS_PCT                    5.0
 
 // ── Phase 11: LOSS LADDER (PORT DEVIATION) ───────────────────────────────
 // Video loss% -> bước giảm (bảng dải; logic thuần ở ABRLossBand.h):
-//   <= 0.8      sạch (ABR_VIDEO_LOSS_TRIGGER_PCT; không đổi)
-//   0.8 .. 20   current - ABR_LOSS_MILD_STEP_KBPS (sàn MIN)
-//   20 .. 50    current * ABR_LOSS_HALVE_FACTOR   (sàn MIN)
-//   50 .. 70    MIN
-//   > 70        MIN + requestStreamReset (rate-limit ABR_RESET_RATE_LIMIT_MS)
-// Bước giảm "nhẹ" (kbps) cho dải 0.8..20%. Trừ THẲNG, không theo tỉ lệ — ở
+//   <= 0.5      sạch (ABR_VIDEO_LOSS_TRIGGER_PCT; không đổi)
+//   0.5 .. 10   current - ABR_LOSS_MILD_STEP_KBPS (sàn MIN)
+//   10 .. 25    current * ABR_LOSS_HALVE_FACTOR   (sàn MIN)
+//   25 .. 45    MIN
+//   > 45        MIN + requestStreamReset (rate-limit ABR_RESET_RATE_LIMIT_MS)
+// [PORT DEVIATION 2026-10-12] biên siết lại từ 0.8/20/50/70: 10% loss đã nát
+// hình, dải "nhẹ" 20% cũ quá rộng. Trigger 0.8→0.5 (~2 gói/5-tick) vẫn trên
+// sàn nhiễu 0.29%.
+// Bước giảm "nhẹ" (kbps) cho dải 0.5..10%. Trừ THẲNG, không theo tỉ lệ — ở
 // bitrate thấp (<= 230) sẽ chạm sàn MIN; chấp nhận theo luật người dùng.
 #define ABR_LOSS_MILD_STEP_KBPS                200
 // Trần dải "nhẹ" (%). loss > mức này -> giảm 50%.
-#define ABR_LOSS_MILD_MAX_PCT                  20
+#define ABR_LOSS_MILD_MAX_PCT                  10
 // Trần dải "giảm 50%" (%). loss > mức này -> về MIN.
-#define ABR_LOSS_HALVE_MAX_PCT                 50
+#define ABR_LOSS_HALVE_MAX_PCT                 25
 // Hệ số giảm dải giữa. 0.50 = giảm một nửa.
 #define ABR_LOSS_HALVE_FACTOR                  0.50
 // Ngưỡng reset video socket (%). loss > mức này -> MIN + requestStreamReset;
 // loss trong (HALVE_MAX, mức này] -> MIN (không reset). Đây là MỘT biên duy
 // nhất — helper (ABRLossBand.h) lẫn log ở caller đều dùng macro này, nên không
 // thể trôi nghĩa (không tách thành 2 knob cùng giá trị).
-#define ABR_LOSS_RESET_PCT                     70
+#define ABR_LOSS_RESET_PCT                     45
 // Sau mỗi bước giảm của ladder, HOLD (ms) trước khi cho giảm tiếp (chờ link hồi).
 #define ABR_LOSS_DECREASE_SETTLE_MS            3000
 // Rate-limit (ms) giữa 2 lần emit requestStreamReset (chống loss dao động quanh

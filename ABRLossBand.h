@@ -15,14 +15,18 @@
 //
 //  | loss%      | action                                        |
 //  |------------|-----------------------------------------------|
-//  | <= 0.8     | clean (return current; caller returns false)  |
-//  | 0.8 .. 20  | current - ABR_LOSS_MILD_STEP_KBPS (floor MIN) |
-//  | 20 .. 50   | current * ABR_LOSS_HALVE_FACTOR   (floor MIN) |
-//  | 50 .. 70   | MIN                                           |
-//  | > 70       | MIN + isReset = true                          |
+//  | <= 0.5     | clean (return current; caller returns false)  |
+//  | 0.5 .. 10  | current - ABR_LOSS_MILD_STEP_KBPS (floor MIN) |
+//  | 10 .. 25   | current * ABR_LOSS_HALVE_FACTOR   (floor MIN) |
+//  | 25 .. 45   | MIN                                           |
+//  | > 45       | MIN + isReset = true                          |
 //
-//  Band edges are INCLUSIVE on the upper bound (loss == 20 -> mild,
-//  loss == 50 -> halve, loss == 70 -> MIN-without-reset).
+//  Band edges are INCLUSIVE on the upper bound (loss == 10 -> mild,
+//  loss == 25 -> halve, loss == 45 -> MIN-without-reset).
+//
+//  Boundaries are read from ABRTuning.h macros — the numbers above are the
+//  CURRENT values (tightened 2026-10-12 from 0.8/20/50/70); the table shows
+//  intent, the macros are the source of truth.
 //
 //  Sign/type: the ABR_* macros are UNTYPED (int); lossPct is double and
 //  currentKbps is unsigned, so every compare against a macro is cast

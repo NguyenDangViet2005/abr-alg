@@ -34,40 +34,40 @@ int main()
 {
     bool reset = false;
 
-    // ── clean band (<= 0.8) — helper returns current unchanged ───────────
+    // ── clean band (<= 0.5) — helper returns current unchanged ───────────
     reset = true;
-    expectEq(abrLossDecreaseAction(0.5, 1000, reset), 1000, "loss 0.5 -> clean, unchanged");
-    expectTrue(!reset, "loss 0.5 -> no reset");
-    expectEq(abrLossDecreaseAction(0.8, 1000, reset), 1000, "loss 0.8 (edge) -> clean");
+    expectEq(abrLossDecreaseAction(0.3, 1000, reset), 1000, "loss 0.3 -> clean, unchanged");
+    expectTrue(!reset, "loss 0.3 -> no reset");
+    expectEq(abrLossDecreaseAction(0.5, 1000, reset), 1000, "loss 0.5 (edge) -> clean");
 
-    // ── mild band (0.8 .. 20) — current - 200, floor MIN ────────────────
-    expectEq(abrLossDecreaseAction(0.9, 1000, reset), 800, "loss 0.9 -> 1000-200");
-    expectTrue(!reset, "loss 0.9 -> no reset");
-    expectEq(abrLossDecreaseAction(10.0, 1000, reset), 800, "loss 10 -> 1000-200");
-    expectEq(abrLossDecreaseAction(20.0, 1000, reset), 800, "loss 20 (edge) -> 1000-200");
+    // ── mild band (0.5 .. 10) — current - 200, floor MIN ────────────────
+    expectEq(abrLossDecreaseAction(0.6, 1000, reset), 800, "loss 0.6 -> 1000-200");
+    expectTrue(!reset, "loss 0.6 -> no reset");
+    expectEq(abrLossDecreaseAction(5.0, 1000, reset), 800, "loss 5 -> 1000-200");
+    expectEq(abrLossDecreaseAction(10.0, 1000, reset), 800, "loss 10 (edge) -> 1000-200");
     // MIN floor: current <= step -> MIN.
-    expectEq(abrLossDecreaseAction(10.0, 200, reset), 30, "loss 10, current 200 -> MIN floor");
-    expectEq(abrLossDecreaseAction(10.0, 150, reset), 30, "loss 10, current 150 -> MIN floor");
+    expectEq(abrLossDecreaseAction(5.0, 200, reset), 30, "loss 5, current 200 -> MIN floor");
+    expectEq(abrLossDecreaseAction(5.0, 150, reset), 30, "loss 5, current 150 -> MIN floor");
     // MIN floor with a nonzero-but-sub-floor remainder (0 < next < MIN).
-    expectEq(abrLossDecreaseAction(10.0, 220, reset), 30, "loss 10, current 220 -> 20 floored to MIN");
+    expectEq(abrLossDecreaseAction(5.0, 220, reset), 30, "loss 5, current 220 -> 20 floored to MIN");
 
-    // ── halve band (20 .. 50) — current * 0.50, floor MIN ───────────────
-    expectEq(abrLossDecreaseAction(20.1, 1000, reset), 500, "loss 20.1 -> 1000*0.50");
-    expectTrue(!reset, "loss 20.1 -> no reset");
-    expectEq(abrLossDecreaseAction(35.0, 1000, reset), 500, "loss 35 -> 1000*0.50");
-    expectEq(abrLossDecreaseAction(50.0, 1000, reset), 500, "loss 50 (edge) -> 1000*0.50");
-    expectEq(abrLossDecreaseAction(35.0, 50, reset), 30, "loss 35, current 50 -> MIN floor");
+    // ── halve band (10 .. 25) — current * 0.50, floor MIN ───────────────
+    expectEq(abrLossDecreaseAction(10.1, 1000, reset), 500, "loss 10.1 -> 1000*0.50");
+    expectTrue(!reset, "loss 10.1 -> no reset");
+    expectEq(abrLossDecreaseAction(18.0, 1000, reset), 500, "loss 18 -> 1000*0.50");
+    expectEq(abrLossDecreaseAction(25.0, 1000, reset), 500, "loss 25 (edge) -> 1000*0.50");
+    expectEq(abrLossDecreaseAction(18.0, 50, reset), 30, "loss 18, current 50 -> MIN floor");
 
-    // ── MIN band (50 .. 70) — MIN, no reset ─────────────────────────────
-    expectEq(abrLossDecreaseAction(50.1, 1000, reset), 30, "loss 50.1 -> MIN");
-    expectTrue(!reset, "loss 50.1 -> no reset");
-    expectEq(abrLossDecreaseAction(70.0, 1000, reset), 30, "loss 70 (edge) -> MIN, no reset");
-    expectTrue(!reset, "loss 70 -> no reset");
+    // ── MIN band (25 .. 45) — MIN, no reset ─────────────────────────────
+    expectEq(abrLossDecreaseAction(25.1, 1000, reset), 30, "loss 25.1 -> MIN");
+    expectTrue(!reset, "loss 25.1 -> no reset");
+    expectEq(abrLossDecreaseAction(45.0, 1000, reset), 30, "loss 45 (edge) -> MIN, no reset");
+    expectTrue(!reset, "loss 45 -> no reset");
 
-    // ── reset band (> 70) — MIN + isReset ───────────────────────────────
+    // ── reset band (> 45) — MIN + isReset ───────────────────────────────
     reset = false;
-    expectEq(abrLossDecreaseAction(70.1, 1000, reset), 30, "loss 70.1 -> MIN");
-    expectTrue(reset, "loss 70.1 -> reset set");
+    expectEq(abrLossDecreaseAction(45.1, 1000, reset), 30, "loss 45.1 -> MIN");
+    expectTrue(reset, "loss 45.1 -> reset set");
     reset = false;
     expectEq(abrLossDecreaseAction(95.0, 1000, reset), 30, "loss 95 -> MIN");
     expectTrue(reset, "loss 95 -> reset set");
