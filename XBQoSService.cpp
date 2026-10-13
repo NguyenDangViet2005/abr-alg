@@ -133,7 +133,20 @@ void XBQoSService::setupConnections()
                 qWarning().noquote() << QString("[C2 Priority] %1").arg(name);
             }
         });
+        // Phase 12 (H1 fix): requestStreamRefresh is now a HARD socket restart, so
+        // this SRT keyframe ask must respect the SAME ROUTER_ABR_OWNS_CAMERA gate as
+        // bitrateChanged above. The SRT engine emits requestKeyframe on congestion
+        // transitions with cooldowns of only 800ms–4s and NO 30s token — if it ever
+        // fires, an un-gated connect here would restart the video socket every few
+        // seconds = permanent video outage, bypassing the router ABR's rate limit.
+        // SRT is not implemented today (its 12345 path is inert), so this is a
+        // latent-bug guard, not a live fix.
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this]() {
+            if (ROUTER_ABR_OWNS_CAMERA) {
+                qInfo().noquote() << "[QoS Engine] ROUTER_ABR_OWNS_CAMERA: SRT keyframe ask "
+                                     "ignored (would restart the video socket).";
+                return;
+            }
             if (m_cameraControl && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
                 m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
             }
@@ -165,6 +178,14 @@ void XBQoSService::setupConnections()
                                                 "— restarting camera video socket")
                                             .arg(iface).arg(reason);
                 m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
+                // Phase 12: mark the restart moment on the dashboard. Tapped HERE (next
+                // to the actual restart, camera-enabled guard passed) so the event means
+                // "restart executed", not merely "requested". The dashboard already
+                // decodes QS_EVT_SOCKET_RESET_REQUEST (=6) into its event log; detail =
+                // the ABR reason ("score-cliff" | "loss>reset_pct").
+                if (m_qosDebug) {
+                    m_qosDebug->handleEvent(iface, QS_EVT_SOCKET_RESET_REQUEST, reason);
+                }
             }
         });
 
@@ -183,6 +204,9 @@ void XBQoSService::setupConnections()
         // Radio strength (row 603) → the owning instance's NetworkReference.
         connect(m_routerNetworkHandler, &RouterNetworkHandler::onNetworkStrength,
                 m_abrFactory, &ABRFactory::handleNetworkStrength);
+        // GPS fix (row 604, GLOBAL) → BROADCAST to every instance's NetworkReference.
+        connect(m_routerNetworkHandler, &RouterNetworkHandler::onGpsFix,
+                m_abrFactory, &ABRFactory::handleGpsFix);
 
         // QoS debug channel taps the SAME signals. It only reads, so the tap
         // order relative to the factory does not matter.

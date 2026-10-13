@@ -138,12 +138,14 @@ void CameraControl::requestStreamRefresh(int currentBitrateKbps)
     m_currentReply = reply;
     QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
         if (m_currentReply == reply) m_currentReply = nullptr;
-        if (reply->error() != QNetworkReply::NoError
-            && reply->error() != QNetworkReply::OperationCanceledError) {
+        if (reply->error() == QNetworkReply::NoError) {
+            qInfo().noquote() << QString("[CameraControl] <- video socket restart OK (%1)").arg(url);
+        } else if (reply->error() == QNetworkReply::OperationCanceledError) {
+            // Superseded by a newer restart — neither success nor failure. Stay quiet.
+            qInfo().noquote() << QString("[CameraControl] video socket restart superseded (%1)").arg(url);
+        } else {
             qWarning().noquote() << QString("[CameraControl] video restart FAILED (%1): %2")
                                         .arg(url).arg(reply->errorString());
-        } else {
-            qInfo().noquote() << QString("[CameraControl] <- video socket restart OK (%1)").arg(url);
         }
         reply->deleteLater();
     });

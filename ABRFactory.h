@@ -62,6 +62,12 @@ public slots:
     // name is the declared-vs-seen mismatch — warn, do not swallow.
     void handleNetworkStrength(const QString &name, int strength);
 
+    // A GLOBAL GPS fix (row 604). GPS carries no interface name — the same fix
+    // is true for every interface — so this BROADCASTS to every instance rather
+    // than routing by name. Each instance's NetworkReference keeps its own
+    // anchor (the position at ITS ceiling-learn), so the verdict stays per-link.
+    void handleGpsFix(double lat, double lon);
+
     // A per-interface router-ABR proposal. Only the PRIMARY interface's
     // proposal is effective; the others are logged as spare (future failover).
     // The effective one is relayed on routerAbrEffectiveBitrate, which is what

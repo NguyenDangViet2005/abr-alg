@@ -52,6 +52,13 @@ signals:
     // distinct. Routed by name to the owning ABR instance.
     void onNetworkStrength(const QString &name, int strength);
 
+    // The GPS row (604) — a GLOBAL fix: latitude + longitude, no interface name.
+    // Separate from onNetworkStrength because GPS is one fix for the whole
+    // vehicle (every interface shares it), not per-modem; the factory broadcasts
+    // it to every ABR instance rather than routing by name. Mirrors how PRIMARY
+    // (602) is a single global row.
+    void onGpsFix(double lat, double lon);
+
 private slots:
     void handleUdpReadyRead();
 

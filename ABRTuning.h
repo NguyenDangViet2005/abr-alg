@@ -232,4 +232,10 @@
 // (không phải wall-clock) để dưới im lặng thì đóng băng, không tự đủ. [PORT DEVIATION]
 #define ABR_STRENGTH_CONFIRM_TICKS             5
 
+// Mốc bỏ trần bằng GPS (604): khi vị trí HIỆN TẠI cách vị trí lúc HỌC trần
+// ≥ ngưỡng này (mét) → môi trường đã đổi → được phép bỏ trần. 500 m ≫ jitter GPS
+// (~mét) nên ngưỡng TỰ là debounce, không cần đếm tick. Dùng staleness chung
+// ABR_STRENGTH_STALE_MS (5s) cho fix cũ. [PORT DEVIATION]
+#define ABR_GPS_MOVE_METERS                    500.0
+
 #endif // ABRTUNING_H

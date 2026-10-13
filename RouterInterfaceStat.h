@@ -21,11 +21,16 @@
 //                   9 = no info. The router reserves this kind but emits nothing
 //                   yet (no RSSI source), so it stays silent until a real value
 //                   exists — see NetworkReference.h.
+//   GPS          -> TWO fields: <lat>#<lon>, %.6f signed. GLOBAL (no name — one
+//                   fix for the whole vehicle). No-fix = ABSENT packet. The
+//                   router reserves this kind but emits nothing yet (no GPS
+//                   source) — see NetworkReference.h.
 enum class ConnType : int {
     VIDEO       = 0,   // 600
     C2          = 1,   // 601
     PRIMARY     = 2,   // 602
-    NETWORK_REF = 3    // 603
+    NETWORK_REF = 3,   // 603
+    GPS         = 4    // 604
 };
 
 // One VIDEO or C2 row from the router — its own per-interface view of the link.

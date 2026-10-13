@@ -185,7 +185,7 @@ void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddr
     const QString payload = QString::fromUtf8(data.mid(DATAGRAM_ID_LEN + 1)).trimmed();
     const QStringList fields = payload.split('#');
 
-    if (connTypeRaw < 0 || connTypeRaw > 3) {
+    if (connTypeRaw < 0 || connTypeRaw > 4) {
         // A connType outside the defined values means the router and this parser
         // have diverged. Logged distinctly but parsing continues so the raw
         // payload is visible to diagnose the mismatch.
@@ -231,6 +231,25 @@ void RouterNetworkHandler::parseDatagram(const QByteArray &data, const QHostAddr
         qDebug().nospace() << "[ROUTER][RX]   networkStrength name=" << name
                            << " strength=" << strength;
         emit onNetworkStrength(name, strength);
+        return;
+    }
+
+    if (connType == ConnType::GPS) {
+        // GPS's payload is <lat>#<lon> — a 2-field packet, GLOBAL (no name), so
+        // like PRIMARY and NETWORK_REF it self-returns and never enters emitRow's
+        // 22-field path. A malformed fix is fail-closed: no emit at all, so the
+        // consumer's staleness timer reads it as "no fix" (never a bogus 0,0).
+        bool okLat = false, okLon = false;
+        const double lat = fields.value(0).toDouble(&okLat);
+        const double lon = fields.value(1).toDouble(&okLon);
+        if (!okLat || !okLon) {
+            qWarning().nospace() << "[ROUTER][RX] GPS bad fix '"
+                                 << fields.value(0) << "#" << fields.value(1)
+                                 << "' — dropped (no emit)";
+            return;
+        }
+        qDebug().nospace() << "[ROUTER][RX]   gpsFix lat=" << lat << " lon=" << lon;
+        emit onGpsFix(lat, lon);
         return;
     }
 

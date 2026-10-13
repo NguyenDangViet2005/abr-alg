@@ -91,6 +91,10 @@ public slots:
     // interpretation (baseline, staleness, debounce).
     void handleNetworkStrength(int strength);
 
+    // GLOBAL GPS fix (packet 604), BROADCAST to every instance (no name). Pushed
+    // straight into the NetworkReference; the ref owns the move-vs-anchor logic.
+    void handleGpsFix(double lat, double lon);
+
     // xbfirm handleSerialStatus, verbatim. The telemetry SOURCE's connection
     // state drives _haveTelemetry. The router port has no serial link, so the
     // ctor seeds _haveTelemetry from m_isC2Configured (a DEPLOYMENT fact set in
@@ -390,13 +394,22 @@ private:
     // isMptcp is true — a non-MPTCP row carries score=0 by design (see
     // ScoringModule), which is "not applicable", not a collapse; feeding it would
     // fire a spurious restart on every MPTCP blip.
-    // m_scoreCliffStreak: consecutive ticks whose drop-from-peak >= delta. Fires
-    // once the streak reaches ABR_SCORE_CLIFF_CONFIRM_TICKS (rising-edge + debounce),
-    // then stays latched (m_scoreCliffFired) until the cliff clears, so one collapse
-    // = one restart.
+    // m_scoreCliffStreak: consecutive ticks whose drop-from-peak >= delta, for the
+    // ABR_SCORE_CLIFF_CONFIRM_TICKS debounce.
+    // m_scoreCliffPending / m_scoreCliffBaseline: once the streak confirms, the peak
+    // is FROZEN into m_scoreCliffBaseline and the episode goes PENDING. While pending
+    // the detector retries the shared 30s token every tick and fires the moment it
+    // frees — WITHOUT re-testing the rolling cliff. That matters because the rolling
+    // peak ages out of the 5-sample window in ~5 ticks, so a retry keyed on it would
+    // die long before a held 30s token frees (M4). Pending ends on emit or on a real
+    // recovery (score climbs back above frozenBaseline - delta).
+    // m_scoreCliffFired: latched after an emit so one collapse = one restart; cleared
+    // when the score recovers.
     QVector<double> m_scoreHistory;
-    int  m_scoreCliffStreak = 0;
-    bool m_scoreCliffFired  = false;
+    int    m_scoreCliffStreak   = 0;
+    bool   m_scoreCliffPending  = false;
+    double m_scoreCliffBaseline = 0.0;
+    bool   m_scoreCliffFired    = false;
 
     // Advisor coefficients. xbfirm's CellularPredictive drove these; with no
     // predictor they stay at xbfirm's ctor defaults (1.0). gainUp=1.0 gives the

@@ -203,9 +203,11 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_reprobeInFlight = false;
 
     // Phase 12: a fresh session has no score history and no in-flight cliff — a
-    // stale latch would suppress the first restart request of the new session.
+    // stale latch or pending episode would suppress the first restart of the session.
     m_scoreHistory.clear();
     m_scoreCliffStreak = 0;
+    m_scoreCliffPending = false;
+    m_scoreCliffBaseline = 0.0;
     m_scoreCliffFired = false;
 }
 
@@ -235,7 +237,7 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
         // ── Phase 12: score-cliff -> TCP video socket restart (PORT DEVIATION) ──
         // A ≥ABR_SCORE_CLIFF_DELTA drop from the recent peak means the stream is
         // likely wedged (TCP retransmit head-of-line blocking); a socket restart is
-        // the only userspace fix. Two guards keep it from firing on noise:
+        // the only userspace fix. Guards keep it from firing on noise:
         //   * SKIP a non-MPTCP row. Score is 0.0 BY DESIGN then (ScoringModule
         //     comment: "score 0 says known-bad when the truth is not applicable"),
         //     written straight into the EMA that goes on the wire — so a lone MPTCP
@@ -245,36 +247,91 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
         //     wire score is already EMA(alpha=0.5), so one noisy tick cannot drop it
         //     50; but 2-3 consecutive bad ticks can. A real collapse is persistent,
         //     so demanding a short streak costs nothing real and filters the noise.
-        // Fires once per collapse (m_scoreCliffFired latch resets only when the
-        // cliff clears), rate-limited by the SHARED 30s token (m_lastResetMs) so it
-        // can never double with the loss>45% path.
+        // Rate-limited by the SHARED 30s token (m_lastResetMs) so it can never double
+        // with the loss>45% path.
         if (row.isMptcp) {
             m_scoreHistory.append(row.score);
             while (m_scoreHistory.size() > static_cast<int>(ABR_SCORE_CLIFF_WINDOW_TICKS))
                 m_scoreHistory.removeFirst();
-            double baseline = 0.0;
-            for (double s : m_scoreHistory) baseline = qMax(baseline, s);
+            double peak = 0.0;
+            for (double s : m_scoreHistory) peak = qMax(peak, s);
 
-            const bool cliff = abrScoreCliff(baseline, row.score,
-                                             static_cast<double>(ABR_SCORE_CLIFF_DELTA));
-            if (cliff) {
-                if (m_scoreCliffStreak < ABR_SCORE_CLIFF_CONFIRM_TICKS) ++m_scoreCliffStreak;
-                if (m_scoreCliffStreak >= ABR_SCORE_CLIFF_CONFIRM_TICKS && !m_scoreCliffFired) {
-                    m_scoreCliffFired = true;
+            if (m_scoreCliffPending) {
+                // Confirmed episode, waiting for the shared token to free. Test the
+                // FROZEN baseline, not the rolling peak (which ages out in ~5 ticks
+                // and would end the retry long before a held 30s token frees).
+                if (abrScoreCliff(m_scoreCliffBaseline, row.score,
+                                  static_cast<double>(ABR_SCORE_CLIFF_DELTA))) {
                     const qint64 now = m_clock.elapsed();
                     if (now - m_lastResetMs >= static_cast<qint64>(ABR_RESET_RATE_LIMIT_MS)) {
                         m_lastResetMs = now;
+                        m_scoreCliffPending = false;
+                        m_scoreCliffFired = true;
                         qWarning().nospace() << "[ABR][" << m_iface << "] score cliff: peak "
-                                             << baseline << " -> " << row.score << " (delta >= "
-                                             << ABR_SCORE_CLIFF_DELTA << ") — requesting video socket restart";
+                                             << m_scoreCliffBaseline << " -> " << row.score
+                                             << " (delta >= " << ABR_SCORE_CLIFF_DELTA
+                                             << ") — requesting video socket restart";
                         emit requestStreamReset(m_iface, QStringLiteral("score-cliff"));
                     }
+                    // else: still rate-limited — stay pending, retry next tick.
+                } else {
+                    // Recovered above the frozen baseline: the wedge cleared before a
+                    // token freed. Drop the episode — no restart (correct).
+                    m_scoreCliffPending = false;
+                    m_scoreCliffStreak = 0;
+                    m_scoreCliffFired = false;
                 }
             } else {
-                // Recovered above the cliff: re-arm the detector for the next collapse.
-                m_scoreCliffStreak = 0;
-                m_scoreCliffFired = false;
+                const bool cliff = abrScoreCliff(peak, row.score,
+                                                 static_cast<double>(ABR_SCORE_CLIFF_DELTA));
+                if (cliff) {
+                    if (m_scoreCliffStreak < ABR_SCORE_CLIFF_CONFIRM_TICKS) ++m_scoreCliffStreak;
+                    if (m_scoreCliffStreak >= ABR_SCORE_CLIFF_CONFIRM_TICKS && !m_scoreCliffFired) {
+                        // Confirmed: freeze the peak and go pending. If the token is
+                        // free NOW, emit this tick; otherwise the pending branch above
+                        // retries every tick until it frees.
+                        m_scoreCliffBaseline = peak;
+                        m_scoreCliffPending = true;
+                        const qint64 now = m_clock.elapsed();
+                        if (now - m_lastResetMs >= static_cast<qint64>(ABR_RESET_RATE_LIMIT_MS)) {
+                            m_lastResetMs = now;
+                            m_scoreCliffPending = false;
+                            m_scoreCliffFired = true;
+                            qWarning().nospace() << "[ABR][" << m_iface << "] score cliff: peak "
+                                                 << peak << " -> " << row.score << " (delta >= "
+                                                 << ABR_SCORE_CLIFF_DELTA
+                                                 << ") — requesting video socket restart";
+                            emit requestStreamReset(m_iface, QStringLiteral("score-cliff"));
+                        } else {
+                            qInfo().nospace() << "[ABR][" << m_iface << "] score cliff confirmed (peak "
+                                              << peak << " -> " << row.score
+                                              << ") but rate-limited — will retry each tick";
+                        }
+                    }
+                } else {
+                    // Recovered above the cliff: re-arm the detector for the next collapse.
+                    m_scoreCliffStreak = 0;
+                    m_scoreCliffFired = false;
+                }
             }
+        } else {
+            // A non-MPTCP row is a stream discontinuity (score 0 by design, see
+            // above). The window is sample-COUNT based, not time based, so a stale
+            // peak could survive a long MPTCP gap and fire against a minutes-old
+            // peak the moment MPTCP resumes. Invalidate the whole episode — window,
+            // streak, pending state AND the fired latch — so the next MPTCP tick
+            // starts a fresh baseline and a wedge must re-confirm from scratch (the
+            // 30s token still bounds how often a restart can actually go out).
+            //
+            // ACCEPTED TRADE-OFF (M5): if a 1-tick MPTCP blip lands mid-wedge, this
+            // wipes the confirmed episode and the wedge re-confirms from scratch —
+            // costing ABR_SCORE_CLIFF_CONFIRM_TICKS extra ticks. A real wedge is
+            // persistent (score stays collapsed), so it re-confirms immediately; the
+            // blip-vs-wedge distinction is not worth a time-based grace window (KISS).
+            m_scoreHistory.clear();
+            m_scoreCliffStreak = 0;
+            m_scoreCliffPending = false;
+            m_scoreCliffFired = false;
         }
 
         // VIDEO row -> xbfirm's 11-arg processTCPInfo. The router's raw block
@@ -364,6 +421,14 @@ void XBAdaptiveBitrateStreaming::handleNetworkStrength(int strength)
     // Radio strength for THIS interface (603), routed by name from the factory.
     // The ref owns all interpretation; this slot is just the push point.
     m_networkRef.setStrength(strength);
+}
+
+void XBAdaptiveBitrateStreaming::handleGpsFix(double lat, double lon)
+{
+    // GLOBAL GPS fix (604) — no interface name, so the factory BROADCASTS it to
+    // every instance (unlike 603's route-by-name). Each instance keeps its own
+    // anchor (snapshotted at ITS ceiling-learn); the ref owns all interpretation.
+    m_networkRef.setGps(lat, lon);
 }
 
 void XBAdaptiveBitrateStreaming::handleSerialStatus(bool isConnected)
@@ -1146,8 +1211,9 @@ bool XBAdaptiveBitrateStreaming::allowExceedCeiling() const
     // ceiling was learned — the strength baseline recorded at the learn instant
     // is LOWER than the current strength (baseline < now), held for a debounce
     // window. Absence of info (stale 603, strength==9, or no baseline yet) is
-    // false, so the default is HOLD. GPS (packet 604) is deferred and becomes an
-    // EXTRA gate later, not a prerequisite.
+    // false, so the default is HOLD. GPS (packet 604) is the sibling escape:
+    // environmentChanged() ORs in gpsMoved(), so a ≥ ABR_GPS_MOVE_METERS move
+    // since the ceiling-learn lifts the ceiling on its own.
     //
     // Phase 08 (C): OR-in the FALLBACK, which only ever fires while there is NO
     // strength source at all (see ceilingReprobeDue). When a 603 exists the
@@ -1162,8 +1228,13 @@ bool XBAdaptiveBitrateStreaming::ceilingReprobeDue() const
     // environmentChanged() is permanently false and a learned ceiling would hold
     // forever (permanent underuse). Re-probe after the current backoff of clean
     // holds; a re-overshoot re-latches and doubles the wait. Disabled the moment
-    // a real level is being read — the primary path owns the escape then.
-    if (m_networkRef.hasUsableStrength()) return false;
+    // a real signal is being read — the primary path owns the escape then.
+    //
+    // Phase 13: GPS counts as a real signal too. A fresh fix means the move gate
+    // is live (environmentChanged() can fire on its own), so the fallback must
+    // stand down — otherwise it would re-probe on a timer behind the move gate's
+    // back, defeating the "a real signal owns the escape" rule.
+    if (m_networkRef.hasUsableStrength() || m_networkRef.hasUsableGps()) return false;
     if (m_ceilingHoldSince == 0) return false;
     return (m_clock.elapsed() - m_ceilingHoldSince) >= m_ceilingReprobeBackoffMs;
 }

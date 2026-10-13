@@ -157,6 +157,19 @@ void ABRFactory::handleNetworkStrength(const QString &name, int strength)
     (*it)->handleNetworkStrength(strength);
 }
 
+void ABRFactory::handleGpsFix(double lat, double lon)
+{
+    // GPS is GLOBAL (no <name>), so BROADCAST rather than route by name. Snapshot
+    // first, exactly as handleRouterTick does: the fan-out can emit, and a
+    // consumer reacting synchronously by calling stop/startRouterAbr() would
+    // mutate _routerAbrs mid-iteration (UB). Each instance keeps its OWN anchor,
+    // so the same fix yields a per-link verdict — no shared state to synchronise.
+    const QList<XBAdaptiveBitrateStreaming *> abrs = _routerAbrs.values();
+    for (auto *abr : abrs) {
+        abr->handleGpsFix(lat, lon);
+    }
+}
+
 void ABRFactory::handleRouterTick(const QString &primaryInterface)
 {
     qDebug().nospace() << "[ROUTER][TICK] primary=" << primaryInterface;
