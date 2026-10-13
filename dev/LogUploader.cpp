@@ -101,21 +101,28 @@ void LogUploader::finish(bool ok, const QString &message)
 
 void LogUploader::doUpload(const QString &filePath, const QString &host, quint16 port)
 {
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        finish(false, QStringLiteral("cannot open '%1': %2").arg(filePath, file.errorString()));
+    // STREAM the file, never readAll(): post(request, QIODevice*) has Qt read it
+    // off disk as the socket drains. readAll() would hold the whole body in RAM
+    // AND Qt copies it internally AND the finished lambda would capture another
+    // copy — ~3x the file resident at once. At the 200MB cap that is a real OOM
+    // risk on a router-class box. The reply owns the device (setParent below), so
+    // it lives exactly until the transfer ends.
+    QFile *file = new QFile(filePath, this);
+    if (!file->open(QIODevice::ReadOnly)) {
+        finish(false, QStringLiteral("cannot open '%1': %2").arg(filePath, file->errorString()));
+        delete file;
         return;
     }
-    // Fail fast on the server's 200MB cap — reading the whole thing to have the
-    // server 413 it would waste the bandwidth and the wait.
-    if (file.size() > UPLOAD_MAX_BYTES) {
+    // Fail fast on the server's 200MB cap — streaming it just to have the server
+    // 413 it would waste the bandwidth and the wait.
+    const qint64 bodySize = file->size();
+    if (bodySize > UPLOAD_MAX_BYTES) {
         finish(false, QStringLiteral("log '%1' is %2 MB, over the %3 MB server limit")
-                          .arg(filePath).arg(file.size() / (1024 * 1024))
+                          .arg(filePath).arg(bodySize / (1024 * 1024))
                           .arg(UPLOAD_MAX_BYTES / (1024 * 1024)));
+        delete file;
         return;
     }
-    const QByteArray body = file.readAll();
-    file.close();
 
     // <name> = basename, percent-encoded (a raw space or '#' in a name would
     // otherwise corrupt the path). The server rejects names containing '/' or
@@ -125,12 +132,16 @@ void LogUploader::doUpload(const QString &filePath, const QString &host, quint16
     const QUrl url(QStringLiteral("http://%1:%2%3").arg(host).arg(port).arg(apiPath));
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, UPLOAD_CONTENT_TYPE);
+    // INACTIVITY timeout, not a total-transfer budget: it aborts only when the
+    // connection stalls this long mid-body, so a large file over a slow-but-live
+    // link still completes. Generous value covers a stalled peer.
     request.setTransferTimeout(UPLOAD_TRANSFER_TIMEOUT_MS);
 
-    qInfo().noquote() << QString("[LogUpload] -> POST %1 (%2 bytes)").arg(url.toString()).arg(body.size());
+    qInfo().noquote() << QString("[LogUpload] -> POST %1 (%2 bytes)").arg(url.toString()).arg(bodySize);
 
-    m_reply = m_nam->post(request, body);
-    QObject::connect(m_reply, &QNetworkReply::finished, this, [this, url, body]() {
+    m_reply = m_nam->post(request, file);
+    file->setParent(m_reply);   // reply frees the device when it is destroyed
+    QObject::connect(m_reply, &QNetworkReply::finished, this, [this, url, bodySize]() {
         QNetworkReply *reply = m_reply;
         m_reply = nullptr;
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -139,7 +150,9 @@ void LogUploader::doUpload(const QString &filePath, const QString &host, quint16
         const QByteArray resp = reply->readAll();
         reply->deleteLater();
 
-        if (err != QNetworkReply::NoError || status >= 400) {
+        // Success is 2xx ONLY. A 3xx (no redirect policy is set, and POST is not
+        // auto-followed) or any other non-2xx must NOT be parsed as {"saved"}.
+        if (err != QNetworkReply::NoError || status < 200 || status >= 300) {
             // Surface the server's own message when it sent one — its 400 body
             // is {"error":"..."} ("Tên file không hợp lệ", "File rỗng", …).
             const QJsonObject obj = QJsonDocument::fromJson(resp).object();
@@ -155,7 +168,7 @@ void LogUploader::doUpload(const QString &filePath, const QString &host, quint16
         const QJsonObject obj = QJsonDocument::fromJson(resp).object();
         const QString saved = obj.value(QStringLiteral("saved")).toString();
         finish(true, QStringLiteral("uploaded %1 bytes to %2 (HTTP %3)%4")
-                         .arg(body.size())
+                         .arg(bodySize)
                          .arg(url.toString())
                          .arg(status)
                          .arg(saved.isEmpty() ? QString()

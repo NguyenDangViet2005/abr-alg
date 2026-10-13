@@ -1,4 +1,4 @@
-// Unit test for LogUploader::findLatestLog, dev/LogUploader.*.
+// Unit test for LogUploader, dev/LogUploader.*.
 //
 // No Qt Test framework (the repo has none): a plain main() with asserts and a
 // non-zero exit on failure, so it can be compiled and run alone.
@@ -8,14 +8,19 @@
 //       tst_log_uploader.cpp ../dev/LogUploader.cpp \
 //       -lQt5Core -lQt5Network -o tst_log_uploader
 //
-// findLatestLog is the only part of the uploader with no network dependency, so
-// it is the only part that is unit-testable here. The POST itself is covered by
-// running the binary against a local listener.
+// Covers the two network-free paths: findLatestLog() selection, and the
+// host:port validation in uploadLatest() (which fails before any socket opens).
+// The POST itself is covered by running the binary against a local listener.
+// The validation cases also prove finish() is delivered via the event loop —
+// a synchronous emit before exec() would drop QCoreApplication::exit() and hang.
 
 #include "../dev/LogUploader.h"
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QDateTime>
+#include <QEventLoop>
+#include <QTimer>
 #include <QDebug>
 
 static int g_failures = 0;
@@ -56,10 +61,31 @@ static void writeWithMtime(const QString &path, const QDateTime &mtime)
     f.close();
 }
 
+// Run one uploadLatest() call and return via its finished signal. A bad host:port
+// or a missing log fails synchronously inside uploadLatest() and is delivered
+// DEFERRED (postEvent), so the event loop must run to observe it — this both
+// checks the message and proves the deferral (a sync emit would hang here).
+static bool uploadAndCapture(const QString &dir, const QString &hostPort,
+                             QString *message)
+{
+    LogUploader up;
+    QEventLoop loop;
+    bool got = false;
+    QObject::connect(&up, &LogUploader::finished, &loop, [&](bool /*ok*/, const QString &m) {
+        got = true;
+        *message = m;
+        loop.quit();
+    });
+    up.uploadLatest(dir, hostPort);
+    // Guard the run: if finish() were ever dropped, quit instead of hanging.
+    QTimer::singleShot(2000, &loop, &QEventLoop::quit);
+    loop.exec();
+    return got;
+}
+
 int main(int argc, char *argv[])
 {
-    Q_UNUSED(argc);
-    Q_UNUSED(argv);
+    QCoreApplication app(argc, argv);
 
     const QString dir = QDir::temp().filePath("tst-log-uploader");
     QDir().mkpath(dir);
@@ -84,6 +110,25 @@ int main(int argc, char *argv[])
     writeWithMtime(dir + "/qos-session-20260101-000200.qsdb", base.addSecs(20));
     expectEq(LogUploader::findLatestLog(dir), dir + "/qos-session-20260101-000100.qsdb",
              "newest .qsdb by mtime");
+
+    // host:port validation — all fail before any socket opens.
+    QString msg;
+    expectTrue(uploadAndCapture(dir, "nocolon", &msg) && msg.contains("invalid --upload value"),
+               "rejects host with no port");
+    expectTrue(uploadAndCapture(dir, "host:", &msg) && msg.contains("invalid --upload value"),
+               "rejects empty port");
+    expectTrue(uploadAndCapture(dir, "host:0", &msg) && msg.contains("invalid port"),
+               "rejects port 0");
+    expectTrue(uploadAndCapture(dir, "host:70000", &msg) && msg.contains("invalid port"),
+               "rejects port > 65535");
+    expectTrue(uploadAndCapture(dir, "host:abc", &msg) && msg.contains("invalid port"),
+               "rejects non-numeric port");
+
+    // Valid host:port but no matching file → the file-lookup failure path.
+    QDir(dir).removeRecursively();
+    QDir().mkpath(dir);
+    expectTrue(uploadAndCapture(dir, "127.0.0.1:9", &msg) && msg.contains("no qos-session"),
+               "valid host:port but no log file");
 
     QDir(dir).removeRecursively();
 
