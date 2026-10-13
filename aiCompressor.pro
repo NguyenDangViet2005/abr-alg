@@ -22,6 +22,7 @@ HEADERS += \
     XBQoSService.h \
     dev/CameraControl.h \
     dev/NetworkHandler.h \
+    dev/LogUploader.h \
     dev/QoSDebugProtocol.h \
     dev/QoSDebugSender.h \
     dev/RouterNetworkHandler.h
@@ -39,5 +40,6 @@ SOURCES += \
     XBQoSService.cpp \
     dev/CameraControl.cpp \
     dev/NetworkHandler.cpp \
+    dev/LogUploader.cpp \
     dev/QoSDebugProtocol.cpp \
     dev/QoSDebugSender.cpp

@@ -4,6 +4,7 @@
 #include "ABRConfigs.h"
 #include "SRTPeerStat.h"
 #include "RouterInterfaceStat.h"
+#include "dev/LogUploader.h"
 
 int main(int argc, char *argv[])
 {
@@ -40,7 +41,34 @@ int main(int argc, char *argv[])
         "abr-headroom", "Router-ABR steady-state cap as a percent of the ceiling (50-100).",
         "pct", QString::number(ABR_HEADROOM_FACTOR_PCT));
     cli.addOption(optHeadroom);
+
+    // One-shot log upload. When set, the service does NOT start: it finds the
+    // newest .qsdb in --qos-debug-log-dir, POSTs it to the given host:port, and
+    // exits. The log dir is REUSED (not a separate flag) — the same directory
+    // QoSDebugSender writes to, so the two stay in sync by construction.
+    const QCommandLineOption optUpload(
+        "upload", "Upload the latest .qsdb log to <host>:<port>, then exit.",
+        "host:port");
+    cli.addOption(optUpload);
     cli.process(a);
+
+    // ── One-shot upload mode ──
+    // Runs BEFORE any service construction: no ABR factory, no UDP listeners,
+    // no camera socket. The event loop only runs to drive the HTTP reply.
+    if (cli.isSet(optUpload)) {
+        LogUploader uploader;
+        QObject::connect(&uploader, &LogUploader::finished,
+                         &a, [](bool ok, const QString &msg) {
+            if (ok) {
+                qInfo().noquote() << QString("[LogUpload] OK: %1").arg(msg);
+            } else {
+                qWarning().noquote() << QString("[LogUpload] FAILED: %1").arg(msg);
+            }
+            QCoreApplication::exit(ok ? 0 : 1);
+        });
+        uploader.uploadLatest(cli.value(optDir), cli.value(optUpload));
+        return QCoreApplication::exec();
+    }
 
     qRegisterMetaType<SRTPeerStat>("SRTPeerStat");
     qRegisterMetaType<QVector<SRTPeerStat>>("QVector<SRTPeerStat>");
