@@ -378,6 +378,14 @@ private:
     // ABR_ZERO_THROUGHPUT_CONFIRM_TICKS to act).
     qint64 m_settleUntil = 0;
     int    m_zeroThroughputTicks = 0;
+    // Cold-start guard (2026-10-15): has THIS session ever carried real video
+    // traffic (a non-zero throughput tick)? Until it has, a throughput==0 row
+    // means "the link has not come up yet", NOT "the link died" — the router
+    // reports thr=0 / mptcp=false / usable=false / score=0 by design while the
+    // interface is still MPTCP-less, and treating that as an outage pinned the
+    // camera at MIN(30) instead of the 1000 startup bitrate (see checkSenderQueue).
+    // Cleared by reset(), so a new session re-arms the guard.
+    bool   m_seenLiveTraffic = false;
     // Phase 10 (recovery-hold, PORT DEVIATION): consecutive CLEAN ticks while
     // PINNED at MIN (current <= MIN). The ramp only resumes once this reaches
     // ABR_RECOVERY_CONFIRM_TICKS, so a lone clean tick after a drop to MIN cannot

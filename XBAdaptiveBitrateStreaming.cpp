@@ -177,6 +177,10 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     // Phase 07: a fresh session has no settle window and no zero-throughput run.
     m_settleUntil = 0;
     m_zeroThroughputTicks = 0;
+    // Cold-start guard: a fresh session has not yet carried video, so re-arm the
+    // "a zero row here means not-yet, not dead" guard. Without this a restart
+    // would keep the previous session's true and re-pin the camera at MIN.
+    m_seenLiveTraffic = false;
     // Phase 11: a fresh session has not emitted a reset yet — restore the
     // negative sentinel so the first reset-band (>ABR_LOSS_RESET_PCT) emit is not
     // suppressed by a timestamp left over from a prior session (the M1-class
@@ -888,6 +892,34 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
     const unsigned int current_throughput_Bps = static_cast<unsigned int>((tcpi.throughput * 1000) / 8);
 
     if (current_throughput_Bps == 0) {
+        // Cold-start guard (2026-10-15): throughput==0 has TWO meanings and the
+        // algorithm could not tell them apart. A zero row BEFORE the link has
+        // ever carried video this session is the router's by-design "not
+        // applicable" reading (mptcp=false, usable=false, score=0) while the
+        // interface is still MPTCP-less — NOT an outage. Dropping to MIN then
+        // pinned the camera at 30 and threw away the 1000 startup bitrate before
+        // the camera had even come up (qos-2.log: 1000 -> 30 in 2 ticks).
+        //
+        // Two independent nets (both chosen 2026-10-15):
+        //   (1) never-seen-live-traffic: the session has not yet proven it can
+        //       carry video, so a zero is provisional.
+        //   (2) router says the link is not usable: `usable` is the router's own
+        //       verdict, already on the wire (RouterInterfaceStat.usable =
+        //       isMptcp && isConnected && avgScore > 0) — no new signal, no wire
+        //       change. A not-usable link with thr=0 is the SAME "not yet"
+        //       case, so it must not be read as a death.
+        // Only a zero AFTER live traffic on a USABLE link is a genuine outage.
+        //
+        // CAVEAT for review: net (2) also holds when an established link later
+        // reports usable=false mid-outage, so the MIN-drop is suppressed then
+        // too. That is deliberate — a link the router calls unusable cannot
+        // carry any bitrate, so dropping the camera's number changes nothing
+        // (failover/primary-switch owns that case), whereas dropping to 30 and
+        // then having to ramp back is the exact stall we are fixing.
+        if (!m_seenLiveTraffic || !m_video.usable) {
+            m_cleanRecoveryTicks = 0;   // Phase 10: early return bypasses the end reset
+            return;
+        }
         // PORT DEVIATION (Phase 07): require ABR_ZERO_THROUGHPUT_CONFIRM_TICKS
         // consecutive zero ticks. A single 1-tick spike (a stale delivery_rate
         // sample) must not drop the bitrate straight to MIN.
@@ -903,6 +935,9 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
         return;
     }
     m_zeroThroughputTicks = 0;
+    // First non-zero throughput this session: the link is proving it can carry
+    // video, so a later zero is a genuine outage the MIN-drop must act on.
+    m_seenLiveTraffic = true;
 
     const double queuing_delay_ms = (m_avgSiocoutq / static_cast<double>(current_throughput_Bps)) * 1000.0;
 
