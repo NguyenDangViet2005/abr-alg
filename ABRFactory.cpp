@@ -1,5 +1,6 @@
 #include "ABRFactory.h"
 #include "XBAdaptiveBitrateStreaming.h"
+#include "ABRSwitchAdopt.h"   // abrSwitchDebounced — switch anti-jitter predicate
 #include <QDebug>
 
 ABRFactory* ABRFactory::_instance = nullptr;
