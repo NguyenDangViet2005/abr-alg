@@ -5,7 +5,9 @@
 #include <QVector>
 #include <QHash>
 #include <QStringList>
+#include <QElapsedTimer>
 #include "ABRConfigs.h"
+#include "ABRTuning.h"   // ABR_SWITCH_DEBOUNCE_MS
 #include "SRTAdaptiveBitrateStreaming.h"
 #include "SRTPeerStat.h"
 #include "RouterInterfaceStat.h"
@@ -114,6 +116,21 @@ private:
     // Phase 09 (headroom): steady-state cap percent, applied per instance at
     // creation. Default matches the compile-time #define.
     int _headroomPct = ABR_HEADROOM_FACTOR_PCT;
+
+    // ── Primary-role adopt state (PORT DEVIATION) ────────────────────────
+    // m_lastEffectiveKbps: the last bitrate this factory told the CAMERA to run
+    // (= the value relayed on routerAbrEffectiveBitrate = XBQoSService::
+    // m_currentBitrate). On the A->B primary edge the new primary adopts THIS,
+    // so the camera stays continuous across the switch. 0 until the first
+    // dispatch — the edge falls back to B's own value then (startup).
+    int _lastEffectiveKbps = 0;
+    // m_switchClock / m_lastSwitchMs: monotonic clock + the ms of the last
+    // SUCCESSFUL adopt (a debounced edge does NOT refresh it), for the
+    // anti-jitter debounce (ABR_SWITCH_DEBOUNCE_MS). A flip-flop that reverses
+    // inside the window does not re-adopt. Sentinel = -debounce (NOT 0) so the
+    // first switch is never suppressed — same pattern as m_lastResetMs.
+    QElapsedTimer _switchClock;
+    qint64 _lastSwitchMs = -ABR_SWITCH_DEBOUNCE_MS;
 };
 
 #endif // ABRFACTORY_H

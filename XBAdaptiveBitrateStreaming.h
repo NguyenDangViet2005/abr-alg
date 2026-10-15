@@ -69,29 +69,30 @@ public:
     bool    isC2Configured() const { return m_isC2Configured; }
     int     currentBitrate() const { return static_cast<int>(m_abrState.current_bitrate_kbps); }
 
-    // Phase 13 (switch-seed, PORT DEVIATION): this instance just BECAME the
-    // primary (the factory calls this on the A!=B edge, in place of a bare
-    // currentBitrate() read). The spare ladder may have left our value pinned at
-    // the floor while this link's OWN latest VIDEO row says it is now healthy —
-    // then the slow 30->100->... climb is pointless, because the router chose us
-    // precisely because we are strong. The rule keys STRICTLY on being at the
-    // floor; a spare that already sits high is left untouched (the normal ramp
-    // owns it, and jumping to a bootstrap there buys nothing):
+    // Primary-role adopt (PORT DEVIATION): this instance just BECAME the primary
+    // (the factory calls this on the A!=B edge). Bitrate is a property of the
+    // PRIMARY ROLE, not of a per-interface ladder — so the new primary takes the
+    // effective bitrate the camera is ALREADY running (carried in as `kbps`,
+    // = XBQoSService::m_currentBitrate) and then its own normal ABR continues.
     //
-    //   • AT FLOOR (current <= MIN) and HEALTHY (no loss this tick, score strong,
-    //     queuing delay low, router calls it usable): seed the healthy bootstrap,
-    //     ABR_SWITCH_SEED_HEALTHY_KBPS, capped by the learned steady cap.
-    //   • AT FLOOR but NOT healthy: a small lift (ABR_SWITCH_SEED_FLOOR_KBPS) —
-    //     not a jump, so a weak link is not handed a bitrate to drown in; the
-    //     loss ladder stays in charge.
-    //   • NOT AT FLOOR: unchanged — return the current value verbatim.
+    // Why the carry and not our own internal value: a spare's ladder is FROZEN
+    // (m_isPrimaryCache gate), but even before that gate existed, a spare ladder
+    // could have collapsed ITSELF to the floor. Reading our internal value on the
+    // switch therefore forced the camera to that stale floor (the eth-weak ->
+    // eth-strong under-shoot: 1200 -> 30 in one tick, ~22 s climb back). Carrying
+    // the effective value keeps the camera continuous: on the switch tick it stays
+    // 1200 and this link ramps from there.
     //
-    // Returns the bitrate to dispatch. It mutates state WITHOUT routing through
-    // setNewBitrate on purpose: setNewBitrate emits bitrateProposed, and the
-    // factory's effective-primary path would dispatch a SECOND time (the explicit
-    // emit after this call in handleRouterTick). Setting the state directly keeps
-    // exactly one dispatch.
-    int seedOnBecomePrimary();
+    // State change: set the bitrate, RESET THE CEILING to m_maxAbr (a low ceiling
+    // a SPARE learned must not clamp the new primary), clear the transient
+    // episodes (baseline / last-good / recovery-hold / settle). It does NOT route
+    // through setNewBitrate — that emits bitrateProposed, and the factory's
+    // explicit emit after this call would double-dispatch. Direct state write,
+    // return void; the caller owns the single emit.
+    //
+    // Bypasses m_isPrimaryCache BY DESIGN: the factory calls this exactly when B
+    // is the new primary, and setting a scalar is not "adapting".
+    void adoptPrimaryBitrate(unsigned int kbps);
 
 public slots:
     // One VIDEO or C2 row destined for THIS interface (the factory routes by
@@ -340,14 +341,6 @@ private:
     unsigned int m_problematicBitrateThreshold = ABR_MAX_BITRATE_KBPS;
     qint64 m_lastQualityChangeTime = 0;
     double m_avgSiocoutq = 0.0;
-    // Phase 13 (switch-seed): the queuing delay computed on the last
-    // checkSenderQueue tick, stored so seedOnBecomePrimary() can apply the same
-    // "link looks good" qdelay gate the ramp uses WITHOUT recomputing it from
-    // state that only exists inside that function. 0 until the first LIVE row
-    // (checkSenderQueue early-returns before the compute on a not-yet/outage
-    // tick), which is the conservative value: a health check that has never seen
-    // a real tick must not read as "good".
-    double m_lastQueuingDelayMs = 0.0;
     unsigned int m_maxAbr;
 
     // ── Phase 01: ceiling + causal overshoot state (PORT DEVIATION) ───────
@@ -509,6 +502,19 @@ private:
     // ── Router wiring (not xbfirm) ───────────────────────────────────────
     const QString m_iface;
     const bool m_isC2Configured;
+
+    // Primary-only adaptation guard (PORT DEVIATION). Bitrate is owned by the
+    // PRIMARY ROLE, so only the primary instance mutates its ladder; a spare
+    // keeps ingesting its row (the HUD/QS channel stays warm) but its ladder is
+    // FROZEN. This is what removes the root cause — a spare's loss ladder
+    // collapsing ITSELF to the floor while it is not carrying the camera.
+    //
+    // Learned every tick from handleRouterTick(primaryInterface), which the
+    // factory fans out to EVERY instance. Default `true` = optimistic: on a
+    // fresh instance behave exactly as before the first tick arrives. A startup
+    // 602 tick always precedes any switch, so the first real adaptation sees the
+    // true role.
+    bool m_isPrimaryCache = true;
 
     QElapsedTimer m_clock;
 

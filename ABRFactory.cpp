@@ -8,6 +8,9 @@ ABRFactory::ABRFactory(QObject *parent)
     : QObject(parent)
     , _srtAdaptiveBitrateStreaming(nullptr)
 {
+    // Monotonic clock for the switch debounce. Started once; elapsed() is what
+    // _lastSwitchMs is compared against.
+    _switchClock.start();
 }
 
 ABRFactory *ABRFactory::instance()
@@ -188,28 +191,52 @@ void ABRFactory::handleRouterTick(const QString &primaryInterface)
         abr->handleRouterTick(primaryInterface);
     }
 
-    // ── Switch: dispatch the new primary's bitrate ────────────────────────
+    // ── Switch: the new primary ADOPTS the effective bitrate ──────────────
     // The per-tick proposal path is deadbanded (handleRouterTick drops an emit
     // when the value is unchanged), so a switch A→B where B already sits at its
     // value would emit NOTHING and the camera would keep A's old bitrate. This
-    // is the "jump straight" the model requires: hand the camera B's value now.
+    // edge forces a dispatch.
     //
-    // Phase 13 (switch-seed): ask B for a SEED rather than a bare read. If B's
-    // own latest VIDEO row says the link is healthy AND the spare ladder had left
-    // it pinned at the floor, the seed lifts it off the floor (500) instead of
-    // forcing the stale 30 — the eth-weak -> eth-strong under-shoot fix. If B was
-    // not at the floor the seed returns the current value verbatim, so this is a
-    // superset of the old behaviour, never a regression.
+    // ADOPT MODEL (PORT DEVIATION): bitrate is a property of the PRIMARY ROLE, so
+    // the new primary takes the value the camera is ALREADY running —
+    // _lastEffectiveKbps, the last thing this factory dispatched (=
+    // XBQoSService::m_currentBitrate) — instead of its own stale internal value.
+    // The old path force-dispatched B's internal value; because a spare's ladder
+    // (pre-fix) had collapsed ITSELF to the floor, the camera dropped 1200 -> 30
+    // in one tick with a ~22 s climb back. Carrying the effective value keeps the
+    // camera continuous; B's own ABR then continues from there.
+    //
+    // ANTI-JITTER: A->B->A inside ABR_SWITCH_DEBOUNCE_MS must not re-adopt (a
+    // bouncing router would otherwise reseed the camera back and forth). The
+    // debounce skips only the ADOPT+emit; _primaryIface is already updated, so the
+    // per-tick primary-gated path is consistent regardless.
     if (primaryInterface != prevPrimary) {
         auto it = _routerAbrs.find(primaryInterface);
-        if (it != _routerAbrs.end()) {
-            const int b = (*it)->seedOnBecomePrimary();
-            qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
-                              << primaryInterface << " — forcing " << b << "kbps";
-            emit routerAbrEffectiveBitrate(b);
-        } else {
+        if (it == _routerAbrs.end()) {
             qWarning().nospace() << "[ABR][SWITCH] primary '" << primaryInterface
                                  << "' is not a known interface — no dispatch";
+        } else if (abrSwitchDebounced(_switchClock.elapsed(), _lastSwitchMs,
+                                      static_cast<long long>(ABR_SWITCH_DEBOUNCE_MS))) {
+            qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
+                              << primaryInterface << " within debounce ("
+                              << ABR_SWITCH_DEBOUNCE_MS << "ms) — not re-adopting";
+        } else {
+            // Carry = what the camera runs NOW. 0 means we have never dispatched
+            // (startup edge) — fall back to B's own value so we still emit one.
+            const unsigned int carry = (_lastEffectiveKbps > 0)
+                                           ? static_cast<unsigned int>(_lastEffectiveKbps)
+                                           : static_cast<unsigned int>((*it)->currentBitrate());
+            (*it)->adoptPrimaryBitrate(carry);
+            _lastSwitchMs = _switchClock.elapsed();
+            qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
+                              << primaryInterface << " — adopting effective "
+                              << (*it)->currentBitrate() << "kbps";
+            // One emit: the service dedups (newBitrate == m_currentBitrate is a
+            // no-op), so a carry equal to the camera's current value dispatches
+            // nothing — the camera stays continuous across the switch. Cache it
+            // too, so the NEXT switch adopts this same effective value.
+            _lastEffectiveKbps = (*it)->currentBitrate();
+            emit routerAbrEffectiveBitrate(_lastEffectiveKbps);
         }
     }
 }
@@ -222,7 +249,13 @@ void ABRFactory::handleRouterAbrBitrate(const QString &iface, unsigned int kbps)
     // Only the primary's proposal reaches the camera. A spare interface's
     // proposal is logged but never dispatched — acting on it would drive the
     // video with a link the router is not currently using.
-    if (effective) emit routerAbrEffectiveBitrate(static_cast<int>(kbps));
+    if (effective) {
+        // Cache the last dispatched value: it IS what the camera runs now, and
+        // the switch edge adopts it as the carry. Cached only on the EFFECTIVE
+        // (primary) path, so a spare's proposal never poisons the carry.
+        _lastEffectiveKbps = static_cast<int>(kbps);
+        emit routerAbrEffectiveBitrate(static_cast<int>(kbps));
+    }
 }
 
 void ABRFactory::handleCameraReportedBitrate(int achievedKbps)

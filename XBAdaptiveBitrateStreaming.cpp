@@ -1,7 +1,7 @@
 #include "XBAdaptiveBitrateStreaming.h"
 #include "ABRLossBand.h"     // Phase 11: pure loss-ladder band math
 #include "ABRScoreCliff.h"   // Phase 12: pure score-cliff predicate
-#include "ABRSwitchSeed.h"   // Phase 13: pure switch-seed decision math
+#include "ABRSwitchAdopt.h"  // pure switch-adopt decision math
 #include <QDebug>
 #include <QtMath>
 
@@ -147,10 +147,6 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_lastAbrAction = ABR_NONE;
     m_lastQualityChangeTime = 0;
     m_avgSiocoutq = 0.0;
-    // Phase 13 (switch-seed): no live tick in a fresh session → the seed gate's
-    // qdelay must read "unknown" (0 is below any good threshold, but the score /
-    // no-loss / usable gates still block a seed until a real row arrives).
-    m_lastQueuingDelayMs = 0.0;
     m_rttHistory.clear();
 
     m_currentStatus = LOADING;
@@ -399,7 +395,13 @@ void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterfac
     // always HOLD(0)/NONE(0). The wire keeps both columns (frozen — the
     // dashboard decodes positionally); only the values are pinned to 0. Emitted
     // as plain ints (no include of the wire enum) so this class stays decoupled.
-    Q_UNUSED(primaryInterface);
+    //
+    // Primary-role cache (PORT DEVIATION): the factory fans this tick out to
+    // EVERY instance, so this is where an instance learns whether it currently
+    // owns the camera. setNewBitrate() reads it to freeze a spare's ladder. The
+    // decisionMade emit below still fires for EVERY iface (the QS channel wants
+    // a per-iface verdict regardless of role).
+    m_isPrimaryCache = (primaryInterface == m_iface);
     // ceilingKbps: 0 until an overshoot teaches one, else the learned value.
     // m_ceilingKbps is initialised to m_maxAbr (ramp is free), which is NOT a
     // "found" ceiling — report 0 so the dashboard draws no line and the wire
@@ -414,38 +416,42 @@ void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterfac
                       static_cast<int>(m_maxAbr), ceiling, cap);
 }
 
-int XBAdaptiveBitrateStreaming::seedOnBecomePrimary()
+void XBAdaptiveBitrateStreaming::adoptPrimaryBitrate(unsigned int kbps)
 {
-    // Phase 13 (switch-seed, PORT DEVIATION). Called by the factory on the A!=B
-    // primary edge INSTEAD of a bare currentBitrate() read. The DECISION is the
-    // pure ABRSwitchSeed.h helper (unit-tested); this method only feeds it the
-    // link's own latest row and applies the resulting state change.
-    //
-    // "Healthy" is read ONLY from this link's latest VIDEO row (m_video) — the
-    // exact fields the ramp gate itself trusts: router calls it usable, no loss
-    // THIS tick (m_videoLossThisTick, the same freshness flag haveLostPackets
-    // keys on), score at/above the step-up bar, queuing delay below the good
-    // threshold. See the header for the floor/healthy/unhealthy shape.
-    const unsigned int cur = m_abrState.current_bitrate_kbps;
-    const bool healthy = abrSwitchLinkHealthy(m_video.usable, m_videoLossThisTick,
-                                              m_video.score, m_lastQueuingDelayMs);
-    const unsigned int cap = steadyCapKbps();
-    const unsigned int seeded = abrSwitchSeedKbps(cur, cap, healthy);
-    if (seeded == cur) return currentBitrate();   // not at floor, or nothing to add
+    // Primary-role adopt (PORT DEVIATION). Called by the factory on the A!=B
+    // primary edge, BEFORE its single explicit emit. `kbps` is the effective
+    // bitrate the camera is already running (= the factory's cached last emit =
+    // XBQoSService::m_currentBitrate). We take it verbatim (only clamped as a
+    // safety) and let our own normal ABR continue from there. See the header.
+    const unsigned int adopted =
+        abrSwitchAdoptKbps(kbps, static_cast<unsigned int>(ABR_MIN_BITRATE_KBPS), m_maxAbr);
 
-    qInfo().nospace() << "[ABR][SWITCH][seed] " << m_iface << " floor " << cur
-                      << " -> " << seeded << "kbps (" << (healthy ? "healthy" : "unhealthy")
-                      << ", cap=" << cap << ")";
+    qInfo().nospace() << "[ABR][SWITCH][adopt] " << m_iface << " was "
+                      << m_abrState.current_bitrate_kbps << " -> adopting effective "
+                      << adopted << "kbps (carry=" << kbps << ", maxAbr=" << m_maxAbr << ")";
+
     // Direct state write, NOT setNewBitrate: setNewBitrate emits bitrateProposed,
-    // and the factory's effective-primary slot would dispatch a SECOND time (the
-    // explicit emit after this call). One mutation, one dispatch.
-    m_abrState.current_bitrate_kbps = seeded;
+    // and the factory's explicit emit after this call would dispatch a SECOND
+    // time. One mutation, one dispatch — the caller owns the emit.
+    m_abrState.current_bitrate_kbps = adopted;
     m_lastQualityChangeTime = m_clock.elapsed();
-    m_lastAbrAction = ABR_INCREASE;      // it is a step-up; the ramp inherits this
-    m_cleanRecoveryTicks = 0;            // off the floor now; the hold no longer applies
-    m_scoreAtStepUp = m_video.score;     // the causal pair isOvershoot() reads
-    m_trendAtStepUp = m_video.trend;
-    return currentBitrate();
+    // The adopted value is the camera's CURRENT value, not one WE were stepping
+    // toward — treat it as a neutral restart: no in-flight increase to inherit.
+    m_lastAbrAction = ABR_NONE;
+    // Reset the ceiling: a low ceiling a SPARE learned must not clamp the new
+    // primary (decision Q1a — keep the ladder memory, drop the ceiling). The
+    // ramp is free up to maxAbr until THIS link earns its own ceiling.
+    m_ceilingKbps = m_maxAbr;
+    // Clear the transient episodes so nothing from the spare-ladder era bleeds
+    // into the new primary's first decisions.
+    m_lastGoodKbps = 0;
+    m_scoreAtStepUp = 0.0;
+    m_trendAtStepUp = 0;
+    m_cleanRecoveryTicks = 0;
+    m_settleUntil = 0;
+    m_pendingCeiling = 0;
+    m_overshootConfirmTicks = 0;
+    m_ceilingHoldSince = 0;
 }
 
 void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
@@ -637,6 +643,12 @@ void XBAdaptiveBitrateStreaming::processTelemetryTCPInfo(double rtt, double deli
     m_telemetryMinRtt   = static_cast<quint32>(tcpiMinRtt / 1000);
 
     if (lossRate > 1.0) {
+        // PRIMARY-ONLY ADAPTATION GUARD (PORT DEVIATION): this branch forces MIN
+        // with a DIRECT state write (bypassing setNewBitrate, so the guard there
+        // does not cover it). A SPARE must not be pinned to MIN here — its ladder
+        // is frozen and the pipeline is not using it. Same class as the
+        // setNewBitrate guard; one rule, both mutation sites.
+        if (!m_isPrimaryCache) return;
         if (m_abrState.current_bitrate_kbps > ABR_MIN_BITRATE_KBPS
             && m_abrState.current_bitrate_kbps < m_problematicBitrateThreshold) {
             m_problematicBitrateThreshold = m_abrState.current_bitrate_kbps;
@@ -979,12 +991,6 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
     m_seenLiveTraffic = true;
 
     const double queuing_delay_ms = (m_avgSiocoutq / static_cast<double>(current_throughput_Bps)) * 1000.0;
-    // Phase 13 (switch-seed): remember THIS tick's delay so seedOnBecomePrimary()
-    // can apply the same "link looks good" gate without recomputing it. Only a
-    // LIVE tick reaches here (the not-yet/outage early-returns above leave the
-    // previous value untouched), which is correct: a switch should judge the link
-    // by its last real reading, not a stale reset-to-zero.
-    m_lastQueuingDelayMs = queuing_delay_ms;
 
     const double increase_q_delay_threshold =
         (m_lastAbrAction == ABR_DECREASE) ? ABR_QUEUE_DELAY_LOW_AFTER_DECREASE_MS : ABR_QUEUE_DELAY_LOW_THRESHOLD_MS;
@@ -1348,6 +1354,15 @@ void XBAdaptiveBitrateStreaming::setNewBitrate(unsigned int new_bitrate_kbps)
     // xbfirm setNewBitrate, with the Phase 01 deviations marked below.
     // `emit bitrateChanged(adjusted_bitrate)` is renamed to
     // bitrateProposed(m_iface, ...).
+    //
+    // PRIMARY-ONLY ADAPTATION GUARD (PORT DEVIATION): every ladder path (kick,
+    // loss ladder, rttHigh, qdelay, zero-throughput, ramp, floor-recovery) funnels
+    // through here, so one early-return freezes a SPARE's entire ladder. Bitrate
+    // is owned by the primary role; a spare only ingests its row for the HUD. This
+    // removes the root cause — a spare's loss ladder collapsing ITSELF to the floor
+    // and then being force-dispatched as the new primary's value (1200 -> 30).
+    if (!m_isPrimaryCache) return;
+
     double adjusted_bitrate_raw = new_bitrate_kbps * m_alpha;
     adjusted_bitrate_raw = qBound<unsigned int>(ABR_MIN_BITRATE_KBPS,
                                   static_cast<unsigned int>(adjusted_bitrate_raw),
