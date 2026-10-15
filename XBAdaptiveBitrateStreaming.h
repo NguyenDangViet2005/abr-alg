@@ -69,6 +69,30 @@ public:
     bool    isC2Configured() const { return m_isC2Configured; }
     int     currentBitrate() const { return static_cast<int>(m_abrState.current_bitrate_kbps); }
 
+    // Phase 13 (switch-seed, PORT DEVIATION): this instance just BECAME the
+    // primary (the factory calls this on the A!=B edge, in place of a bare
+    // currentBitrate() read). The spare ladder may have left our value pinned at
+    // the floor while this link's OWN latest VIDEO row says it is now healthy —
+    // then the slow 30->100->... climb is pointless, because the router chose us
+    // precisely because we are strong. The rule keys STRICTLY on being at the
+    // floor; a spare that already sits high is left untouched (the normal ramp
+    // owns it, and jumping to a bootstrap there buys nothing):
+    //
+    //   • AT FLOOR (current <= MIN) and HEALTHY (no loss this tick, score strong,
+    //     queuing delay low, router calls it usable): seed the healthy bootstrap,
+    //     ABR_SWITCH_SEED_HEALTHY_KBPS, capped by the learned steady cap.
+    //   • AT FLOOR but NOT healthy: a small lift (ABR_SWITCH_SEED_FLOOR_KBPS) —
+    //     not a jump, so a weak link is not handed a bitrate to drown in; the
+    //     loss ladder stays in charge.
+    //   • NOT AT FLOOR: unchanged — return the current value verbatim.
+    //
+    // Returns the bitrate to dispatch. It mutates state WITHOUT routing through
+    // setNewBitrate on purpose: setNewBitrate emits bitrateProposed, and the
+    // factory's effective-primary path would dispatch a SECOND time (the explicit
+    // emit after this call in handleRouterTick). Setting the state directly keeps
+    // exactly one dispatch.
+    int seedOnBecomePrimary();
+
 public slots:
     // One VIDEO or C2 row destined for THIS interface (the factory routes by
     // name). Splits by connType: VIDEO -> processTCPInfo (the tcpInfo slot),
@@ -316,6 +340,14 @@ private:
     unsigned int m_problematicBitrateThreshold = ABR_MAX_BITRATE_KBPS;
     qint64 m_lastQualityChangeTime = 0;
     double m_avgSiocoutq = 0.0;
+    // Phase 13 (switch-seed): the queuing delay computed on the last
+    // checkSenderQueue tick, stored so seedOnBecomePrimary() can apply the same
+    // "link looks good" qdelay gate the ramp uses WITHOUT recomputing it from
+    // state that only exists inside that function. 0 until the first LIVE row
+    // (checkSenderQueue early-returns before the compute on a not-yet/outage
+    // tick), which is the conservative value: a health check that has never seen
+    // a real tick must not read as "good".
+    double m_lastQueuingDelayMs = 0.0;
     unsigned int m_maxAbr;
 
     // ── Phase 01: ceiling + causal overshoot state (PORT DEVIATION) ───────

@@ -214,6 +214,16 @@
 #define ABR_POOR_CONDITIONS_TICKS              2
 // Đổi bitrate phải khác ít nhất (kbps) này, nếu không thì bỏ qua (no-op). [xbfirm]
 #define ABR_MIN_BITRATE_CHANGE_THRESHOLD       30
+// Phase 13 (switch-seed): khi 1 instance VỪA thành primary mà CHÍNH link đó khoẻ
+// (no-loss tick này + score mạnh + qdelay thấp + usable) và bitrate đang kẹt ở
+// sàn, seed thẳng lên mức này thay vì bò 30->100->... (giây under-shoot sau switch
+// eth-yếu -> eth-mạnh). Bị min() với cap đã học. 500 = cùng mức telemetry kick
+// (ABR_TELEMETRY_KICK_BITRATE_KBPS). [PORT DEVIATION]
+#define ABR_SWITCH_SEED_HEALTHY_KBPS           500
+// Phase 13 (switch-seed): tại sàn nhưng link KHÔNG khoẻ — nhấc nhẹ lên mức này
+// (một nấc, KHÔNG nhảy tới bootstrap) để yếu link không bị dội bitrate. Bị min()
+// với cap đã học. [PORT DEVIATION]
+#define ABR_SWITCH_SEED_FLOOR_KBPS             100
 // Hệ số bitrate "kick" so với ngưỡng problematic: kick = threshold × hệ số này.
 // [xbfirm]
 #define ABR_TELEMETRY_KICK_FACTOR              0.9

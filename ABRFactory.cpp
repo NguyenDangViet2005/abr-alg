@@ -188,17 +188,22 @@ void ABRFactory::handleRouterTick(const QString &primaryInterface)
         abr->handleRouterTick(primaryInterface);
     }
 
-    // ── Switch: force-dispatch the new primary's CURRENT bitrate ──────────
+    // ── Switch: dispatch the new primary's bitrate ────────────────────────
     // The per-tick proposal path is deadbanded (handleRouterTick drops an emit
     // when the value is unchanged), so a switch A→B where B already sits at its
     // value would emit NOTHING and the camera would keep A's old bitrate. This
     // is the "jump straight" the model requires: hand the camera B's value now.
-    // B's value is meaningful because EVERY instance ramps in the background
-    // every tick (the fan-out above), so it already reflects B's health.
+    //
+    // Phase 13 (switch-seed): ask B for a SEED rather than a bare read. If B's
+    // own latest VIDEO row says the link is healthy AND the spare ladder had left
+    // it pinned at the floor, the seed lifts it off the floor (500) instead of
+    // forcing the stale 30 — the eth-weak -> eth-strong under-shoot fix. If B was
+    // not at the floor the seed returns the current value verbatim, so this is a
+    // superset of the old behaviour, never a regression.
     if (primaryInterface != prevPrimary) {
         auto it = _routerAbrs.find(primaryInterface);
         if (it != _routerAbrs.end()) {
-            const int b = (*it)->currentBitrate();
+            const int b = (*it)->seedOnBecomePrimary();
             qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
                               << primaryInterface << " — forcing " << b << "kbps";
             emit routerAbrEffectiveBitrate(b);

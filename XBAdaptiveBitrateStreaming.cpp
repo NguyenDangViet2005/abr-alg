@@ -1,6 +1,7 @@
 #include "XBAdaptiveBitrateStreaming.h"
 #include "ABRLossBand.h"     // Phase 11: pure loss-ladder band math
 #include "ABRScoreCliff.h"   // Phase 12: pure score-cliff predicate
+#include "ABRSwitchSeed.h"   // Phase 13: pure switch-seed decision math
 #include <QDebug>
 #include <QtMath>
 
@@ -146,6 +147,10 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_lastAbrAction = ABR_NONE;
     m_lastQualityChangeTime = 0;
     m_avgSiocoutq = 0.0;
+    // Phase 13 (switch-seed): no live tick in a fresh session → the seed gate's
+    // qdelay must read "unknown" (0 is below any good threshold, but the score /
+    // no-loss / usable gates still block a seed until a real row arrives).
+    m_lastQueuingDelayMs = 0.0;
     m_rttHistory.clear();
 
     m_currentStatus = LOADING;
@@ -407,6 +412,40 @@ void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterfac
     emit decisionMade(m_iface, static_cast<int>(m_abrState.current_bitrate_kbps),
                       0, /*branch=HOLD*/ 0, /*reason=NONE*/ 0,
                       static_cast<int>(m_maxAbr), ceiling, cap);
+}
+
+int XBAdaptiveBitrateStreaming::seedOnBecomePrimary()
+{
+    // Phase 13 (switch-seed, PORT DEVIATION). Called by the factory on the A!=B
+    // primary edge INSTEAD of a bare currentBitrate() read. The DECISION is the
+    // pure ABRSwitchSeed.h helper (unit-tested); this method only feeds it the
+    // link's own latest row and applies the resulting state change.
+    //
+    // "Healthy" is read ONLY from this link's latest VIDEO row (m_video) — the
+    // exact fields the ramp gate itself trusts: router calls it usable, no loss
+    // THIS tick (m_videoLossThisTick, the same freshness flag haveLostPackets
+    // keys on), score at/above the step-up bar, queuing delay below the good
+    // threshold. See the header for the floor/healthy/unhealthy shape.
+    const unsigned int cur = m_abrState.current_bitrate_kbps;
+    const bool healthy = abrSwitchLinkHealthy(m_video.usable, m_videoLossThisTick,
+                                              m_video.score, m_lastQueuingDelayMs);
+    const unsigned int cap = steadyCapKbps();
+    const unsigned int seeded = abrSwitchSeedKbps(cur, cap, healthy);
+    if (seeded == cur) return currentBitrate();   // not at floor, or nothing to add
+
+    qInfo().nospace() << "[ABR][SWITCH][seed] " << m_iface << " floor " << cur
+                      << " -> " << seeded << "kbps (" << (healthy ? "healthy" : "unhealthy")
+                      << ", cap=" << cap << ")";
+    // Direct state write, NOT setNewBitrate: setNewBitrate emits bitrateProposed,
+    // and the factory's effective-primary slot would dispatch a SECOND time (the
+    // explicit emit after this call). One mutation, one dispatch.
+    m_abrState.current_bitrate_kbps = seeded;
+    m_lastQualityChangeTime = m_clock.elapsed();
+    m_lastAbrAction = ABR_INCREASE;      // it is a step-up; the ramp inherits this
+    m_cleanRecoveryTicks = 0;            // off the floor now; the hold no longer applies
+    m_scoreAtStepUp = m_video.score;     // the causal pair isOvershoot() reads
+    m_trendAtStepUp = m_video.trend;
+    return currentBitrate();
 }
 
 void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
@@ -940,6 +979,12 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
     m_seenLiveTraffic = true;
 
     const double queuing_delay_ms = (m_avgSiocoutq / static_cast<double>(current_throughput_Bps)) * 1000.0;
+    // Phase 13 (switch-seed): remember THIS tick's delay so seedOnBecomePrimary()
+    // can apply the same "link looks good" gate without recomputing it. Only a
+    // LIVE tick reaches here (the not-yet/outage early-returns above leave the
+    // previous value untouched), which is correct: a switch should judge the link
+    // by its last real reading, not a stale reset-to-zero.
+    m_lastQueuingDelayMs = queuing_delay_ms;
 
     const double increase_q_delay_threshold =
         (m_lastAbrAction == ABR_DECREASE) ? ABR_QUEUE_DELAY_LOW_AFTER_DECREASE_MS : ABR_QUEUE_DELAY_LOW_THRESHOLD_MS;
