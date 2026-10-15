@@ -110,3 +110,5 @@ external/
 worktrees/
 
 web-monitor/
+
+test/

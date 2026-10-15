@@ -60,6 +60,13 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_needRecoveryRefresh(false)
     , m_lastCollapseLogTime(0)
     , m_lastAchievedBitrateKbps(0)
+    , m_smoothedRssi(-100.0)
+    , m_smoothedSignal(0)
+    , m_lastSiyiPacketTime(0)
+    , m_currentEnvCeiling(DEFAULT_MAX_BITRATE_KBPS)
+    , m_lastEnvChangeRssi(-60.0)
+    , m_currentEnvName("LOS/Ultra (1080p60)")
+    , m_hasSiyiTelemetry(false)
 {
     m_heartbeatTimer = new QTimer(this);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &SRTAdaptiveBitrateStreaming::onHeartbeatTimeout);
@@ -74,6 +81,15 @@ void SRTAdaptiveBitrateStreaming::start()
     m_rttHistory.clear();
     m_bwHistory.clear();
     m_rttWarmupHistory.clear();
+    m_siyiRssiHistory.clear();
+
+    m_smoothedRssi = -100.0;
+    m_smoothedSignal = 0;
+    m_lastSiyiPacketTime = 0;
+    m_currentEnvCeiling = DEFAULT_MAX_BITRATE_KBPS;
+    m_lastEnvChangeRssi = -60.0;
+    m_currentEnvName = "LOS/Ultra (1080p60)";
+    m_hasSiyiTelemetry = false;
 
     m_isVideoEnabled = true;
     m_isExplicitC2Only = false;
@@ -203,6 +219,15 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_c2Unacked = 0;
     m_lastC2PacketTime = 0;
     m_isVideoEnabled = true;
+
+    m_siyiRssiHistory.clear();
+    m_smoothedRssi = -100.0;
+    m_smoothedSignal = 0;
+    m_lastSiyiPacketTime = 0;
+    m_currentEnvCeiling = DEFAULT_MAX_BITRATE_KBPS;
+    m_lastEnvChangeRssi = -60.0;
+    m_currentEnvName = "LOS/Ultra (1080p60)";
+    m_hasSiyiTelemetry = false;
 
     qInfo() << "[BelaCoder-SRT] Reset bitrate to:" << m_currentBitrateKbps << "kbps";
     emit bitrateChanged(m_currentBitrateKbps);
@@ -397,11 +422,16 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
     }
 
     const QString timeStr = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-    qInfo().noquote() << QString("[%1] RTT: %2ms | BW: %3 Mbps | Loss: %4% | Video: %5 | State: %6 --> bitrate: %7")
+    QString siyiLabel = m_hasSiyiTelemetry
+                            ? QString("SIYI: %1dBm (%2% | %3)").arg(m_smoothedRssi, 0, 'f', 0).arg(m_smoothedSignal).arg(m_currentEnvName)
+                            : "SIYI: N/A";
+
+    qInfo().noquote() << QString("[%1] RTT: %2ms | BW: %3 Mbps | Loss: %4% | %5 | Video: %6 | State: %7 --> bitrate: %8")
         .arg(timeStr)
         .arg(m_latestSmoothedRtt, 0, 'f', 0)
         .arg(m_latestSmoothedBw, 0, 'f', 2)
         .arg(m_latestSmoothedLossPercent, 0, 'f', 1)
+        .arg(siyiLabel)
         .arg(videoStateLabel)
         .arg(m_latestStatusReason)
         .arg(videoStr);
@@ -411,6 +441,78 @@ void SRTAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
 {
     if (!m_isRunning) return;
     m_lastAchievedBitrateKbps = (achievedKbps > 0) ? static_cast<unsigned int>(achievedKbps) : 0;
+}
+
+const RfEnvironment& SRTAdaptiveBitrateStreaming::getRfEnvironment(double rssi) const
+{
+    for (int i = 0; i < RF_ENVIRONMENT_COUNT; ++i) {
+        if (rssi >= RF_ENVIRONMENTS[i].minRssi) {
+            return RF_ENVIRONMENTS[i];
+        }
+    }
+    return RF_ENVIRONMENTS[RF_ENVIRONMENT_COUNT - 1];
+}
+
+void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
+{
+    if (!m_isRunning || !stat.isAlive) return;
+
+    m_siyiStat = stat;
+    m_hasSiyiTelemetry = true;
+    m_lastSiyiPacketTime = QDateTime::currentMSecsSinceEpoch();
+
+    // Sliding window median filter cho RSSI (5 mẫu) để lọc nhiễu tức thời
+    m_siyiRssiHistory.append(stat.rssi);
+    if (m_siyiRssiHistory.size() > 5) {
+        m_siyiRssiHistory.removeFirst();
+    }
+    m_smoothedRssi = calculateMedian(m_siyiRssiHistory);
+    m_smoothedSignal = stat.signal;
+
+    const RfEnvironment &env = getRfEnvironment(m_smoothedRssi);
+
+    // Kiểm tra đổi môi trường với ngưỡng trễ Hysteresis (>= 2 dBm) chống rung lắc ranh giới
+    bool isCeilingDifferent = (env.ceilingKbps != m_currentEnvCeiling);
+    bool exceedsHysteresis = (qAbs(m_smoothedRssi - m_lastEnvChangeRssi) >= RF_ENV_HYSTERESIS_DBM);
+
+    if (isCeilingDifferent && exceedsHysteresis) {
+        unsigned int oldCeiling = m_currentEnvCeiling;
+        m_currentEnvCeiling = env.ceilingKbps;
+        m_lastEnvChangeRssi = m_smoothedRssi;
+        m_currentEnvName = env.name;
+
+        if (m_currentEnvCeiling > oldCeiling) {
+            // Môi trường mạng MẠNH HƠN (bay lại gần GCS): Nâng trần ngay lập tức, không đợi 30s dò dẫm!
+            qInfo().noquote() << QString("[RF Environment] 📶 Entered STRONGER environment: %1 | New Ceiling: %2 kbps (RSSI: %3 dBm)")
+                                        .arg(m_currentEnvName).arg(m_currentEnvCeiling).arg(m_smoothedRssi, 0, 'f', 1);
+
+            m_lastCongestedBitrate = m_currentEnvCeiling;
+            m_clearSinceMs = m_lastSiyiPacketTime;
+            m_lastBitrateIncrTime = m_lastSiyiPacketTime;
+            m_networkEnvironmentChanged = true;
+        } else {
+            // Môi trường mạng YẾU HƠN (bay ra xa GCS / khuất sóng): Khóa trần thấp hơn, chủ động hạ bitrate xuống trước khi rớt gói
+            qWarning().noquote() << QString("[RF Environment] ⚠️ Entered WEAKER environment: %1 | Lowering Ceiling: %2 kbps (RSSI: %3 dBm)")
+                                        .arg(m_currentEnvName).arg(m_currentEnvCeiling).arg(m_smoothedRssi, 0, 'f', 1);
+
+            m_lastCongestedBitrate = m_currentEnvCeiling;
+
+            if (m_currentBitrateKbps > m_currentEnvCeiling) {
+                qInfo().noquote() << QString("[RF Environment] Proactively stepping down bitrate from %1 kbps to %2 kbps for link safety")
+                                             .arg(m_currentBitrateKbps).arg(m_currentEnvCeiling);
+                applyNewBitrate(m_currentEnvCeiling, m_latestSmoothedRtt, m_latestSmoothedBw, 0);
+            }
+        }
+    }
+}
+
+void SRTAdaptiveBitrateStreaming::handleSiyiLinkLost()
+{
+    if (m_hasSiyiTelemetry) {
+        m_hasSiyiTelemetry = false;
+        m_siyiStat.isAlive = false;
+        qWarning().noquote() << "[RF Environment] ⚠️ SIYI Telemetry lost (> 2.5s). Reverting to transport-only SRT QoS.";
+    }
 }
 
 void SRTAdaptiveBitrateStreaming::handleQosCameraConnection(const QVector<SRTPeerStat> &peers)
@@ -453,12 +555,17 @@ unsigned int SRTAdaptiveBitrateStreaming::calculateNetworkPartitionCeiling(doubl
     Q_UNUSED(state);
     unsigned int partitionCeiling = m_maxBitrateKbps;
 
-    // Bandwidth capacity partition (pure dynamic formula based on true link bandwidth):
+    // 1. Bandwidth capacity partition (dựa trên ước lượng băng thông SRT):
     double effectiveBw = (m_bottleneckBwMbps > 0.0 && state != CongestionState::Clear) ? m_bottleneckBwMbps : smoothedBw;
     if (effectiveBw > 0.1 && effectiveBw < 150.0) {
         unsigned int bwCap = static_cast<unsigned int>(effectiveBw * 1000.0 * BW_UTILIZATION_RATIO);
         bwCap = qMax(MIN_ACTIVE_VIDEO_BITRATE_KBPS, bwCap);
         partitionCeiling = qMin(partitionCeiling, bwCap);
+    }
+
+    // 2. Physical RF environment ceiling (dựa trên môi trường sóng SIYI HM30):
+    if (m_hasSiyiTelemetry && m_siyiStat.isAlive && m_currentEnvCeiling > 0) {
+        partitionCeiling = qMin(partitionCeiling, m_currentEnvCeiling);
     }
 
     partitionCeiling = (partitionCeiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -894,45 +1001,20 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             if (m_lastCongestedBitrate > 0) {
                 effectiveMax = qMin(effectiveMax, m_lastCongestedBitrate);
             }
+            if (m_hasSiyiTelemetry && m_siyiStat.isAlive && m_currentEnvCeiling > 0) {
+                effectiveMax = qMin(effectiveMax, m_currentEnvCeiling);
+            }
             effectiveMax = (effectiveMax / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
             effectiveMax = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, effectiveMax, m_maxBitrateKbps);
 
             if (m_currentBitrateKbps >= effectiveMax) {
-                if (m_lastCongestedBitrate > 0) {
-                    if (m_lastProbeTime == 0) {
-                        m_lastProbeTime = ctime;
-                    }
-
-                    // If any loss occurs while holding at ceiling, reset 30s timer
-                    if (m_lossPercentAvg > 0.0) {
-                        m_lastProbeTime = ctime;
-                    }
-
-                    // Only after holding stably at this level for 30 seconds with 0.0% loss
-                    // do we cautiously probe +50k to check the next level.
-                    const bool canProbeBetterPartition = ((ctime - m_lastProbeTime >= FAILURE_MEMORY_PROBE_INTERVAL_MS) &&
-                                                          m_lossPercentAvg == 0.0 &&
-                                                          rttInflation < 5.0);
-
-                    if (canProbeBetterPartition) {
-                        unsigned int probeTarget = m_currentBitrateKbps + FAILURE_MEMORY_PROBE_STEP_KBPS;
-                        probeTarget = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, probeTarget, m_maxBitrateKbps);
-                        if (probeTarget > m_currentBitrateKbps) {
-                            m_previousStableBitrate = m_currentBitrateKbps;
-                            m_lastBitrateIncrTime = ctime;
-                            m_lastBitrateChangeTime = ctime;
-
-                            // Each subsequent level MUST also hold for 30s!
-                            m_lastCongestedBitrate = probeTarget;
-                            m_lastProbeTime = ctime;
-
-                            m_latestStatusReason = QString("CLEAR (Probing higher partition %1k)").arg(probeTarget);
-                            applyNewBitrate(probeTarget, smoothedRtt, smoothedBw, deltaLoss);
-                            return;
-                        }
-                    }
-                }
-                m_latestStatusReason = QString("CLEAR (Holding at ceiling %1k)").arg(effectiveMax);
+                // ĐÃ CHẠM MỨC TRẦN CỦA MÔI TRƯỜNG HIỆN TẠI:
+                // KHÓA CỨNG HOÀN TOÀN! THÀNH 1 ĐƯỜNG THẲNG TẮP!
+                // TUYỆT ĐỐI KHÔNG BÒ LÊN THĂM DÒ NỮA KHI MÔI TRƯỜNG MẠNG CHƯA ĐỔI!
+                m_latestStatusReason = QString("CLEAR (LOCKED at %1 | %2k)")
+                                           .arg(m_hasSiyiTelemetry ? m_currentEnvName : "Ceiling")
+                                           .arg(effectiveMax);
+                return;
             } else {
                 m_lastProbeTime = 0;
 

@@ -10,6 +10,7 @@
 #include "IAdaptiveBitrateStreaming.h"
 #include "SRTPeerStat.h"
 #include "ABRConfigs.h"
+#include "SiyiLinkStat.h"
 
 class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
@@ -86,6 +87,8 @@ public:
 public slots:
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);
     void handleC2ConnectionStats(const QVector<SRTPeerStat> &peers);
+    void handleSiyiLinkStat(const SiyiLinkStat &stat);
+    void handleSiyiLinkLost();
     void onHeartbeatTimeout();
     void handleCameraReportedBitrate(int achievedKbps);
 
@@ -98,6 +101,9 @@ private:
                        int rawRetransTotal = 0);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
     unsigned int calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const;
+
+    // SIYI RF Environment helper
+    const RfEnvironment& getRfEnvironment(double rssi) const;
 
     void evaluateC2Quality();
     QString c2PriorityToString(C2PriorityLevel p) const;
@@ -178,6 +184,17 @@ private:
     bool m_needRecoveryRefresh;
     qint64 m_lastCollapseLogTime;
     unsigned int m_lastAchievedBitrateKbps;
+
+    // SIYI HM30 RF Telemetry & Environment State
+    SiyiLinkStat m_siyiStat;
+    QVector<double> m_siyiRssiHistory;
+    double m_smoothedRssi;
+    int m_smoothedSignal;
+    qint64 m_lastSiyiPacketTime;
+    unsigned int m_currentEnvCeiling;
+    double m_lastEnvChangeRssi;
+    QString m_currentEnvName;
+    bool m_hasSiyiTelemetry;
 };
 
 #endif // SRTADAPTIVEBITRATESTREAMING_H

@@ -32,9 +32,13 @@ void ABRFactory::startCameraSocketAbr()
 
     this->disconnect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
     this->disconnect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
+    this->disconnect(this, &ABRFactory::onSiyiTelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkStat);
+    this->disconnect(this, &ABRFactory::onSiyiTelemetryLost, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkLost);
 
     this->connect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
     this->connect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
+    this->connect(this, &ABRFactory::onSiyiTelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkStat);
+    this->connect(this, &ABRFactory::onSiyiTelemetryLost, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkLost);
 
     _srtAdaptiveBitrateStreaming->start();
 }
@@ -44,6 +48,16 @@ void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
     emit onC2TelemetryData(peers);
 }
 
+void ABRFactory::handleSiyiData(const SiyiLinkStat &stat)
+{
+    emit onSiyiTelemetryData(stat);
+}
+
+void ABRFactory::handleSiyiLost()
+{
+    emit onSiyiTelemetryLost();
+}
+
 void ABRFactory::stopCameraSocketAbr()
 {
     qDebug() << "ABRFactory: Stop SRT ABR";
@@ -51,6 +65,8 @@ void ABRFactory::stopCameraSocketAbr()
     if (_srtAdaptiveBitrateStreaming) {
         this->disconnect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
         this->disconnect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
+        this->disconnect(this, &ABRFactory::onSiyiTelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkStat);
+        this->disconnect(this, &ABRFactory::onSiyiTelemetryLost, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkLost);
         _srtAdaptiveBitrateStreaming->stop();
     }
 }

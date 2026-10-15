@@ -12,10 +12,12 @@ HEADERS += \
     IAdaptiveBitrateStreaming.h \
     SRTAdaptiveBitrateStreaming.h \
     SRTPeerStat.h \
+    SiyiLinkStat.h \
     VideoResolutionAdapter.h \
     XBQoSService.h \
     dev/CameraControl.h \
-    dev/NetworkHandler.h
+    dev/NetworkHandler.h \
+    dev/SiyiLinkHandler.h
 
 SOURCES += \
     main.cpp \
@@ -26,4 +28,5 @@ SOURCES += \
     VideoResolutionAdapter.cpp \
     XBQoSService.cpp \
     dev/CameraControl.cpp \
-    dev/NetworkHandler.cpp
+    dev/NetworkHandler.cpp \
+    dev/SiyiLinkHandler.cpp
