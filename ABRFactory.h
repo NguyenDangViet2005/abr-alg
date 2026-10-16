@@ -118,12 +118,14 @@ private:
     int _headroomPct = ABR_HEADROOM_FACTOR_PCT;
 
     // ── Primary-role adopt state (PORT DEVIATION) ────────────────────────
-    // m_lastEffectiveKbps: the last bitrate this factory told the CAMERA to run
-    // (= the value relayed on routerAbrEffectiveBitrate = XBQoSService::
-    // m_currentBitrate). On the A->B primary edge the new primary adopts THIS,
-    // so the camera stays continuous across the switch. 0 until the first
-    // dispatch — the edge falls back to B's own value then (startup).
-    int _lastEffectiveKbps = 0;
+    // m_lastEffectiveKbps: the last NON-ZERO bitrate this factory told the CAMERA
+    // to run (= the value relayed on routerAbrEffectiveBitrate = XBQoSService::
+    // m_currentBitrate). On the A->B primary edge the new primary adopts THIS, so
+    // the camera stays continuous across the switch. Sentinel -1 = NEVER
+    // dispatched (true startup) — the edge falls back to B's own value then. A
+    // telemetry PAUSE (0) is deliberately NOT cached, so a switch during a pause
+    // carries the last RUNNING value rather than an ambiguous 0 (H1).
+    int _lastEffectiveKbps = -1;
     // m_switchClock / m_lastSwitchMs: monotonic clock + the ms of the last
     // SUCCESSFUL adopt (a debounced edge does NOT refresh it), for the
     // anti-jitter debounce (ABR_SWITCH_DEBOUNCE_MS). A flip-flop that reverses

@@ -37,8 +37,10 @@
 #define ABR_MAX_BITRATE_KBPS                   2000
 
 // Bitrate video tối thiểu (kbps) — sàn; không bao giờ đề xuất dưới mức này.
-// [xbfirm]
-#define ABR_MIN_BITRATE_KBPS                   30
+// [xbfirm] — NÂNG 30 -> 100 (2026-10-15): 30 quá thấp, video gần như không xem
+// được; ladder loss + zero-throughput + telemetry-collapse đều kẹp về đây, nên
+// sàn chính là mức xấu nhất camera còn thấy. 100 là mức "còn nhìn được".
+#define ABR_MIN_BITRATE_KBPS                   100
 
 // Bitrate KHỞI ĐỘNG (kbps) — giá trị instance nhận ngay khi tạo (ctor) VÀ khi
 // start()/reset(). Router ABR được dispatch tới camera ngay tick đầu (switch

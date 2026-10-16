@@ -83,16 +83,21 @@ public:
     // the effective value keeps the camera continuous: on the switch tick it stays
     // 1200 and this link ramps from there.
     //
-    // State change: set the bitrate, RESET THE CEILING to m_maxAbr (a low ceiling
-    // a SPARE learned must not clamp the new primary), clear the transient
-    // episodes (baseline / last-good / recovery-hold / settle). It does NOT route
+    // State change: set the bitrate; ALWAYS clear the transient episodes
+    // (baseline / last-good / recovery-hold / settle / zero-throughput counter /
+    // the shared reset token) so nothing from the spare era bleeds into the new
+    // primary's first decisions. `resetCeiling` additionally sets
+    // m_ceilingKbps = m_maxAbr — true on a real switch (a low ceiling a SPARE
+    // learned must not clamp the new primary), FALSE on a debounced edge, where
+    // the ceiling memory is kept (anti-jitter) while the internal bitrate is still
+    // bridged so B's ladder base cannot diverge from the camera. It does NOT route
     // through setNewBitrate — that emits bitrateProposed, and the factory's
     // explicit emit after this call would double-dispatch. Direct state write,
     // return void; the caller owns the single emit.
     //
     // Bypasses m_isPrimaryCache BY DESIGN: the factory calls this exactly when B
     // is the new primary, and setting a scalar is not "adapting".
-    void adoptPrimaryBitrate(unsigned int kbps);
+    void adoptPrimaryBitrate(unsigned int kbps, bool resetCeiling);
 
 public slots:
     // One VIDEO or C2 row destined for THIS interface (the factory routes by

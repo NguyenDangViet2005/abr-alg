@@ -216,22 +216,36 @@ void ABRFactory::handleRouterTick(const QString &primaryInterface)
         if (it == _routerAbrs.end()) {
             qWarning().nospace() << "[ABR][SWITCH] primary '" << primaryInterface
                                  << "' is not a known interface — no dispatch";
-        } else if (abrSwitchDebounced(_switchClock.elapsed(), _lastSwitchMs,
-                                      static_cast<long long>(ABR_SWITCH_DEBOUNCE_MS))) {
-            qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
-                              << primaryInterface << " within debounce ("
-                              << ABR_SWITCH_DEBOUNCE_MS << "ms) — not re-adopting";
         } else {
-            // Carry = what the camera runs NOW. 0 means we have never dispatched
-            // (startup edge) — fall back to B's own value so we still emit one.
-            const unsigned int carry = (_lastEffectiveKbps > 0)
+            // Carry = what the camera runs NOW. -1 means NEVER dispatched (true
+            // startup) — fall back to B's own value so we still emit one. A pause
+            // does not update the cache (see handleRouterAbrBitrate), so a switch
+            // during a pause carries the last RUNNING value (H1).
+            const unsigned int carry = (_lastEffectiveKbps >= 0)
                                            ? static_cast<unsigned int>(_lastEffectiveKbps)
                                            : static_cast<unsigned int>((*it)->currentBitrate());
-            (*it)->adoptPrimaryBitrate(carry);
-            _lastSwitchMs = _switchClock.elapsed();
-            qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
-                              << primaryInterface << " — adopting effective "
-                              << (*it)->currentBitrate() << "kbps";
+            const qint64 now = _switchClock.elapsed();
+            const bool debounced = abrSwitchDebounced(now, _lastSwitchMs,
+                                                      static_cast<long long>(ABR_SWITCH_DEBOUNCE_MS));
+            // Always bridge B's internal bitrate to the carried value; only a
+            // NON-debounced edge resets the ceiling. Skipping the bridge entirely
+            // on a debounced edge would leave B's ladder base diverged from the
+            // camera and its next proposal would jump it (M1).
+            (*it)->adoptPrimaryBitrate(carry, /*resetCeiling=*/!debounced);
+            // Do NOT arm the debounce on the startup edge ("" -> first): it is not
+            // jitter, and arming it would swallow a genuine re-elect in the first
+            // window (M2).
+            if (!prevPrimary.isEmpty()) _lastSwitchMs = now;
+            if (debounced) {
+                qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
+                                  << primaryInterface << " within debounce ("
+                                  << ABR_SWITCH_DEBOUNCE_MS << "ms) — bridged to "
+                                  << (*it)->currentBitrate() << "kbps, ceiling kept";
+            } else {
+                qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
+                                  << primaryInterface << " — adopting effective "
+                                  << (*it)->currentBitrate() << "kbps";
+            }
             // One emit: the service dedups (newBitrate == m_currentBitrate is a
             // no-op), so a carry equal to the camera's current value dispatches
             // nothing — the camera stays continuous across the switch. Cache it
@@ -251,10 +265,13 @@ void ABRFactory::handleRouterAbrBitrate(const QString &iface, unsigned int kbps)
     // proposal is logged but never dispatched — acting on it would drive the
     // video with a link the router is not currently using.
     if (effective) {
-        // Cache the last dispatched value: it IS what the camera runs now, and
-        // the switch edge adopts it as the carry. Cached only on the EFFECTIVE
-        // (primary) path, so a spare's proposal never poisons the carry.
-        _lastEffectiveKbps = static_cast<int>(kbps);
+        // Cache the last NON-ZERO dispatched value: it IS what the camera runs
+        // now, and the switch edge adopts it as the carry. Cached only on the
+        // EFFECTIVE (primary) path, so a spare's proposal never poisons the carry.
+        // 0 is the telemetry-collapse PAUSE — deliberately NOT cached (H1), so a
+        // switch during a pause carries the last RUNNING value, not an ambiguous 0
+        // that the edge cannot tell from "never dispatched".
+        if (kbps > 0) _lastEffectiveKbps = static_cast<int>(kbps);
         emit routerAbrEffectiveBitrate(static_cast<int>(kbps));
     }
 }

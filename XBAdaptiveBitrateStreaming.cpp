@@ -142,6 +142,15 @@ void XBAdaptiveBitrateStreaming::reset(int bitrateKbps)
     // xbfirm reset(), verbatim. Note it does NOT reset
     // m_problematicBitrateThreshold (commented out in xbfirm) and restores the
     // advisor gains to 1.0.
+    //
+    // INTENTIONALLY UNGATED (Phase 01, step 5): this writes
+    // m_abrState.current_bitrate_kbps without the m_isPrimaryCache guard that
+    // setNewBitrate carries. That is safe because reset() has NO live callers for
+    // router instances — startRouterAbr() creates the instances but never calls
+    // start() (which is the only path to reset()), and handleSerialStatus is not
+    // wired for the router port. If reset() is ever wired to a spare, add the same
+    // guard here. Documented, not edited: adding the guard now would be a no-op
+    // today and would hide the day this assumption breaks.
     _cameraStatus = true;
     m_abrState.current_bitrate_kbps = static_cast<unsigned int>(bitrateKbps > 0 ? bitrateKbps : 0);
     m_lastAbrAction = ABR_NONE;
@@ -416,7 +425,7 @@ void XBAdaptiveBitrateStreaming::handleRouterTick(const QString &primaryInterfac
                       static_cast<int>(m_maxAbr), ceiling, cap);
 }
 
-void XBAdaptiveBitrateStreaming::adoptPrimaryBitrate(unsigned int kbps)
+void XBAdaptiveBitrateStreaming::adoptPrimaryBitrate(unsigned int kbps, bool resetCeiling)
 {
     // Primary-role adopt (PORT DEVIATION). Called by the factory on the A!=B
     // primary edge, BEFORE its single explicit emit. `kbps` is the effective
@@ -428,7 +437,8 @@ void XBAdaptiveBitrateStreaming::adoptPrimaryBitrate(unsigned int kbps)
 
     qInfo().nospace() << "[ABR][SWITCH][adopt] " << m_iface << " was "
                       << m_abrState.current_bitrate_kbps << " -> adopting effective "
-                      << adopted << "kbps (carry=" << kbps << ", maxAbr=" << m_maxAbr << ")";
+                      << adopted << "kbps (carry=" << kbps << ", maxAbr=" << m_maxAbr
+                      << ", resetCeiling=" << (resetCeiling ? "yes" : "no") << ")";
 
     // Direct state write, NOT setNewBitrate: setNewBitrate emits bitrateProposed,
     // and the factory's explicit emit after this call would dispatch a SECOND
@@ -438,10 +448,10 @@ void XBAdaptiveBitrateStreaming::adoptPrimaryBitrate(unsigned int kbps)
     // The adopted value is the camera's CURRENT value, not one WE were stepping
     // toward — treat it as a neutral restart: no in-flight increase to inherit.
     m_lastAbrAction = ABR_NONE;
-    // Reset the ceiling: a low ceiling a SPARE learned must not clamp the new
-    // primary (decision Q1a — keep the ladder memory, drop the ceiling). The
-    // ramp is free up to maxAbr until THIS link earns its own ceiling.
-    m_ceilingKbps = m_maxAbr;
+    // Ceiling: reset on a real switch (a low ceiling a SPARE learned must not
+    // clamp the new primary — decision Q1a); KEPT on a debounced edge so a
+    // flapping router does not lose the learned ceiling on every bounce.
+    if (resetCeiling) m_ceilingKbps = m_maxAbr;
     // Clear the transient episodes so nothing from the spare-ladder era bleeds
     // into the new primary's first decisions.
     m_lastGoodKbps = 0;
@@ -452,6 +462,19 @@ void XBAdaptiveBitrateStreaming::adoptPrimaryBitrate(unsigned int kbps)
     m_pendingCeiling = 0;
     m_overshootConfirmTicks = 0;
     m_ceilingHoldSince = 0;
+    // H2: a spare's frozen ladder could have accumulated a zero-throughput count
+    // before the guard; clear it so the new primary needs FRESH confirmation
+    // before any MIN-drop rather than firing on its first zero row.
+    m_zeroThroughputTicks = 0;
+    // L2: the shared 30s reset token may have been consumed by a spare's loss /
+    // score-cliff emit (the factory dropped the request by primary-gate). Restore
+    // the negative sentinel so the promoted primary's first real reset is not
+    // suppressed. Same class as reset()'s m_lastResetMs handling.
+    m_lastResetMs = -ABR_RESET_RATE_LIMIT_MS;
+    // L2: the ceiling-escape fallback latch belongs to the OLD ceiling; since the
+    // ceiling may just have been reset, re-arm the base backoff.
+    m_reprobeInFlight = false;
+    m_ceilingReprobeBackoffMs = ABR_CEILING_REPROBE_BASE_MS;
 }
 
 void XBAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)
@@ -969,6 +992,16 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
         // then having to ramp back is the exact stall we are fixing.
         if (!m_seenLiveTraffic || !m_video.usable) {
             m_cleanRecoveryTicks = 0;   // Phase 10: early return bypasses the end reset
+            return;
+        }
+        // PRIMARY-ONLY (PORT DEVIATION, H2/M3): a SPARE's ladder is frozen, so it
+        // must not accumulate the zero-throughput counter, nor LOG a drop it will
+        // never make. Without this a spare whose subflow reports thr=0 reaches the
+        // confirm state, the guarded setNewBitrate() below silently no-ops, and the
+        // stale counter then fires the MIN-drop on the promoted primary's first
+        // zero row — re-creating the 1200 -> 30 stall one tick after the switch.
+        if (!m_isPrimaryCache) {
+            m_cleanRecoveryTicks = 0;
             return;
         }
         // PORT DEVIATION (Phase 07): require ABR_ZERO_THROUGHPUT_CONFIRM_TICKS
