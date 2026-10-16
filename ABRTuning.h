@@ -82,8 +82,20 @@
 // [xbfirm]
 #define ABR_DECREASE_FACTOR                    0.80
 
-// Bước tăng bitrate (kbps) mỗi lần ramp lên. [xbfirm]
+// Bước tăng bitrate (kbps) mỗi lần ramp lên — dùng cho đường "kick" post-outage
+// (ABR_MIN_BITRATE_KBPS + step). Đường ramp thường dùng cặp FAST/SLOW bên dưới.
+// [xbfirm]
 #define ABR_BITRATE_STEP_KBPS                  100
+
+// Bước ramp nhanh (kbps) khi qdelay THẤP (< ABR_QUEUE_DELAY_LOW_THRESHOLD_MS):
+// hàng đợi gửi chưa tích tụ → leo 2 nấc một lúc. Đây là bước ramp THỰC DÙNG.
+// [PORT DEVIATION 2026-10-16]
+#define ABR_RAMP_STEP_FAST_KBPS                200
+// Bước ramp "chậm" (kbps) khi qdelay >= ngưỡng LOW. HIỆN CHƯA DÙNG trong
+// production: entry gate của nhánh ramp (< ngưỡng LOW, hoặc 20ms sau DECREASE)
+// luôn thoả điều kiện FAST, nên nhánh này chỉ để dành cho caller tương lai có
+// qdelay nằm trong [LOW, HIGH) mà vẫn ramp. Xem ABRRampStep.h. [PORT DEVIATION 2026-10-16]
+#define ABR_RAMP_STEP_SLOW_KBPS                100
 
 // ─────────────────────────────────────────────────────────────────────────
 // NHÓM 2 — NGƯỠNG THUẬT TOÁN (đơn vị ms / % / kbps / số mẫu)
@@ -114,8 +126,12 @@
 #define ABR_TELEMETRY_KICK_BITRATE_KBPS        500
 // Cooldown (ms) giữa 2 lần tăng bitrate. [xbfirm]
 #define ABR_BITRATE_INCREASE_COOLDOWN_MS       2000
-// Số mẫu RTT giữ lại để tính jitter. [xbfirm]
-#define ABR_RTT_HISTORY_SIZE                   10
+// Số mẫu RTT giữ lại để tính jitter (stddev cửa sổ trượt). 10 -> 5 (2026-10-16):
+// đo từ qos-5.log — cửa sổ ngắn làm spike rời cửa sổ sớm gấp đôi, tick clean
+// tăng ~2x (eth1 14->29, eth2 12->24 trên 45), gate mở sớm ~2 tick. MAD bị loại
+// (MAD-median cho ~1ms ở ca spike thật → mở gate nhầm vào link đang nghẽn).
+// [xbfirm] (giá trị gốc 10; nay PORT DEVIATION).
+#define ABR_RTT_HISTORY_SIZE                   5
 // Ngưỡng loss VIDEO (%) để coi là "mất gói": vượt mức này → xét giảm.
 // [PORT DEVIATION 2026-10-12] 0.8 → 0.5: phản ứng sớm hơn (~2 gói/5-tick thay
 // vì ~3). Vẫn trên sàn nhiễu 1 gói = 1/350 ≈ 0.29% (ABR_LOSS_WINDOW_TICKS=5).

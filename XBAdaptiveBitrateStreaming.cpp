@@ -1,5 +1,7 @@
 #include "XBAdaptiveBitrateStreaming.h"
+#include "ABRJitter.h"       // pure jitter (RTT stddev) math
 #include "ABRLossBand.h"     // Phase 11: pure loss-ladder band math
+#include "ABRRampStep.h"     // pure qdelay-aware ramp step math
 #include "ABRScoreCliff.h"   // Phase 12: pure score-cliff predicate
 #include "ABRSwitchAdopt.h"  // pure switch-adopt decision math
 #include <QDebug>
@@ -932,16 +934,10 @@ bool XBAdaptiveBitrateStreaming::rttHigh(const tcpInfo &tcpi)
 
 double XBAdaptiveBitrateStreaming::calculateJitter()
 {
-    // xbfirm calculateJitter, verbatim.
-    if (m_rttHistory.size() < 2) return 0.0;
-
-    double sum = 0.0;
-    for (const auto &val : m_rttHistory) { sum += val; }
-    const double mean = sum / m_rttHistory.size();
-
-    double sq_sum = 0.0;
-    for (const auto &val : m_rttHistory) { sq_sum += qPow(val - mean, 2); }
-    return qSqrt(sq_sum / m_rttHistory.size());
+    // xbfirm formula, verbatim — now living in ABRJitter.h so it is unit-testable
+    // without a socket (tests/tst_abr_ramp_tuning.cpp). Population stddev of the
+    // RTT window; count < 2 -> 0.0 is handled inside the helper.
+    return abrJitterStddev(m_rttHistory.constData(), m_rttHistory.size());
 }
 
 void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
@@ -1133,8 +1129,17 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                                                  << " at floor — not ramping yet";
                         } else {
                             if (atFloor) m_cleanRecoveryTicks = 0;   // confirmed — ramp, count afresh next drop
+                            // Phase 02 (2026-10-16): qdelay-aware ramp step via
+                            // abrRampStepKbps — +ABR_RAMP_STEP_FAST_KBPS (200) when the
+                            // sender queue is empty. NOTE: reaching this point already
+                            // means queuing_delay_ms < increase_q_delay_threshold (100,
+                            // or 20 after a decrease), so the helper returns FAST on
+                            // EVERY tick here; the effective change is a fixed +200.
+                            // The SLOW tier exists only for a future caller — see
+                            // ABRRampStep.h. m_gainUp stays the multiplier (1.0, no advisor).
+                            const unsigned int step_kbps = abrRampStepKbps(queuing_delay_ms);
                             const unsigned int next_bitrate = m_abrState.current_bitrate_kbps
-                                                            + static_cast<unsigned int>(m_gainUp * ABR_BITRATE_STEP_KBPS);
+                                                            + static_cast<unsigned int>(m_gainUp * step_kbps);
                             const unsigned int cap = steadyCapKbps();
                             // Phase 08 (C) / H2: the "blocked at a LEARNED ceiling" state
                             // is `m_ceilingKbps < m_maxAbr`. At m_maxAbr there is nothing
@@ -1214,6 +1219,16 @@ void XBAdaptiveBitrateStreaming::checkSenderQueue(const tcpInfo &tcpi)
                             }
                         }
                     }
+                } else {
+                    // Phase 01 (2026-10-16): instrument the ONE ramp gate that was
+                    // a blind spot — jitter. The block above only logs when jitter
+                    // PASSES, so a link that was blocked here printed nothing and
+                    // the operator had to guess which gate held. qdelay + rtt-min
+                    // already passed to reach this else, so this line proves jitter
+                    // is the blocker and reports its value for the next tuning pass.
+                    qWarning().nospace() << "[ABR][" << m_iface << "] Jitter unstable (" << jitter
+                                         << "ms >= " << ABR_JITTER_STABLE_THRESHOLD_MS
+                                         << "ms) - holding";
                 }
             }
         }

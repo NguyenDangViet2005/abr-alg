@@ -9,7 +9,9 @@ TARGET = aiCompressor
 HEADERS += \
     ABRConfigs.h \
     ABRGpsMove.h \
+    ABRJitter.h \
     ABRLossBand.h \
+    ABRRampStep.h \
     ABRScoreCliff.h \
     ABRTuning.h \
     ABRFactory.h \
