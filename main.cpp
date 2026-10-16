@@ -92,6 +92,10 @@ int main(int argc, char *argv[])
     // ABR instance to compute a bitrate. A name declared here but never seen (or
     // seen but not declared) surfaces as the "unknown iface" warning in
     // ABRFactory::handleRouterRow.
+    // "wlan0" added 2026-10-16: the router now also publishes a WiFi-STA row
+    // (OpenWrt box on Spectrum_AP_Demo), so it needs an ABR instance too —
+    // otherwise its rows are dropped as "unknown iface". The router-side
+    // `interfaces=` must include wlan0 for this to have any effect.
     // XBQoSService has no config file of its own; this line IS the config.
     // Adding an interface is one entry here — nothing else changes.
     //
@@ -105,7 +109,7 @@ int main(int argc, char *argv[])
     // decideBitrate, which DID read it, were deleted in Phase 03.) Keep it wired
     // so the topology fact reaches the instance; there is no switch to flip yet.
     constexpr bool C2_DEPLOYED = false;
-    qosService.setRouterAbrInterfaces({"eth1", "eth2"}, C2_DEPLOYED);
+    qosService.setRouterAbrInterfaces({"eth1", "eth2", "wlan0"}, C2_DEPLOYED);
 
     // Phase 09 (headroom): apply the CLI override (or the #define default).
     qosService.setAbrHeadroomPct(cli.value(optHeadroom).toInt());
