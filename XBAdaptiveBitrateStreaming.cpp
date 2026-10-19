@@ -362,7 +362,7 @@ void XBAdaptiveBitrateStreaming::handleRouterRow(const RouterInterfaceStat &row)
         processTCPInfo(row.rttUs,             // rtt        (µs)
                        row.deliveryRateBps,   // deliveryRate (B/s)
                        row.rttUs,             // tcpiRtt    (µs, dropped by 11-arg)
-                       row.lost,              // tcpiLoss   (count)
+                       row.lost,              // tcpiLoss   (retransmits this tick)
                        row.segsOut,           // tcpiSegsout(count)
                        row.sndCwnd,           // sndCwnd    (dropped by 11-arg)
                        row.sndMss,            // sndMss     (dropped by 11-arg)
@@ -595,6 +595,12 @@ void XBAdaptiveBitrateStreaming::processTCPInfo(quint32 rtt, quint32 min_rtt,
     // loss rate (the definition TCP itself uses) and scales with bitrate; a real
     // collapse still trips on the first tick. The C2 slot keeps the one-tick
     // form (its denominator is already large).
+    //
+    // 2026-10-19: the router now sends a genuine per-tick retransmit count in
+    // slot #9 (delta of tcpi_total_retrans). It used to send tcpi_lost — a GAUGE
+    // that reads 0 once SACKs land, so at a 1 Hz sample most loss ticks arrived
+    // as 0 and the window stayed blind (qos-7.log: 33 of 49 over-trigger ticks
+    // read 0). This window is unchanged and now integrates a real count.
     if (deltaSegsout > 0) {
         m_lossWindowLost.append(static_cast<int>(loss_rate));
         m_lossWindowSegs.append(deltaSegsout);
