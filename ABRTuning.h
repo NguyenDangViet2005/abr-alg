@@ -165,7 +165,15 @@
 // thể trôi nghĩa (không tách thành 2 knob cùng giá trị).
 #define ABR_LOSS_RESET_PCT                     45
 // Sau mỗi bước giảm của ladder, HOLD (ms) trước khi cho giảm tiếp (chờ link hồi).
-#define ABR_LOSS_DECREASE_SETTLE_MS            3000
+// [PORT DEVIATION 2026-10-19] 3000 -> 1000. Tick = 1s (nhịp router publish row),
+// nên 3000 bỏ 3-4 tick: chuỗi loss nhẹ 1040->240 (-200/bước) mất ~16s; với 1000
+// (now+1000ms thường chưa tới tick kế) gần như không bỏ tick nào -> còn ~4s.
+// Đánh đổi ĐÃ CHẤP NHẬN: cửa sổ loss 5 tick vẫn elevated sau khi burst trôi qua,
+// nên có thể giảm thêm 1-2 bước xuống quá thấp rồi phải bò lại (+200 mỗi 2s
+// cooldown). Đổi độ trễ lúc giảm lấy một đoạn hình mờ ngắn khi mạng chập chờn.
+// Lưu ý: KHÔNG còn bằng ABR_OVERSHOOT_SETTLE_MS (vẫn 3000) — guard "chỉ extend,
+// không shorten" ở haveLostPackets giờ là bắt buộc, không phải belt-and-braces.
+#define ABR_LOSS_DECREASE_SETTLE_MS            1000
 // Rate-limit (ms) giữa 2 lần emit requestStreamReset (chống loss dao động quanh
 // ngưỡng reset — nay 45% — spam refresh camera). Đặt ở site emit để tín hiệu tự nó đã bị chặn.
 // Dùng CHUNG cho cả đường score-cliff bên dưới (m_lastResetMs là 1 token duy nhất).

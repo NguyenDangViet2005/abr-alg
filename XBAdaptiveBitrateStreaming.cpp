@@ -827,8 +827,10 @@ bool XBAdaptiveBitrateStreaming::haveLostPackets(const tcpInfo &tcpi)
     if (m_pendingCeiling == 0 && action > static_cast<unsigned int>(ABR_MIN_BITRATE_KBPS)) {
         // Only EXTEND the settle, never shorten it: on the confirming tick
         // applyOvershootCeiling() already armed ABR_OVERSHOOT_SETTLE_MS, and a
-        // shorter ladder settle (if the two constants ever diverge) must not
-        // override it. Equal today (both 3000), so this is belt-and-braces.
+        // shorter ladder settle must not override it. The two constants now
+        // DIVERGE (ladder 1000 since 2026-10-19 vs overshoot 3000), so this
+        // guard is load-bearing: a loss decrease following an overshoot confirm
+        // keeps the full 3s overshoot window instead of shortening it to 1s.
         const qint64 deadline = m_clock.elapsed() + ABR_LOSS_DECREASE_SETTLE_MS;
         if (deadline > m_settleUntil) m_settleUntil = deadline;
     }
