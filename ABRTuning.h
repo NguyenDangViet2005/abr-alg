@@ -207,8 +207,13 @@
 // đang xả, không phải break mới. [PORT DEVIATION]
 #define ABR_OVERSHOOT_SETTLE_MS                3000
 // Khi KHÔNG có nguồn strength: sau khi giữ ở trần bao lâu (ms) thì dò lại 1 bước.
+// NÂNG 30000 -> 60000 (2026-10-19, qos-6.log): trên link tĩnh, chu kỳ răng cưa
+// 504<->704 lặp đúng 32s (= 30s base + 2s cooldown) — dò lại quá thường, mỗi lần
+// lại overshoot rồi re-latch trần, churn vô ích mà không nâng được throughput.
+// Gấp đôi base -> ~62s/chu kỳ, và giữ MAX=120s để backoff *2 của Phase 08(C) còn
+// nguyên dư địa (nếu base == max thì cơ chế nhân đôi mất tác dụng).
 // [PORT DEVIATION]
-#define ABR_CEILING_REPROBE_BASE_MS            30000
+#define ABR_CEILING_REPROBE_BASE_MS            60000
 // Trần của thời gian chờ dò lại (ms) — mỗi lần re-latch thì gấp đôi, tới mức này.
 // [PORT DEVIATION]
 #define ABR_CEILING_REPROBE_MAX_MS             120000
