@@ -84,6 +84,8 @@ void CameraControl::sendAdaptBitrate(int bitrate)
                                        .arg(bitrate)
                                        .arg(message.isEmpty() ? QString::fromUtf8(respData) : message);
             emit bitrateRejected(bitrate, message.isEmpty() ? QString::fromUtf8(respData) : message);
+            reply->deleteLater();
+            return;
         }
         emit bitrateReported(bitrate, achievedKbps);
         reply->deleteLater();

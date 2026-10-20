@@ -64,7 +64,6 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_smoothedSignal(0)
     , m_lastSiyiPacketTime(0)
     , m_currentEnvCeiling(DEFAULT_MAX_BITRATE_KBPS)
-    , m_lastEnvChangeRssi(-60.0)
     , m_currentEnvName("LOS/Ultra (1080p60)")
     , m_hasSiyiTelemetry(false)
 {
@@ -87,7 +86,6 @@ void SRTAdaptiveBitrateStreaming::start()
     m_smoothedSignal = 0;
     m_lastSiyiPacketTime = 0;
     m_currentEnvCeiling = DEFAULT_MAX_BITRATE_KBPS;
-    m_lastEnvChangeRssi = -60.0;
     m_currentEnvName = "LOS/Ultra (1080p60)";
     m_hasSiyiTelemetry = false;
 
@@ -225,7 +223,6 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_smoothedSignal = 0;
     m_lastSiyiPacketTime = 0;
     m_currentEnvCeiling = DEFAULT_MAX_BITRATE_KBPS;
-    m_lastEnvChangeRssi = -60.0;
     m_currentEnvName = "LOS/Ultra (1080p60)";
     m_hasSiyiTelemetry = false;
 
@@ -471,6 +468,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
         return;
     }
 
+    const bool firstRfSample = (m_lastSiyiPacketTime == 0);
     const bool recoveringRf = !m_hasSiyiTelemetry;
     if (recoveringRf) {
         // Never mix RSSI samples or probe timers from before the outage.
@@ -494,16 +492,35 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
     m_smoothedRssi = calculateMedian(m_siyiRssiHistory);
     m_smoothedSignal = stat.signal;
 
-    const RfEnvironment &env = getRfEnvironment(m_smoothedRssi);
+    // Schmitt hysteresis: weaken at the RF boundary immediately; strengthen
+    // only 2 dBm above the boundary. Recovery uses the same region state.
+    int envIndex = 0;
+    while (envIndex < RF_ENVIRONMENT_COUNT - 1 &&
+           RF_ENVIRONMENTS[envIndex].ceilingKbps != m_currentEnvCeiling) {
+        ++envIndex;
+    }
+    if (firstRfSample) {
+        envIndex = 0;
+        while (envIndex < RF_ENVIRONMENT_COUNT - 1 &&
+               m_smoothedRssi < RF_ENVIRONMENTS[envIndex].minRssi) {
+            ++envIndex;
+        }
+    } else {
+        while (envIndex < RF_ENVIRONMENT_COUNT - 1 &&
+               m_smoothedRssi < RF_ENVIRONMENTS[envIndex].minRssi) {
+            ++envIndex;
+        }
+        while (envIndex > 0 &&
+               m_smoothedRssi >= RF_ENVIRONMENTS[envIndex - 1].minRssi + RF_ENV_HYSTERESIS_DBM) {
+            --envIndex;
+        }
+    }
+    const RfEnvironment &env = RF_ENVIRONMENTS[envIndex];
 
-    // Kiểm tra đổi môi trường với ngưỡng trễ Hysteresis (>= 2 dBm) chống rung lắc ranh giới
-    bool isCeilingDifferent = (env.ceilingKbps != m_currentEnvCeiling);
-    bool exceedsHysteresis = (qAbs(m_smoothedRssi - m_lastEnvChangeRssi) >= RF_ENV_HYSTERESIS_DBM);
-
-    if (recoveringRf || (isCeilingDifferent && exceedsHysteresis)) {
+    // Reconnecting in the same region must preserve the learned safe ceiling.
+    if (env.ceilingKbps != m_currentEnvCeiling) {
         unsigned int oldCeiling = m_currentEnvCeiling;
         m_currentEnvCeiling = env.ceilingKbps;
-        m_lastEnvChangeRssi = m_smoothedRssi;
         m_currentEnvName = env.name;
 
         if (m_currentEnvCeiling > oldCeiling) {

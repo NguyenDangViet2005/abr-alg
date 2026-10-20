@@ -192,7 +192,6 @@ private:
     int m_smoothedSignal;
     qint64 m_lastSiyiPacketTime;
     unsigned int m_currentEnvCeiling;
-    double m_lastEnvChangeRssi;
     QString m_currentEnvName;
     bool m_hasSiyiTelemetry;
 };

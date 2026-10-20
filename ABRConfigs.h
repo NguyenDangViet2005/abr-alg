@@ -40,7 +40,7 @@ static const RfEnvironment RF_ENVIRONMENTS[] = {
 
 static const int RF_ENVIRONMENT_COUNT = sizeof(RF_ENVIRONMENTS) / sizeof(RF_ENVIRONMENTS[0]);
 
-// Ngưỡng trễ Hysteresis chống rung lắc môi trường: lệch >= 2 dBm mới xác nhận đổi môi trường
+// Hysteresis: hạ vùng khi dưới biên; chỉ nâng vùng khi RSSI >= biên + 2 dBm.
 #define RF_ENV_HYSTERESIS_DBM                 2
 
 #endif // ABRCONFIGS_H
