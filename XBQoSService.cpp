@@ -50,11 +50,23 @@ void XBQoSService::setAbrHeadroomPct(int pct)
     m_abrHeadroomPct = pct;
 }
 
+void XBQoSService::setAbrDisabled(bool disabled)
+{
+    m_abrDisabled = disabled;
+}
+
 void XBQoSService::printStartupBanner()
 {
     qInfo() << "============================================================";
     qInfo() << "  XB-QOS-SERVICE : BELACODER ADAPTIVE BITRATE (SRT -> RF)   ";
     qInfo() << "============================================================";
+    // Loud on purpose: a service left in this mode does not adapt, and the
+    // symptom (flat camera bitrate) looks like a bug unless the log says so.
+    if (m_abrDisabled) {
+        qWarning().noquote() << "[QoS Engine] --disable-abr: camera bitrate is FROZEN. "
+                                "ABR still runs, logs and publishes (shadow mode). "
+                                "Socket restarts on loss/cliff stay enabled.";
+    }
 }
 
 void XBQoSService::setupConnections()
@@ -74,6 +86,18 @@ void XBQoSService::setupConnections()
     });
 
     auto handleBitrateChange = [this](unsigned int newBitrate) {
+        // --disable-abr: THE mute. Returning here is the whole feature — this
+        // lambda is the only writer of m_currentBitrate and the only caller of
+        // dispatchToCameraServer for bitrate, so one early return stops the
+        // camera adapting. The keep-alive and the QoS-resync POST then go inert
+        // on their own, because both are guarded on m_currentBitrate > 0 and it
+        // now stays 0. Deliberately NOT gated downstream: keeping the exit door
+        // (dispatchToCameraServer) dumb makes it obvious the mute is upstream.
+        // The loss-driven socket restart is NOT muted — see its lambda below,
+        // which reads the factory's cached last effective bitrate instead.
+        if (m_abrDisabled) {
+            return;
+        }
         if (newBitrate == m_currentBitrate && !m_cameraNeedsSync) {
             return;
         }
@@ -171,13 +195,24 @@ void XBQoSService::setupConnections()
         // requestStreamRefresh connect above. Lambda stays dumb (already rate-limited
         // at the emit site). Guarded on a live bitrate: no restart while the camera
         // is disabled (PAUSE).
+        //
+        // --disable-abr: the mute in handleBitrateChange leaves m_currentBitrate at
+        // 0, so this guard would go permanently false — a camera collapsing under
+        // --disable-abr could never be rescued. Read the factory's cached last
+        // effective bitrate instead whenever the mute is on: the ABR still computes
+        // proposals (shadow mode), so it still knows what the camera is running.
+        // requestStreamRefresh() changes NO bitrate — it only drops the socket — so
+        // firing it here does not breach the "do not change the bitrate" contract.
         connect(m_abrFactory, &ABRFactory::routerAbrResetRequested, this,
                 [this](const QString &iface, const QString &reason) {
-            if (m_cameraControl && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+            const int cameraKbps = m_abrDisabled
+                ? m_abrFactory->lastEffectiveBitrate()
+                : static_cast<int>(m_currentBitrate);
+            if (m_cameraControl && cameraKbps > static_cast<int>(VIDEO_DISABLED_BITRATE_KBPS)) {
                 qWarning().noquote() << QString("[QoS Engine] ABR reset requested (iface=%1, %2) "
                                                 "— restarting camera video socket")
                                             .arg(iface).arg(reason);
-                m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
+                m_cameraControl->requestStreamRefresh(cameraKbps);
                 // Phase 12: mark the restart moment on the dashboard. Tapped HERE (next
                 // to the actual restart, camera-enabled guard passed) so the event means
                 // "restart executed", not merely "requested". The dashboard already

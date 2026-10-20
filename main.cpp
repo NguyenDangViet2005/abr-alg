@@ -42,6 +42,16 @@ int main(int argc, char *argv[])
         "pct", QString::number(ABR_HEADROOM_FACTOR_PCT));
     cli.addOption(optHeadroom);
 
+    // --disable-abr: freeze the camera bitrate. The ABR instances keep running
+    // and keep logging (shadow mode), and the dashboard keeps receiving their
+    // decisions — only the OUTBOUND commands are muted. For A/B measurement:
+    // compare "ABR in control" against "camera on its own default" with the
+    // decision stream still visible. Socket restarts (loss > 45% / score cliff)
+    // remain enabled on purpose — see XBQoSService::setAbrDisabled.
+    const QCommandLineOption optDisableAbr(
+        "disable-abr", "Do not change the camera bitrate. The ABR still runs and logs.");
+    cli.addOption(optDisableAbr);
+
     // One-shot log upload. When set, the service does NOT start: it finds the
     // newest .qsdb in --qos-debug-log-dir, POSTs it to the given host:port, and
     // exits. The log dir is REUSED (not a separate flag) — the same directory
@@ -113,6 +123,9 @@ int main(int argc, char *argv[])
 
     // Phase 09 (headroom): apply the CLI override (or the #define default).
     qosService.setAbrHeadroomPct(cli.value(optHeadroom).toInt());
+
+    // --disable-abr: mute the outbound bitrate commands (ABR keeps running).
+    qosService.setAbrDisabled(cli.isSet(optDisableAbr));
 
     qosService.setQosDebug(cli.isSet(optQosDebug),
                            cli.value(optHost),

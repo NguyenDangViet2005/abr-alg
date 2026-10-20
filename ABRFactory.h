@@ -80,6 +80,14 @@ public slots:
     // the PRIMARY interface's instance (it owns the camera). Closes the loop.
     void handleCameraReportedBitrate(int achievedKbps);
 
+    // The last NON-ZERO bitrate the factory relayed for the PRIMARY interface —
+    // i.e. the value the camera was last told to run. Sentinel -1 = never
+    // dispatched. While --disable-abr is on, XBQoSService::m_currentBitrate
+    // stays 0 (the mute is upstream of it), so the loss-driven socket-restart
+    // guard reads THIS instead: a camera collapse must still be able to trigger
+    // a restart while the bitrate itself is frozen.
+    int lastEffectiveBitrate() const { return _lastEffectiveKbps; }
+
 signals:
     void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);
     void onC2TelemetryData(const QVector<SRTPeerStat> &peers);
