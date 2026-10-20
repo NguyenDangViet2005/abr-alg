@@ -310,9 +310,10 @@ void XBQoSService::start()
     m_routerNetworkHandler->start(ROUTER_TELEMETRY_UDP_PORT);
 
     // Activate the debug channel's I/O (if enabled) and announce the topology.
+    // No local file log: capture-recorder on XBLINK stores the stream and
+    // forwards it, so a second copy here only duplicates bytes.
     if (m_qosDebugEnabled) {
         m_qosDebug->startUdp(m_qosDebugHost, m_qosDebugPort);
-        m_qosDebug->startFileLog(m_qosDebugLogDir);
         QVector<QPair<QString, quint8>> topo;
         topo.reserve(m_routerAbrIfaces.size());
         for (const QString &name : m_routerAbrIfaces) {
