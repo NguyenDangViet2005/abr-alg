@@ -152,7 +152,7 @@ void SiyiLinkHandler::checkLinkWatchdog()
     if (m_isLinkAlive && (now - m_lastResponseTime > SIYI_LINK_TIMEOUT_MS)) {
         m_isLinkAlive = false;
         m_lastStat.isAlive = false;
-        qWarning().noquote() << QString("[SiyiLinkHandler] 🔴 LOST SIYI RF Telemetry (> %1ms). Fallback to pure SRT QoS.")
+        qWarning().noquote() << QString("[SiyiLinkHandler] 🔴 LOST SIYI RF Telemetry (> %1ms). Pausing ABR until valid RSSI returns.")
                                     .arg(SIYI_LINK_TIMEOUT_MS);
         emit onSiyiLinkLost();
     }
