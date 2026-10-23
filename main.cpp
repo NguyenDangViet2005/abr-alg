@@ -93,19 +93,19 @@ int main(int argc, char *argv[])
     XBQoSService qosService;
 
     // ── Router ABR interface list ──
-    // MUST mirror the router's own `interfaces=` in config.ini. The router
-    // ships `interfaces=eth1:1,eth2:1` (sample-general.ini, commit bfda34b:
-    // dual-interface MPTCP) — that is the list of names its id-60 rows carry,
-    // so it is the list this service must declare. Declaring only "eth1" drops
-    // every eth2 row before the ABR sees it ("unknown iface" warning), so
-    // eth2 publishes br=0 / max=0 / ceil=0 / cap=0 on the dashboard — it has no
-    // ABR instance to compute a bitrate. A name declared here but never seen (or
-    // seen but not declared) surfaces as the "unknown iface" warning in
+    // MUST mirror the router's own `interfaces=` in config.ini. The router's
+    // id-60 rows carry those names, so it is the list this service must
+    // declare. Declaring only one of them drops the rest before the ABR sees
+    // them ("unknown iface" warning), and a dropped link publishes
+    // br=0 / max=0 / ceil=0 / cap=0 on the dashboard — it has no ABR instance
+    // to compute a bitrate. A name declared here but never seen (or seen but
+    // not declared) surfaces as the "unknown iface" warning in
     // ABRFactory::handleRouterRow.
-    // "wlan0" added 2026-10-16: the router now also publishes a WiFi-STA row
-    // (OpenWrt box on Spectrum_AP_Demo), so it needs an ABR instance too —
-    // otherwise its rows are dropped as "unknown iface". The router-side
-    // `interfaces=` must include wlan0 for this to have any effect.
+    //
+    // Topology 2026-10-23: two cellular modems plus one wired link. Was
+    // eth1/eth2/wlan0 up to 2026-10-16. The router-side `interfaces=` must be
+    // changed to match, or every row arrives under a name this list rejects.
+    //
     // XBQoSService has no config file of its own; this line IS the config.
     // Adding an interface is one entry here — nothing else changes.
     //
@@ -119,7 +119,7 @@ int main(int argc, char *argv[])
     // decideBitrate, which DID read it, were deleted in Phase 03.) Keep it wired
     // so the topology fact reaches the instance; there is no switch to flip yet.
     constexpr bool C2_DEPLOYED = false;
-    qosService.setRouterAbrInterfaces({"eth1", "eth2", "wlan0"}, C2_DEPLOYED);
+    qosService.setRouterAbrInterfaces({"wwan0", "wwan1", "eth1"}, C2_DEPLOYED);
 
     // Phase 09 (headroom): apply the CLI override (or the #define default).
     qosService.setAbrHeadroomPct(cli.value(optHeadroom).toInt());
