@@ -5,6 +5,18 @@
 // UDP port for receiving QoS connection stats from an external XBSRTFactory.
 #define SRT_ABR_QOS_UDP_PORT 12345
 
+// Native C2 capture (XBLink x74 / PilotApp 10.9.4). No serial/UDP ownership.
+#define C2_TELEMETRY_INTERFACE                 "eth1"
+#define C2_TELEMETRY_UDP_PORT                  3345
+#define C2_TELEMETRY_FC_SYSTEM_ID              1
+#define C2_TELEMETRY_FC_COMPONENT_ID           1
+#define C2_TELEMETRY_INTERVAL_MS               500
+#define C2_TELEMETRY_STALE_MS                  2000
+#define C2_TELEMETRY_RECOVERY_MS               3000
+#define C2_HIGH_VIDEO_CEILING_KBPS             1800
+#define C2_CRITICAL_VIDEO_CEILING_KBPS         200
+#define C2_MIN_PACKETS_FOR_RETRANS_RATIO       20
+
 // ── CameraControl (camera adapt-bitrate API) ──
 #define CAMERA_ADAPT_BITRATE_HOST "127.0.0.1"
 #define CAMERA_ADAPT_BITRATE_PORT 4002
@@ -12,6 +24,7 @@
 
 // ── ABR defaults ──
 #define ABR_DEFAULT_MAX_ABR_BITRATE           6000
+#define ABR_MIN_ACTIVE_VIDEO_BITRATE_KBPS     50
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
 #define VIDEO_DISABLED_BITRATE_KBPS           0

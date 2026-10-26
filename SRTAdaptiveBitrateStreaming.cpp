@@ -75,6 +75,8 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
 
 void SRTAdaptiveBitrateStreaming::start()
 {
+    m_nativeC2Policy.reset();
+    m_nativeC2Clock.start();
     m_isRunning = true;
     m_currentBitrateKbps = 0;
     m_rttHistory.clear();
@@ -158,6 +160,8 @@ void SRTAdaptiveBitrateStreaming::stop()
 void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
 {
     unsigned int target = (bitrateKbps > 0) ? static_cast<unsigned int>(bitrateKbps) : DEFAULT_INITIAL_BITRATE_KBPS;
+    if (m_nativeC2Enabled)
+        target = m_nativeC2Policy.limit(target, m_currentBitrateKbps, m_nativeC2Clock.elapsed());
     m_currentBitrateKbps = qBound(m_minBitrateKbps, target, m_maxBitrateKbps);
     m_rttHistory.clear();
     m_bwHistory.clear();
@@ -286,7 +290,17 @@ void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
 
     m_isVideoEnabled = m_isStrictVideoCutoff ? !m_isExplicitC2Only : true;
 
-    if (m_isExplicitC2Only) {
+    if (m_nativeC2Enabled) {
+        const auto decision = m_nativeC2Policy.evaluate(m_nativeC2Clock.elapsed());
+        m_c2Priority = decision.level == C2TelemetryPolicy::Critical ? C2PriorityLevel::Critical :
+                       decision.level == C2TelemetryPolicy::High ? C2PriorityLevel::High : C2PriorityLevel::Normal;
+        m_c2Quality = !decision.signal ? C2Quality::Offline :
+                      !decision.inputsReady ? C2Quality::Poor :
+                      decision.level == C2TelemetryPolicy::Critical ? C2Quality::Critical :
+                      decision.level == C2TelemetryPolicy::High ? C2Quality::Fair : C2Quality::Good;
+        m_c2Rtt = decision.worstRttMs;
+    }
+    else if (m_isExplicitC2Only) {
         m_c2Quality = C2Quality::Critical;
         m_c2Priority = C2PriorityLevel::C2_Only;
     }
@@ -335,7 +349,7 @@ void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
 
 void SRTAdaptiveBitrateStreaming::handleC2ConnectionStats(const QVector<SRTPeerStat> &peers)
 {
-    if (!m_isRunning || peers.isEmpty()) return;
+    if (m_nativeC2Enabled || !m_isRunning || peers.isEmpty()) return;
 
     double worstRtt = 0.0;
     int worstRetrans = 0;
@@ -361,10 +375,34 @@ void SRTAdaptiveBitrateStreaming::handleC2ConnectionStats(const QVector<SRTPeerS
     }
 }
 
+void SRTAdaptiveBitrateStreaming::setNativeC2TelemetryEnabled(bool enabled)
+{
+    m_nativeC2Enabled = enabled;
+    m_nativeC2Policy.reset();
+    m_nativeC2Clock.start();
+    m_isExplicitC2Only = false;
+    m_lastC2PacketTime = 0;
+    m_c2Rtt = 0;
+    m_c2Retransmits = m_c2Unacked = 0;
+}
+
+void SRTAdaptiveBitrateStreaming::handleNativeC2Telemetry(const QVector<C2TelemetryStat> &samples)
+{
+    if (!m_isRunning || !m_nativeC2Enabled) return;
+    m_nativeC2Policy.update(samples, m_nativeC2Clock.elapsed());
+    evaluateC2Quality();
+    const auto target = m_nativeC2Policy.limit(m_currentBitrateKbps, m_currentBitrateKbps, m_nativeC2Clock.elapsed());
+    if (target < m_currentBitrateKbps) {
+        qWarning() << "[C2 Priority] Native C2 ceiling reduces video to" << target << "kbps";
+        applyNewBitrate(target, m_c2Rtt, 0, 0);
+    }
+}
+
 
 void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
 {
     if (!m_isRunning) return;
+    evaluateC2Quality();
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (!m_hasSiyiTelemetry || now - m_lastSiyiPacketTime > SIYI_LINK_TIMEOUT_MS) {
@@ -396,8 +434,6 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
         }
         return;
     }
-
-    evaluateC2Quality();
 
     if (m_lastAchievedBitrateKbps > 0 && m_currentBitrateKbps > 0) {
         const double ratio = static_cast<double>(m_lastAchievedBitrateKbps) /
@@ -598,7 +634,7 @@ void SRTAdaptiveBitrateStreaming::handleQosCameraConnection(const QVector<SRTPee
                   totalDropSnd, totalDropRcv, totalRetrans);
 }
 
-unsigned int SRTAdaptiveBitrateStreaming::calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const
+unsigned int SRTAdaptiveBitrateStreaming::calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state)
 {
     Q_UNUSED(lossPercent);
     Q_UNUSED(state);
@@ -617,6 +653,8 @@ unsigned int SRTAdaptiveBitrateStreaming::calculateNetworkPartitionCeiling(doubl
         partitionCeiling = qMin(partitionCeiling, m_currentEnvCeiling);
     }
 
+    if (m_nativeC2Enabled)
+        partitionCeiling = m_nativeC2Policy.limit(partitionCeiling, m_currentBitrateKbps, m_nativeC2Clock.elapsed());
     partitionCeiling = (partitionCeiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
     return qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, partitionCeiling, m_maxBitrateKbps);
 }
@@ -1255,6 +1293,9 @@ void SRTAdaptiveBitrateStreaming::applyNewBitrate(unsigned int targetBitrateKbps
             targetBitrateKbps = c2Cap;
         }
     }
+
+    if (m_nativeC2Enabled)
+        targetBitrateKbps = m_nativeC2Policy.limit(targetBitrateKbps, m_currentBitrateKbps, m_nativeC2Clock.elapsed());
 
     if (targetBitrateKbps == 0) {
         if (m_currentBitrateKbps != 0) {

@@ -7,6 +7,7 @@
 class ABRFactory;
 class NetworkHandler;
 class SiyiLinkHandler;
+class XbTelemetryHandler;
 class CameraControl;
 class QTimer;
 
@@ -28,6 +29,7 @@ private:
     ABRFactory *m_abrFactory;
     NetworkHandler *m_networkHandler;
     SiyiLinkHandler *m_siyiHandler;
+    XbTelemetryHandler *m_telemetryHandler;
     CameraControl *m_cameraControl;
     VideoResolutionAdapter m_resolutionAdapter;
 

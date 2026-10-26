@@ -8,6 +8,7 @@
 #include "dev/NetworkHandler.h"
 #include "dev/CameraControl.h"
 #include "dev/SiyiLinkHandler.h"
+#include "dev/XbTelemetryHandler.h"
 #include "ABRConfigs.h"
 
 XBQoSService::XBQoSService(QObject *parent)
@@ -15,6 +16,7 @@ XBQoSService::XBQoSService(QObject *parent)
     , m_abrFactory(nullptr)
     , m_networkHandler(nullptr)
     , m_siyiHandler(nullptr)
+    , m_telemetryHandler(nullptr)
     , m_cameraControl(nullptr)
     , m_currentBitrate(0)
     , m_cameraNeedsSync(false)
@@ -91,7 +93,7 @@ void XBQoSService::setupConnections()
         });
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::c2PriorityChanged, this, [](int level, const QString &name) {
             Q_UNUSED(level);
-            if (name.contains("Critical") || name.contains("High")) {
+            if (name.contains("Critical", Qt::CaseInsensitive) || name.contains("High", Qt::CaseInsensitive)) {
                 qWarning().noquote() << QString("[C2 Priority] %1").arg(name);
             }
         });
@@ -103,6 +105,13 @@ void XBQoSService::setupConnections()
     }
 
     if (m_abrFactory) {
+        m_abrFactory->srtAbr()->setNativeC2TelemetryEnabled(m_telemetryHandler != nullptr);
+        if (m_telemetryHandler) {
+            connect(m_telemetryHandler, &XbTelemetryHandler::telemetryUpdated, m_abrFactory, &ABRFactory::handleNativeC2Data);
+            connect(m_telemetryHandler, &XbTelemetryHandler::captureError, this, [](const QString &message) {
+                qWarning().noquote() << "[C2]" << message;
+            });
+        }
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
         if (m_siyiHandler) {
@@ -156,11 +165,17 @@ void XBQoSService::start()
 
     m_networkHandler = new NetworkHandler(this);
     m_siyiHandler = new SiyiLinkHandler(this);
+    // Opt out explicitly for deployments still using legacy 9991 C2 stats.
+    if (qgetenv("XB_C2_TELEMETRY") != "0") m_telemetryHandler = new XbTelemetryHandler(this);
 
     setupConnections();
 
     m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
     m_siyiHandler->start();
+    if (m_telemetryHandler) {
+        const QString interface = qEnvironmentVariable("XB_C2_INTERFACE", C2_TELEMETRY_INTERFACE);
+        m_telemetryHandler->start(interface);
+    }
 
     qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT;
     qInfo().noquote() << QString("[QoS Engine] SIYI HM30 Handler started. Polling AU at %1:%2 (Local bind %3)")
@@ -180,6 +195,7 @@ void XBQoSService::stop()
     if (m_siyiHandler) {
         m_siyiHandler->stop();
     }
+    if (m_telemetryHandler) m_telemetryHandler->stop();
     if (m_abrFactory) {
         m_abrFactory->stopCameraSocketAbr();
     }

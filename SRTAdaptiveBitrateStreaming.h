@@ -11,6 +11,8 @@
 #include "SRTPeerStat.h"
 #include "ABRConfigs.h"
 #include "SiyiLinkStat.h"
+#include "C2TelemetryPolicy.h"
+#include <QElapsedTimer>
 
 class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
@@ -20,7 +22,7 @@ public:
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
     static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
-    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 50;
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = ABR_MIN_ACTIVE_VIDEO_BITRATE_KBPS;
 
     static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 2000;  
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
@@ -83,10 +85,12 @@ public:
     void reset(int bitrateKbps) override;
     void setMaxAbrBitrate(unsigned int newMaxAbrBitrate) override;
     bool isTrafficActive() const override { return !m_isTrafficIdle; }
+    void setNativeC2TelemetryEnabled(bool enabled);
 
 public slots:
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);
     void handleC2ConnectionStats(const QVector<SRTPeerStat> &peers);
+    void handleNativeC2Telemetry(const QVector<C2TelemetryStat> &samples);
     void handleSiyiLinkStat(const SiyiLinkStat &stat);
     void handleSiyiLinkLost();
     void onHeartbeatTimeout();
@@ -100,7 +104,7 @@ private:
                        int rawDropSndTotal = 0, int rawDropRcvTotal = 0,
                        int rawRetransTotal = 0);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
-    unsigned int calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const;
+    unsigned int calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state);
 
     // SIYI RF Environment helper
     const RfEnvironment& getRfEnvironment(double rssi) const;
@@ -127,6 +131,9 @@ private:
     int m_c2Retransmits;
     int m_c2Unacked;
     qint64 m_lastC2PacketTime;
+    bool m_nativeC2Enabled = false;
+    C2TelemetryPolicy m_nativeC2Policy;
+    QElapsedTimer m_nativeC2Clock;
 
     // Sliding window sample histories
     QVector<double> m_rttHistory;
