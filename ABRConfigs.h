@@ -7,6 +7,7 @@
 
 // Native C2 capture (XBLink x74 / PilotApp 10.9.4). No serial/UDP ownership.
 #define C2_TELEMETRY_INTERFACE                 "eth1"
+#define C2_TELEMETRY_USE_BPF                   false
 #define C2_TELEMETRY_UDP_PORT                  3345
 #define C2_TELEMETRY_FC_SYSTEM_ID              1
 #define C2_TELEMETRY_FC_COMPONENT_ID           1

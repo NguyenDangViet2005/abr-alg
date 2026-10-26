@@ -22,8 +22,10 @@ eth1 UDP/3345 (passive AF_PACKET socket)
 
 The capture never opens `/dev/ttyS0`, binds the UDP service port, sends a
 command to the FC, or competes with XBFirm for its serial device. The Linux
-socket binds to one interface. A kernel BPF filter removes unrelated untagged
-traffic; VLAN frames are validated in the decoder. The capture descriptor is
+socket binds to one interface. By default, packets are filtered in the decoder,
+matching the Python prototype and the successful on-device diagnostic run.
+An optional kernel BPF filter removes unrelated untagged traffic; VLAN frames
+are validated in the decoder. The capture descriptor is
 nonblocking and each event callback has a bounded packet budget.
 
 Camera statistics (`9990` on UDP/12345) still drive camera congestion and
@@ -110,7 +112,7 @@ mkdir -p build/native-c2
 cd build/native-c2
 qmake ../../aiCompressor.pro CONFIG+=release CONFIG-=debug
 make -j2
-sudo env XB_C2_INTERFACE=eth1 ./aiCompressor
+sudo ./aiCompressor
 ```
 
 Use `qmake6` if that is the Qt installation's command. No additional packages
@@ -118,10 +120,34 @@ are required by this change when the existing Qt/C++ build environment is
 already available. Live capture requires root or `CAP_NET_RAW`; an existing
 service unit must grant that capability and must not prohibit AF_PACKET.
 
-Native capture is enabled by default. `XB_C2_INTERFACE` overrides `eth1`.
+Native capture is enabled by default on `eth1`; no environment variables are
+required. Debug logs are off. `C2_TELEMETRY_USE_BPF` defaults to false in
+`ABRConfigs.h`, matching the successful on-device capture with BPF disabled.
+`XB_C2_INTERFACE` optionally overrides `eth1`, `XB_C2_DEBUG=1` enables debug,
+and `XB_C2_BPF=1` optionally enables the kernel filter for comparison.
 Other defaults (port, FC IDs, timers, bitrate ceilings) are in `ABRConfigs.h`.
 If the interface or permissions are wrong, the service logs the capture error,
 reports no signal, and holds increases; fix the deployment and restart it.
+
+For `NO SIGNAL` troubleshooting, keep the normal interface and enable the
+opt-in stage counters. The default unfiltered packet-socket input matches the
+Python prototype:
+
+```sh
+sudo env XB_C2_DEBUG=1 ./aiCompressor
+```
+
+The capture drains on both socket notification and the periodic timer. Debug
+rows show capture OPEN/CLOSED, kernel/read/drop counts per window, cumulative
+Ethernet/IPv4-UDP/C2 counts, outgoing SRT data/chunks, CRC-valid MAVLink frames,
+matching FC frames, last MAVLink IDs and an XB payload prefix. If capture is
+CLOSED, the row includes its setup/receive error. These distinguish a capture
+failure from missing UDP/3345, unsupported envelopes, bad CRC or a different FC
+identity. These variables are local process settings, not network services or
+installed dependencies. With BPF off, unrelated camera packets also reach the
+capture socket and are rejected by the decoder; monitor capture drops at load.
+The successful run used both timer draining and BPF bypass, so it does not on
+its own prove that BPF caused the earlier NO SIGNAL state.
 
 To explicitly retain the previous legacy `9991` behavior for a deployment:
 
@@ -134,27 +160,13 @@ this service. Pull/reconnect the FC cable and verify that the row changes to
 `NO SIGNAL` within about 2–2.5 seconds of the last valid frame, then recovers.
 Check camera/RF telemetry alongside C2 before evaluating bitrate behavior.
 
-## Tests
+## Source layout and validation
 
-The standalone test target uses Qt Core/Network and C++; no Python dependency.
-The fixture JSON files are test inputs produced independently by pymavlink
-2.4.50, not runtime telemetry output. Tests cover all 301 CRC definitions,
-MAVLink1/signed framing, CRC resync, XB envelope filtering, SRT reorder/duplicate/
-fragment/wrap, stale FC with live ACKs, recovery, RTT calculations, capture
-gaps/drops, changing ports/socket IDs, policy gates/caps, and factory/engine wiring.
-
-```sh
-mkdir -p build/native-c2-tests
-cd build/native-c2-tests
-qmake ../../tests/telemetry/telemetry-tests.pro CONFIG+=release CONFIG-=debug
-make -j2
-./test-c2-telemetry ../../tests/telemetry
-```
-
-On Windows, use the matching Qt MinGW `qmake` and `mingw32-make`; the executable
-is `release/test-c2-telemetry.exe`. The native Linux capture adapter has an
-explicit unavailable implementation on Windows; offline decoder/policy tests
-still run. AF_PACKET capture and camera behavior must also be checked on XBLink.
+All capture/decoder files are directly in `dev/`; there is no nested decoder
+directory or standalone test suite. On Windows, use the matching Qt MinGW
+`qmake` and `mingw32-make` to build the service. The native Linux capture adapter
+has an explicit unavailable implementation on Windows. AF_PACKET capture and
+camera behavior must also be checked on XBLink after building on Linux.
 
 Protocol references: [SRT specification](https://github.com/Haivision/srt-rfc/blob/main/draft-sharabayko-srt.md),
 [Linux socket filtering](https://docs.kernel.org/networking/filter.html),

@@ -1,7 +1,7 @@
 #ifndef C2TELEMETRYDECODER_H
 #define C2TELEMETRYDECODER_H
 
-#include "../../C2TelemetryStat.h"
+#include "../C2TelemetryStat.h"
 #include <QByteArray>
 #include <QVector>
 #include <memory>
@@ -15,6 +15,7 @@ public:
     void ingest(const QByteArray &ethernetFrame, qint64 nowMs);
     QVector<C2TelemetryStat> snapshot(qint64 nowMs);
     void addCaptureDrops(quint64 count);
+    QString diagnosticSummary() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> d;

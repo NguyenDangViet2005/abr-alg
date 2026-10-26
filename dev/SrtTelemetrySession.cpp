@@ -76,6 +76,7 @@ void Session::receive(const QByteArray &payload, qint64 now, quint8 systemId, qu
     ++counts.data;
     if (flags & (1u << 26)) ++counts.retransmits;
     if ((flags >> 27) & 3) {
+        ++encryptedPackets;
         ++counts.invalid; // Encrypted payload cannot be decoded.
         gap(0);
         m_expected.reset();
@@ -137,6 +138,7 @@ void Session::flush(qint64 now, quint8 systemId, quint8 componentId)
 
 void Session::application(const QByteArray &body, qint64 time, quint8 systemId, quint8 componentId)
 {
+    lastXbPrefix = body.left(16).toHex();
     if (body.startsWith(QByteArray::fromHex("fd0000000030"))) return;
     const int prefix = outgoing ? 6 : 7;
     if (body.size() < prefix || quint8(body[0]) != 0xfd) {
@@ -149,6 +151,7 @@ void Session::application(const QByteArray &body, qint64 time, quint8 systemId, 
     counts.bytes += quint64(body.size() - prefix);
     const auto frames = parser.feed(body.mid(prefix));
     for (const auto &frame : frames) {
+        lastMavlinkSource = QString::number(frame.systemId) + '/' + QString::number(frame.componentId);
         if (frame.systemId != systemId || frame.componentId != componentId) continue;
         ++counts.frames;
         // Reorder buffering must not make old data look newly received.

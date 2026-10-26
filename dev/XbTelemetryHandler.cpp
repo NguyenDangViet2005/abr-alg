@@ -25,16 +25,27 @@ XbTelemetryHandler::~XbTelemetryHandler() { stop(); }
 bool XbTelemetryHandler::start(const QString &interface, quint16 port)
 {
     stop();
+    m_debug = qgetenv("XB_C2_DEBUG") == "1";
+    const QByteArray filterOverride = qgetenv("XB_C2_BPF");
+    m_useKernelFilter = filterOverride.isEmpty() ? C2_TELEMETRY_USE_BPF : filterOverride == "1";
+    m_readPackets = 0;
+    m_interface = interface;
+    m_lastError.clear();
     m_clock.start();
     m_decoder.reset(new C2TelemetryDecoder(port, C2_TELEMETRY_FC_SYSTEM_ID,
         C2_TELEMETRY_FC_COMPONENT_ID, C2_TELEMETRY_STALE_MS));
     m_timer.start(); // Keep emitting unavailable samples if capture cannot start.
 #ifdef Q_OS_LINUX
     const unsigned int index = if_nametoindex(interface.toLocal8Bit().constData());
-    if (!index) { emit captureError("Unknown C2 capture interface: " + interface); return false; }
+    if (!index) {
+        m_lastError = "Unknown C2 capture interface: " + interface;
+        emit captureError(m_lastError);
+        return false;
+    }
     m_fd = ::socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, htons(ETH_P_ALL));
     if (m_fd < 0) {
-        emit captureError("C2 AF_PACKET capture failed (root or CAP_NET_RAW required): " + QString::fromLocal8Bit(std::strerror(errno)));
+        m_lastError = "C2 AF_PACKET capture failed (root or CAP_NET_RAW required): " + QString::fromLocal8Bit(std::strerror(errno));
+        emit captureError(m_lastError);
         return false;
     }
     // Only copy untagged IPv4 UDP/3345 into userspace. VLAN frames are allowed
@@ -61,23 +72,26 @@ bool XbTelemetryHandler::start(const QString &interface, quint16 port)
     sock_fprog program{static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])), filter};
     sockaddr_ll address{};
     address.sll_family = AF_PACKET; address.sll_protocol = htons(ETH_P_ALL); address.sll_ifindex = int(index);
-    if (::setsockopt(m_fd, SOL_SOCKET, SO_ATTACH_FILTER, &program, sizeof(program)) < 0 ||
+    if ((m_useKernelFilter && ::setsockopt(m_fd, SOL_SOCKET, SO_ATTACH_FILTER, &program, sizeof(program)) < 0) ||
         ::bind(m_fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0) {
         const QString error = QString::fromLocal8Bit(std::strerror(errno));
         closeCapture();
-        emit captureError("C2 capture setup failed: " + error);
+        m_lastError = "C2 capture setup failed: " + error;
+        emit captureError(m_lastError);
         return false;
     }
     const int receiveBuffer = 4 * 1024 * 1024;
     ::setsockopt(m_fd, SOL_SOCKET, SO_RCVBUF, &receiveBuffer, sizeof(receiveBuffer));
     m_notifier = new QSocketNotifier(m_fd, QSocketNotifier::Read, this);
     connect(m_notifier, &QSocketNotifier::activated, this, [this]() { drain(); });
-    qInfo().noquote() << QString("[C2] Native capture on %1 UDP/%2 (FC %3/%4)")
-                        .arg(interface).arg(port).arg(C2_TELEMETRY_FC_SYSTEM_ID).arg(C2_TELEMETRY_FC_COMPONENT_ID);
+    qInfo().noquote() << QString("[C2] Native capture on %1 UDP/%2 (FC %3/%4, BPF=%5, timer drain enabled)")
+                        .arg(interface).arg(port).arg(C2_TELEMETRY_FC_SYSTEM_ID).arg(C2_TELEMETRY_FC_COMPONENT_ID)
+                        .arg(m_useKernelFilter ? "ON" : "OFF");
     return true;
 #else
     Q_UNUSED(interface); Q_UNUSED(port);
-    emit captureError("Native C2 capture requires Linux; the decoder remains available for offline tests.");
+    m_lastError = "Native C2 capture requires Linux; the decoder remains available for offline tests.";
+    emit captureError(m_lastError);
     return false;
 #endif
 }
@@ -94,10 +108,14 @@ void XbTelemetryHandler::drain()
             if (errno == EINTR) continue;
             const QString error = QString::fromLocal8Bit(std::strerror(errno));
             closeCapture();
-            emit captureError("C2 receive failed: " + error);
+            m_lastError = "C2 receive failed: " + error;
+            emit captureError(m_lastError);
             break;
         }
-        if (length) m_decoder->ingest(QByteArray(buffer, int(length)), m_clock.elapsed());
+        if (length) {
+            ++m_readPackets;
+            m_decoder->ingest(QByteArray(buffer, int(length)), m_clock.elapsed());
+        }
     }
 #endif
 }
@@ -105,15 +123,29 @@ void XbTelemetryHandler::drain()
 void XbTelemetryHandler::publish()
 {
     if (!m_decoder) return;
+    // Read directly as the working Python collector does. This also provides
+    // progress if a target's Qt socket notifier does not activate for AF_PACKET.
+    drain();
+    quint64 kernelPackets = 0, kernelDrops = 0;
 #ifdef Q_OS_LINUX
     if (m_fd >= 0) {
         tpacket_stats stats{};
         socklen_t size = sizeof(stats);
-        if (::getsockopt(m_fd, SOL_PACKET, PACKET_STATISTICS, &stats, &size) == 0)
+        if (::getsockopt(m_fd, SOL_PACKET, PACKET_STATISTICS, &stats, &size) == 0) {
+            kernelPackets = stats.tp_packets;
+            kernelDrops = stats.tp_drops;
             m_decoder->addCaptureDrops(stats.tp_drops); // Kernel resets counters on read.
+        }
     }
 #endif
     auto samples = m_fd >= 0 ? m_decoder->snapshot(m_clock.elapsed()) : QVector<C2TelemetryStat>();
+    if (m_debug) {
+        qInfo().noquote() << QString("[C2 DEBUG] if=%1 capture=%2 BPF=%3 | window: kernel=%4 read=%5 drops=%6 | %7%8")
+            .arg(m_interface, m_fd >= 0 ? "OPEN" : "CLOSED", m_useKernelFilter ? "ON" : "OFF")
+            .arg(kernelPackets).arg(m_readPackets).arg(kernelDrops)
+            .arg(m_decoder->diagnosticSummary(), m_lastError.isEmpty() ? QString() : " | error=" + m_lastError);
+    }
+    m_readPackets = 0;
     if (samples.isEmpty()) {
         C2TelemetryStat missing;
         missing.captureAvailable = m_fd >= 0;

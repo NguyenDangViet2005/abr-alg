@@ -2,7 +2,7 @@
 #define SRTTELEMETRYSESSION_H
 
 #include "MavlinkStream.h"
-#include "../../C2TelemetryStat.h"
+#include "../C2TelemetryStat.h"
 #include <deque>
 #include <map>
 #include <optional>
@@ -34,6 +34,9 @@ struct Session {
     quint64 previousCrcRejected = 0;
     MavlinkStream parser;
     RttTracker rtt;
+    QString lastMavlinkSource;
+    QByteArray lastXbPrefix;
+    quint64 encryptedPackets = 0;
 
     void receive(const QByteArray &payload, qint64 now, quint8 systemId, quint8 componentId, qint64 staleMs);
     void flush(qint64 now, quint8 systemId, quint8 componentId);

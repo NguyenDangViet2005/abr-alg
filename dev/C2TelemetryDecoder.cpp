@@ -11,6 +11,7 @@ struct C2TelemetryDecoder::Impl {
     quint8 systemId, componentId;
     qint64 staleMs, previousTime = -1;
     quint64 order = 0, captureDrops = 0;
+    quint64 ethernetFrames = 0, ipv4UdpPackets = 0, c2Packets = 0;
     std::map<QString, Session> sessions;
 };
 
@@ -25,6 +26,7 @@ void C2TelemetryDecoder::addCaptureDrops(quint64 count) { d->captureDrops += cou
 
 void C2TelemetryDecoder::ingest(const QByteArray &frame, qint64 now)
 {
+    ++d->ethernetFrames;
     if (frame.size() < 14) return;
     const auto *p = reinterpret_cast<const uchar *>(frame.constData());
     int offset = 14;
@@ -43,7 +45,10 @@ void C2TelemetryDecoder::ingest(const QByteArray &frame, qint64 now)
     const quint16 sourcePort = qFromBigEndian<quint16>(p + ihl);
     const quint16 destinationPort = qFromBigEndian<quint16>(p + ihl + 2);
     const int length = qFromBigEndian<quint16>(p + ihl + 4);
-    if (length < 24 || ihl + length > total || (sourcePort != d->port && destinationPort != d->port)) return;
+    if (length < 8 || ihl + length > total) return;
+    ++d->ipv4UdpPackets;
+    if (length < 24 || (sourcePort != d->port && destinationPort != d->port)) return;
+    ++d->c2Packets;
     const quint32 socketId = qFromBigEndian<quint32>(p + ihl + 8 + 12);
     const QString sourceIp = QHostAddress(qFromBigEndian<quint32>(p + 12)).toString();
     const QString destinationIp = QHostAddress(qFromBigEndian<quint32>(p + 16)).toString();
@@ -92,6 +97,31 @@ void C2TelemetryDecoder::ingest(const QByteArray &frame, qint64 now)
     }
     if (d->previousTime < 0) d->previousTime = now;
     session.receive(payload, now, d->systemId, d->componentId, d->staleMs);
+}
+
+QString C2TelemetryDecoder::diagnosticSummary() const
+{
+    quint64 data = 0, chunks = 0, mavlink = 0, fc = 0, badCrc = 0, invalid = 0, encrypted = 0;
+    int pending = 0;
+    const Session *latest = nullptr;
+    for (const auto &entry : d->sessions) {
+        const auto &session = entry.second;
+        if (!session.outgoing) continue;
+        data += session.counts.data; chunks += session.counts.chunks;
+        mavlink += session.parser.framesValid(); fc += session.counts.frames;
+        badCrc += session.parser.crcRejected(); invalid += session.counts.invalid;
+        encrypted += session.encryptedPackets; pending += session.parser.pendingBytes();
+        if (!latest || session.lastSeen > latest->lastSeen ||
+            (session.lastSeen == latest->lastSeen && session.order > latest->order)) latest = &session;
+    }
+    const QString prefix = QString("total: eth=%1 udp=%2 c2=%3 out_data=%4 chunks=%5 mav_ok=%6 fc=%7 crc_bad=%8 invalid=%9 encrypted=%10 pending_mav=%11")
+        .arg(d->ethernetFrames).arg(d->ipv4UdpPackets).arg(d->c2Packets).arg(data).arg(chunks)
+        .arg(mavlink).arg(fc).arg(badCrc).arg(invalid).arg(encrypted).arg(pending);
+    if (!latest) return prefix;
+    return prefix + QString(" | out=%1->%2 last_ids=%3 xb_prefix=%4")
+        .arg(latest->source, latest->destination,
+             latest->lastMavlinkSource.isEmpty() ? "N/A" : latest->lastMavlinkSource,
+             QString::fromLatin1(latest->lastXbPrefix));
 }
 
 QVector<C2TelemetryStat> C2TelemetryDecoder::snapshot(qint64 now)

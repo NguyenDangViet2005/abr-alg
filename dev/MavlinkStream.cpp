@@ -42,6 +42,7 @@ QVector<MavlinkFrameInfo> MavlinkStream::feed(const QByteArray &bytes)
             continue;
         }
         frames.append({id, p[v2 ? 5 : 3], p[v2 ? 6 : 4]});
+        ++m_framesValid;
         cursor += total;
     }
     m_buffer.remove(0, cursor);

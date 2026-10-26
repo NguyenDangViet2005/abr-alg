@@ -10,10 +10,10 @@ HEADERS += \
     C2TelemetryStat.h \
     C2TelemetryPolicy.h \
     dev/XbTelemetryHandler.h \
-    dev/telemetry/C2TelemetryDecoder.h \
-    dev/telemetry/SrtTelemetrySession.h \
-    dev/telemetry/MavlinkStream.h \
-    dev/telemetry/MavlinkCrcTable.h \
+    dev/C2TelemetryDecoder.h \
+    dev/SrtTelemetrySession.h \
+    dev/MavlinkStream.h \
+    dev/MavlinkCrcTable.h \
     ABRConfigs.h \
     ABRFactory.h \
     IAdaptiveBitrateStreaming.h \
@@ -29,9 +29,9 @@ HEADERS += \
 SOURCES += \
     C2TelemetryPolicy.cpp \
     dev/XbTelemetryHandler.cpp \
-    dev/telemetry/C2TelemetryDecoder.cpp \
-    dev/telemetry/SrtTelemetrySession.cpp \
-    dev/telemetry/MavlinkStream.cpp \
+    dev/C2TelemetryDecoder.cpp \
+    dev/SrtTelemetrySession.cpp \
+    dev/MavlinkStream.cpp \
     main.cpp \
     ABRFactory.cpp \
     IAdaptiveBitrateStreaming.cpp \

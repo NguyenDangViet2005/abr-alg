@@ -17,9 +17,12 @@ public:
     QVector<MavlinkFrameInfo> feed(const QByteArray &bytes);
     void reset() { m_buffer.clear(); }
     quint64 crcRejected() const { return m_crcRejected; }
+    quint64 framesValid() const { return m_framesValid; }
+    int pendingBytes() const { return int(m_buffer.size()); }
 private:
     QByteArray m_buffer;
     quint64 m_crcRejected = 0;
+    quint64 m_framesValid = 0;
 };
 
 #endif

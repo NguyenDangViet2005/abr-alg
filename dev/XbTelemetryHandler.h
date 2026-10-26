@@ -7,7 +7,7 @@
 #include <memory>
 #include "../C2TelemetryStat.h"
 #include "../ABRConfigs.h"
-#include "telemetry/C2TelemetryDecoder.h"
+#include "C2TelemetryDecoder.h"
 
 class QSocketNotifier;
 
@@ -30,6 +30,11 @@ private:
     QTimer m_timer;
     QElapsedTimer m_clock;
     std::unique_ptr<C2TelemetryDecoder> m_decoder;
+    bool m_debug = false;
+    bool m_useKernelFilter = C2_TELEMETRY_USE_BPF;
+    quint64 m_readPackets = 0;
+    QString m_interface;
+    QString m_lastError;
 };
 
 #endif
