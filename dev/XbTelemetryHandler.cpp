@@ -2,6 +2,8 @@
 #include <QSocketNotifier>
 #include <QDateTime>
 #include <QDebug>
+#include <QHostAddress>
+#include <QNetworkInterface>
 #include <cerrno>
 #include <cstring>
 #ifdef Q_OS_LINUX
@@ -32,9 +34,50 @@ bool XbTelemetryHandler::start(const QString &interface, quint16 port)
     m_interface = interface;
     m_lastError.clear();
     m_clock.start();
+    const QString mode = qEnvironmentVariable("XB_C2_MODE", "real").trimmed().toLower();
+    const QString configuredSource = qEnvironmentVariable("XB_C2_SOURCE_IP", C2_TELEMETRY_SOURCE_IP).trimmed();
+    // Real C2 data must originate at a local IP of the capture interface.
+    // Test C2 originates at the explicitly selected external simulator IP.
+    const QString sourceIp = mode == "test" ? configuredSource : QString();
+    const QHostAddress sourceAddress(sourceIp);
+    QStringList realSourceIps;
+    if (mode == "real") {
+        const auto captureInterface = QNetworkInterface::interfaceFromName(interface);
+        for (const auto &entry : captureInterface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol)
+                realSourceIps.append(entry.ip().toString());
+        }
+    }
     m_decoder.reset(new C2TelemetryDecoder(port, C2_TELEMETRY_FC_SYSTEM_ID,
-        C2_TELEMETRY_FC_COMPONENT_ID, C2_TELEMETRY_STALE_MS));
+        C2_TELEMETRY_FC_COMPONENT_ID, C2_TELEMETRY_STALE_MS,
+        sourceIp.isEmpty() ? QString() : sourceAddress.toString(), realSourceIps));
     m_timer.start(); // Keep emitting unavailable samples if capture cannot start.
+    if (mode != "real" && mode != "test") {
+        m_lastError = "C2 capture setup failed: XB_C2_MODE must be real or test";
+        emit captureError(m_lastError);
+        return false;
+    }
+    if (mode == "test" && sourceIp.isEmpty()) {
+        m_lastError = "C2 capture setup failed: test mode requires XB_C2_SOURCE_IP";
+        emit captureError(m_lastError);
+        return false;
+    }
+    qInfo().noquote() << "[C2] Mode:" << mode;
+    if (mode == "real" && !configuredSource.isEmpty()) {
+        qInfo().noquote() << "[C2] Ignoring test source IP in real mode:" << configuredSource;
+    }
+    if (!sourceIp.isEmpty() && sourceAddress.protocol() != QAbstractSocket::IPv4Protocol) {
+        m_lastError = "C2 capture setup failed: XB_C2_SOURCE_IP must be an IPv4 address";
+        emit captureError(m_lastError);
+        return false;
+    }
+    if (mode == "real" && realSourceIps.isEmpty()) {
+        m_lastError = "C2 capture setup failed: no local IPv4 address on interface " + interface;
+        emit captureError(m_lastError);
+        return false;
+    }
+    qInfo().noquote() << "[C2] FC source IP filter:"
+                     << (mode == "real" ? realSourceIps.join(',') + " (local XBLink)" : sourceAddress.toString());
 #ifdef Q_OS_LINUX
     const unsigned int index = if_nametoindex(interface.toLocal8Bit().constData());
     if (!index) {
@@ -151,15 +194,14 @@ void XbTelemetryHandler::publish()
         missing.captureAvailable = m_fd >= 0;
         samples.append(missing);
     }
-    const QString time = QDateTime::currentDateTime().toString("HH:mm:ss");
+    // Normal telemetry is combined with camera QoS/SIYI by the ABR heartbeat.
     for (const auto &sample : samples) {
-        if (!sample.telemetryValid) {
-            qInfo().noquote() << QString("[%1] C2 NO SIGNAL ...").arg(time);
-        } else {
-            qInfo().noquote() << QString("[%1] C2 %2 | RX_APP=%3 kBps | MAV=%4 KiB/s | frames=%5/s | age=%6ms | HB=%7ms")
-                .arg(time, sample.destination).arg(sample.appRxModelKiBps, 0, 'f', 2)
-                .arg(sample.mavlinkKiBps, 0, 'f', 2).arg(sample.mavlinkFramesPerSecond, 0, 'f', 1)
-                .arg(sample.telemetryAgeMs).arg(sample.heartbeatAgeMs);
+        if (m_debug) {
+            qInfo().noquote() << QString("[C2 SESSION] source=%1 destination=%2 socket=%3 FC=%4 HB=%5 ACK=%6 RTT_valid=%7 baseline=%8 observation=%9 ready=%10 RTT=%11ms ACK_age=%12ms")
+                .arg(sample.source, sample.destination).arg(sample.socketId)
+                .arg(sample.telemetryValid).arg(sample.heartbeatValid).arg(sample.peerAckValid)
+                .arg(sample.rttValid).arg(sample.baselineValid).arg(sample.observationOk)
+                .arg(sample.inputsReady()).arg(sample.rttSmoothedMs, 0, 'f', 1).arg(sample.ackAgeMs);
         }
     }
     emit telemetryUpdated(samples);

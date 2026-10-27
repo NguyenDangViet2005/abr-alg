@@ -7,6 +7,9 @@
 
 // Native C2 capture (XBLink x74 / PilotApp 10.9.4). No serial/UDP ownership.
 #define C2_TELEMETRY_INTERFACE                 "eth1"
+// Test-mode source IP only; real mode selects local IPs of the capture interface.
+// Enable with XB_C2_MODE=test. XB_C2_SOURCE_IP overrides this value.
+#define C2_TELEMETRY_SOURCE_IP                 ""
 #define C2_TELEMETRY_USE_BPF                   false
 #define C2_TELEMETRY_UDP_PORT                  3345
 #define C2_TELEMETRY_FC_SYSTEM_ID              1

@@ -8,6 +8,8 @@ using XbTelemetry::Session;
 
 struct C2TelemetryDecoder::Impl {
     quint16 port;
+    QString fcSourceIp;
+    QStringList allowedFcSourceIps;
     quint8 systemId, componentId;
     qint64 staleMs, previousTime = -1;
     quint64 order = 0, captureDrops = 0;
@@ -15,9 +17,11 @@ struct C2TelemetryDecoder::Impl {
     std::map<QString, Session> sessions;
 };
 
-C2TelemetryDecoder::C2TelemetryDecoder(quint16 port, quint8 systemId, quint8 componentId, qint64 staleMs)
+C2TelemetryDecoder::C2TelemetryDecoder(quint16 port, quint8 systemId, quint8 componentId, qint64 staleMs, const QString &fcSourceIp, const QStringList &allowedFcSourceIps)
     : d(new Impl{})
 {
+    d->fcSourceIp = fcSourceIp;
+    d->allowedFcSourceIps = allowedFcSourceIps;
     d->port = port; d->systemId = systemId; d->componentId = componentId; d->staleMs = staleMs;
 }
 C2TelemetryDecoder::~C2TelemetryDecoder() = default;
@@ -52,6 +56,11 @@ void C2TelemetryDecoder::ingest(const QByteArray &frame, qint64 now)
     const quint32 socketId = qFromBigEndian<quint32>(p + ihl + 8 + 12);
     const QString sourceIp = QHostAddress(qFromBigEndian<quint32>(p + 12)).toString();
     const QString destinationIp = QHostAddress(qFromBigEndian<quint32>(p + 16)).toString();
+    // Data is FC-side:3345 -> peer; reverse feedback must target that same IP.
+    // Filter before creating sessions so unrelated/old links cannot gate policy.
+    const QString fcSideIp = sourcePort == d->port ? sourceIp : destinationIp;
+    if (!d->fcSourceIp.isEmpty() && fcSideIp != d->fcSourceIp) return;
+    if (!d->allowedFcSourceIps.isEmpty() && !d->allowedFcSourceIps.contains(fcSideIp)) return;
     const QString source = sourceIp + ':' + QString::number(sourcePort);
     const QString destination = destinationIp + ':' + QString::number(destinationPort);
     const QString pairKey = source + '>' + destination;

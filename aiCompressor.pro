@@ -8,6 +8,7 @@ TARGET = aiCompressor
 
 HEADERS += \
     C2TelemetryStat.h \
+    C2TelemetryLog.h \
     C2TelemetryPolicy.h \
     dev/XbTelemetryHandler.h \
     dev/C2TelemetryDecoder.h \

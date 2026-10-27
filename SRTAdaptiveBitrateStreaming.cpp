@@ -1,5 +1,7 @@
 #include "SRTAdaptiveBitrateStreaming.h"
 #include "ABRConfigs.h"
+#include "C2TelemetryLog.h"
+#include <QJsonDocument>
 #include <algorithm>
 
 SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
@@ -76,6 +78,9 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
 void SRTAdaptiveBitrateStreaming::start()
 {
     m_nativeC2Policy.reset();
+    m_nativeC2Samples.clear();
+    m_nativeC2ReceivedMs = -1;
+    m_nativeC2Decision = C2TelemetryPolicy::Decision();
     m_nativeC2Clock.start();
     m_isRunning = true;
     m_currentBitrateKbps = 0;
@@ -292,6 +297,7 @@ void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
 
     if (m_nativeC2Enabled) {
         const auto decision = m_nativeC2Policy.evaluate(m_nativeC2Clock.elapsed());
+        m_nativeC2Decision = decision;
         m_c2Priority = decision.level == C2TelemetryPolicy::Critical ? C2PriorityLevel::Critical :
                        decision.level == C2TelemetryPolicy::High ? C2PriorityLevel::High : C2PriorityLevel::Normal;
         m_c2Quality = !decision.signal ? C2Quality::Offline :
@@ -379,6 +385,9 @@ void SRTAdaptiveBitrateStreaming::setNativeC2TelemetryEnabled(bool enabled)
 {
     m_nativeC2Enabled = enabled;
     m_nativeC2Policy.reset();
+    m_nativeC2Samples.clear();
+    m_nativeC2ReceivedMs = -1;
+    m_nativeC2Decision = C2TelemetryPolicy::Decision();
     m_nativeC2Clock.start();
     m_isExplicitC2Only = false;
     m_lastC2PacketTime = 0;
@@ -389,7 +398,9 @@ void SRTAdaptiveBitrateStreaming::setNativeC2TelemetryEnabled(bool enabled)
 void SRTAdaptiveBitrateStreaming::handleNativeC2Telemetry(const QVector<C2TelemetryStat> &samples)
 {
     if (!m_isRunning || !m_nativeC2Enabled) return;
-    m_nativeC2Policy.update(samples, m_nativeC2Clock.elapsed());
+    m_nativeC2Samples = samples;
+    m_nativeC2ReceivedMs = m_nativeC2Clock.elapsed();
+    m_nativeC2Policy.update(samples, m_nativeC2ReceivedMs);
     evaluateC2Quality();
     const auto target = m_nativeC2Policy.limit(m_currentBitrateKbps, m_currentBitrateKbps, m_nativeC2Clock.elapsed());
     if (target < m_currentBitrateKbps) {
@@ -407,8 +418,7 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
     qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (!m_hasSiyiTelemetry || now - m_lastSiyiPacketTime > SIYI_LINK_TIMEOUT_MS) {
         handleSiyiLinkLost();
-        qInfo() << "[QoS] ABR PAUSED: waiting for valid SIYI RSSI; bitrate:"
-                << m_currentBitrateKbps << "kbps";
+        logTelemetry("PAUSED (Waiting for SIYI RSSI)");
         return;
     }
     bool hasRecentQos = (m_lastCameraQosTime > 0 &&
@@ -430,8 +440,9 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
                                 m_latestSmoothedBw, 0);
             }
         } else {
-            qInfo().noquote() << "[QoS] Waiting for QoS data...";
+            // Periodic status is emitted below with C2 even before camera QoS.
         }
+        logTelemetry("WAITING (Camera QoS unavailable)");
         return;
     }
 
@@ -447,6 +458,11 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
         }
     }
 
+    logTelemetry();
+}
+
+void SRTAdaptiveBitrateStreaming::logTelemetry(const QString &reason)
+{
     QString videoStr;
     QString videoStateLabel;
     if (!m_isVideoEnabled) {
@@ -465,18 +481,48 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
 
     const QString timeStr = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
     QString siyiLabel = m_hasSiyiTelemetry
-                            ? QString("SIYI: %1dBm (%2% | %3)").arg(m_smoothedRssi, 0, 'f', 0).arg(m_smoothedSignal).arg(m_currentEnvName)
+                            ? QString("SIYI: %1dBm").arg(m_smoothedRssi, 0, 'f', 0)
                             : "SIYI: N/A";
 
-    qInfo().noquote() << QString("[%1] RTT: %2ms | BW: %3 Mbps | Loss: %4% | %5 | Video: %6 | State: %7 --> bitrate: %8")
+    qInfo().noquote() << QString("[%1] RTT: %2ms | BW: %3 Mbps | Loss: %4% | %5 | Video: %6 | State: %7%8 --> bitrate: %9")
         .arg(timeStr)
         .arg(m_latestSmoothedRtt, 0, 'f', 0)
         .arg(m_latestSmoothedBw, 0, 'f', 2)
         .arg(m_latestSmoothedLossPercent, 0, 'f', 1)
         .arg(siyiLabel)
         .arg(videoStateLabel)
-        .arg(m_latestStatusReason)
+        .arg(reason.isEmpty() ? m_latestStatusReason : reason)
+        .arg(m_nativeC2Enabled ? nativeC2Log(m_nativeC2Samples,
+            m_nativeC2ReceivedMs < 0 ? 0 : m_nativeC2Clock.elapsed() - m_nativeC2ReceivedMs,
+            m_nativeC2Decision) : QString(" | C2: LEGACY"))
         .arg(videoStr);
+
+    if (qgetenv("XB_MONITOR_TELEMETRY") == "1") {
+        // Report the RF/transport/C2 ceiling without advancing policy or changing
+        // the decision. HOLD is reported separately from the capacity ceiling.
+        unsigned int ceiling = m_maxBitrateKbps;
+        const double bw = m_bottleneckBwMbps > 0 && m_lastCongestionState != CongestionState::Clear
+                        ? m_bottleneckBwMbps : m_latestSmoothedBw;
+        if (bw > 0.1 && bw < 150) ceiling = qMin(ceiling, unsigned(bw * 1000 * BW_UTILIZATION_RATIO));
+        if (m_hasSiyiTelemetry) ceiling = qMin(ceiling, m_currentEnvCeiling);
+        if (m_nativeC2Enabled) ceiling = qMin(ceiling, m_nativeC2Decision.ceilingKbps);
+        ceiling = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS,
+                         (ceiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS, m_maxBitrateKbps);
+        QJsonObject camera;
+        camera["time"] = timeStr; camera["rtt"] = m_latestSmoothedRtt;
+        camera["bw"] = m_latestSmoothedBw; camera["loss"] = m_latestSmoothedLossPercent;
+        camera["video"] = videoStateLabel; camera["state"] = reason.isEmpty() ? m_latestStatusReason : reason;
+        camera["bitrate"] = double(m_currentBitrateKbps); camera["ceiling"] = double(ceiling);
+        camera["siyi_rssi"] = m_hasSiyiTelemetry ? QJsonValue(m_smoothedRssi) : QJsonValue(QJsonValue::Null);
+        camera["siyi_signal"] = m_hasSiyiTelemetry ? QJsonValue(m_smoothedSignal) : QJsonValue(QJsonValue::Null);
+        camera["siyi_env"] = m_hasSiyiTelemetry ? m_currentEnvName : "N/A";
+        QJsonObject c2 = nativeC2Monitor(m_nativeC2Samples,
+            m_nativeC2ReceivedMs < 0 ? 0 : m_nativeC2Clock.elapsed() - m_nativeC2ReceivedMs, m_nativeC2Decision);
+        c2["time"] = QDateTime::currentDateTime().toString("HH:mm:ss");
+        QJsonObject payload;
+        payload["version"] = 1; payload["camera"] = camera; payload["c2"] = c2;
+        qInfo().noquote() << "[XB_TELEMETRY] " + QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    }
 }
 
 void SRTAdaptiveBitrateStreaming::handleCameraReportedBitrate(int achievedKbps)

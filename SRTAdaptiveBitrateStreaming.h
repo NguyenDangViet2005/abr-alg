@@ -97,6 +97,7 @@ public slots:
     void handleCameraReportedBitrate(int achievedKbps);
 
 private:
+    void logTelemetry(const QString &reason = QString());
     CongestionState classifyCongestion(double lossPercent, double rtt, double rttInflation, bool useExitThresholds, bool hasLatencyDrops = false, bool isKeyframeBurst = false) const;
 
     void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps,
@@ -133,6 +134,9 @@ private:
     qint64 m_lastC2PacketTime;
     bool m_nativeC2Enabled = false;
     C2TelemetryPolicy m_nativeC2Policy;
+    C2TelemetryPolicy::Decision m_nativeC2Decision;
+    QVector<C2TelemetryStat> m_nativeC2Samples;
+    qint64 m_nativeC2ReceivedMs = -1;
     QElapsedTimer m_nativeC2Clock;
 
     // Sliding window sample histories
