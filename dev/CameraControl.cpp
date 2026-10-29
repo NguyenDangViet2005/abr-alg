@@ -100,6 +100,8 @@ void CameraControl::sendAdaptBitrate(int bitrate)
                                        .arg(bitrate)
                                        .arg(message.isEmpty() ? QString::fromUtf8(respData) : message);
             emit bitrateRejected(bitrate, message.isEmpty() ? QString::fromUtf8(respData) : message);
+            reply->deleteLater();
+            return;
         }
         qDebug().noquote() << QString("[CameraControl] <- HTTP %1  asked=%2 kbps  achieved=%3 kbps")
                                   .arg(statusCode)

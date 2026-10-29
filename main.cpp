@@ -5,6 +5,7 @@
 #include "SRTPeerStat.h"
 #include "RouterInterfaceStat.h"
 #include "dev/LogUploader.h"
+#include "SiyiLinkStat.h"
 
 int main(int argc, char *argv[])
 {
@@ -82,6 +83,7 @@ int main(int argc, char *argv[])
 
     qRegisterMetaType<SRTPeerStat>("SRTPeerStat");
     qRegisterMetaType<QVector<SRTPeerStat>>("QVector<SRTPeerStat>");
+    qRegisterMetaType<SiyiLinkStat>("SiyiLinkStat");
 
     // Registered for the same reason as the two above, even though the
     // router-row connections are currently DIRECT (handler, factory and the

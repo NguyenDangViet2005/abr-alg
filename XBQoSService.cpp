@@ -6,16 +6,16 @@
 #include <QTimer>
 #include "ABRFactory.h"
 #include "dev/NetworkHandler.h"
-#include "dev/RouterNetworkHandler.h"
 #include "dev/CameraControl.h"
 #include "dev/QoSDebugSender.h"
+#include "dev/SiyiLinkHandler.h"
 #include "ABRConfigs.h"
 
 XBQoSService::XBQoSService(QObject *parent)
     : QObject(parent)
     , m_abrFactory(nullptr)
     , m_networkHandler(nullptr)
-    , m_routerNetworkHandler(nullptr)
+    , m_siyiHandler(nullptr)
     , m_cameraControl(nullptr)
     , m_qosDebug(nullptr)
     , m_currentBitrate(0)
@@ -72,7 +72,7 @@ void XBQoSService::printStartupBanner()
 void XBQoSService::setupConnections()
 {
     m_cameraKeepAliveTimer = new QTimer(this);
-    m_cameraKeepAliveTimer->setInterval(3000);
+    m_cameraKeepAliveTimer->setInterval(5000);
     connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this]() {
         // The timer's own running state IS the traffic gate: handleBitrateChange
         // starts it on a live bitrate and stops it on PAUSE. It used to also
@@ -111,8 +111,7 @@ void XBQoSService::setupConnections()
             return;
         }
 
-        VideoProfile profile = m_resolutionAdapter.updateBitrate(newBitrate);
-        Q_UNUSED(profile);
+        m_resolutionAdapter.updateBitrate(newBitrate);
         dispatchToCameraServer(static_cast<int>(newBitrate));
 
         if (m_cameraKeepAliveTimer) {
@@ -226,7 +225,6 @@ void XBQoSService::setupConnections()
 
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
-
         // Router telemetry (UDP 12346). Routed to the per-interface ABR
         // instances (ABRFactory::handleRouterRow → XBAdaptiveBitrateStreaming).
         // Deliberately SEPARATE from the 12345 SRT QoS path below: they
@@ -259,6 +257,9 @@ void XBQoSService::setupConnections()
             // learned, not on the next 1 Hz SAMPLE.
             connect(m_abrFactory, &ABRFactory::routerAbrCeiling,
                     m_qosDebug, &QoSDebugSender::handleAbrCeiling);
+        if (m_siyiHandler) {
+            connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkUpdated, m_abrFactory, &ABRFactory::handleSiyiData);
+            connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkLost, m_abrFactory, &ABRFactory::handleSiyiLost);
         }
         connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi
@@ -326,7 +327,7 @@ void XBQoSService::start()
     }
 
     m_networkHandler = new NetworkHandler(this);
-    m_routerNetworkHandler = new RouterNetworkHandler(this);
+    m_siyiHandler = new SiyiLinkHandler(this);
 
     // Created BEFORE setupConnections so the tap connects to a live object.
     // The debug channel is harmless when disabled: it logs but never opens a
@@ -337,7 +338,7 @@ void XBQoSService::start()
     setupConnections();
 
     m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
-    qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT;
+    m_siyiHandler->start();
 
     // RouterNetworkHandler logs its own bind result (success or errorString),
     // so no service-level "listening" line here to avoid claiming success on a
@@ -360,6 +361,11 @@ void XBQoSService::start()
         qInfo().noquote() << "[QoS Engine] QoS debug channel disabled "
                              "(qDebug only, no UDP/file). Enable with --qos-debug.";
     }
+    qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT;
+    qInfo().noquote() << QString("[QoS Engine] SIYI HM30 Handler started. Polling AU at %1:%2 (Local bind %3)")
+                                .arg(SIYI_AU_DEFAULT_IP)
+                                .arg(SIYI_AU_DEFAULT_PORT)
+                                .arg(SIYI_LOCAL_DEFAULT_PORT);
 }
 
 void XBQoSService::stop()
@@ -370,8 +376,8 @@ void XBQoSService::stop()
     if (m_networkHandler) {
         m_networkHandler->stop();
     }
-    if (m_routerNetworkHandler) {
-        m_routerNetworkHandler->stop();
+    if (m_siyiHandler) {
+        m_siyiHandler->stop();
     }
     if (m_qosDebug) {
         m_qosDebug->stopFileLog();

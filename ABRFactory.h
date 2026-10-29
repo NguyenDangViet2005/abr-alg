@@ -27,6 +27,8 @@ public slots:
     void startCameraSocketAbr();
     void stopCameraSocketAbr();
     void handleC2Data(const QVector<SRTPeerStat> &peers);
+    void handleSiyiData(const SiyiLinkStat &stat);
+    void handleSiyiLost();
 
     // Creates one XBAdaptiveBitrateStreaming per interface and connects it back.
     // `isC2Configured` is a GLOBAL fact (is C2 deployed at all), passed to every
@@ -91,6 +93,8 @@ public slots:
 signals:
     void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);
     void onC2TelemetryData(const QVector<SRTPeerStat> &peers);
+    void onSiyiTelemetryData(const SiyiLinkStat &stat);
+    void onSiyiTelemetryLost();
 
     // The bitrate the PRIMARY interface wants, for the camera. Distinct from
     // routerAbrDecision (which carries EVERY instance's decision for the debug

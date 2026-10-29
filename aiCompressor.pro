@@ -20,6 +20,7 @@ HEADERS += \
     RouterInterfaceStat.h \
     SRTAdaptiveBitrateStreaming.h \
     SRTPeerStat.h \
+    SiyiLinkStat.h \
     VideoResolutionAdapter.h \
     XBAdaptiveBitrateStreaming.h \
     XBQoSService.h \
@@ -29,9 +30,9 @@ HEADERS += \
     dev/QoSDebugProtocol.h \
     dev/QoSDebugSender.h \
     dev/RouterNetworkHandler.h
+    dev/SiyiLinkHandler.h
 
 SOURCES += \
-    dev/RouterNetworkHandler.cpp \
     main.cpp \
     ABRFactory.cpp \
     IAdaptiveBitrateStreaming.cpp \
@@ -46,3 +47,4 @@ SOURCES += \
     dev/LogUploader.cpp \
     dev/QoSDebugProtocol.cpp \
     dev/QoSDebugSender.cpp
+    dev/SiyiLinkHandler.cpp

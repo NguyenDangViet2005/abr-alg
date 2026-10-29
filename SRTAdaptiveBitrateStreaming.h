@@ -10,6 +10,7 @@
 #include "IAdaptiveBitrateStreaming.h"
 #include "SRTPeerStat.h"
 #include "ABRConfigs.h"
+#include "SiyiLinkStat.h"
 
 class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
@@ -25,21 +26,21 @@ public:
     // ceiling then has to clamp (qBound in reset()). Tied to the max so the two
     // cannot drift; was a private 6000 literal.
     static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = DEFAULT_MAX_BITRATE_KBPS;
-    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 250;
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 50;
 
-    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 500;  
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 2000;  
     static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
     static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  
-    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 1500;
+    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 3000;
  
-    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 500;
+    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 1500;
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
     static constexpr double BW_UTILIZATION_RATIO                    = 0.90;
 
-    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 100;
-    static constexpr qint64 FAILURE_MEMORY_PROBE_INTERVAL_MS        = 10000;
+    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 50;
+    static constexpr qint64 FAILURE_MEMORY_PROBE_INTERVAL_MS        = 30000;
     static constexpr qint64 FAILURE_MEMORY_RETENTION_MS             = 30000;
 
     static constexpr int RTT_BASELINE_WARMUP_SAMPLES                = 5;
@@ -51,8 +52,13 @@ public:
     static constexpr qint64 KEYFRAME_IMMUNITY_DURATION_MS           = 800;
     static constexpr qint64 MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE      = 20;
 
-    static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 3000;
-    static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS                 = 2500;
+    static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 5000;
+    static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS                 = 5000;
+
+    static constexpr double LOSS_THRESHOLD_BOTTLENECK_PERCENT       = 2.5;
+    static constexpr double LOSS_THRESHOLD_SEVERE_PERCENT           = 8.0;
+    static constexpr double LOSS_THRESHOLD_PANIC_PERCENT            = 25.0;
+    static constexpr qint64 TRANSIENT_OCCLUSION_DEBOUNCE_MS         = 1000;
 
     enum class CongestionState {
         Clear = 0,     
@@ -87,6 +93,8 @@ public:
 public slots:
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);
     void handleC2ConnectionStats(const QVector<SRTPeerStat> &peers);
+    void handleSiyiLinkStat(const SiyiLinkStat &stat);
+    void handleSiyiLinkLost();
     void onHeartbeatTimeout();
     void handleCameraReportedBitrate(int achievedKbps);
 
@@ -98,6 +106,10 @@ private:
                        int rawDropSndTotal = 0, int rawDropRcvTotal = 0,
                        int rawRetransTotal = 0);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
+    unsigned int calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const;
+
+    // SIYI RF Environment helper
+    const RfEnvironment& getRfEnvironment(double rssi) const;
 
     void evaluateC2Quality();
     QString c2PriorityToString(C2PriorityLevel p) const;
@@ -138,8 +150,10 @@ private:
     qint64 m_cooldownUntilMs;
     int m_consecutiveZeroLossCount;
     qint64 m_clearSinceMs;
+    unsigned int m_previousStableBitrate;
     unsigned int m_lastCongestedBitrate;
     qint64 m_lastProbeTime;
+    double m_bottleneckBwMbps;
 
     QTimer *m_heartbeatTimer;
     double m_latestSmoothedRtt;
@@ -164,6 +178,10 @@ private:
     CongestionState m_lastCongestionState;
     bool m_wasCongested;
     qint64 m_lastKeyframeRequestTime;
+    int m_consecutivePanicCount;
+    qint64 m_congestionStartTimeMs;
+    int m_consecutiveCongestedSamples;
+    bool m_networkEnvironmentChanged;
 
     qint64 m_lastCameraQosTime;
     qint64 m_lastActiveTrafficTime;
@@ -172,6 +190,16 @@ private:
     bool m_needRecoveryRefresh;
     qint64 m_lastCollapseLogTime;
     unsigned int m_lastAchievedBitrateKbps;
+
+    // SIYI HM30 RF Telemetry & Environment State
+    SiyiLinkStat m_siyiStat;
+    QVector<double> m_siyiRssiHistory;
+    double m_smoothedRssi;
+    int m_smoothedSignal;
+    qint64 m_lastSiyiPacketTime;
+    unsigned int m_currentEnvCeiling;
+    QString m_currentEnvName;
+    bool m_hasSiyiTelemetry;
 };
 
 #endif // SRTADAPTIVEBITRATESTREAMING_H

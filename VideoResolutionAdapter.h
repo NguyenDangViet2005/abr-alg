@@ -24,6 +24,7 @@ public:
     static VideoProfile profile720p();
     static VideoProfile profile480p();
     static VideoProfile profile360p();
+    static VideoProfile profile240p();
     static VideoProfile profileOff() { return VideoProfile{0, 0, 0, 0, "OFF", "OFF (Stream Disabled)"}; }
 
 private:
