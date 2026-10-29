@@ -108,3 +108,7 @@ external/
 
 # Git worktrees (local development only)
 worktrees/
+
+web-monitor/
+
+test/
