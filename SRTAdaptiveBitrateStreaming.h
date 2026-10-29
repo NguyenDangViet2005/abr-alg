@@ -18,8 +18,14 @@ class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 public:
     // ── BelaCoder Configuration Constants ──
     static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
-    static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = 6000;
-    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = 6000;
+    // Single source of truth: the shared ABR ceiling, so this engine and the
+    // router ABR cannot drift. Was a private 6000 literal.
+    static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = ABR_DEFAULT_MAX_ABR_BITRATE;
+    // Start-at-the-ceiling: the SRT ramp begins high and backs off, so the
+    // initial ask must not exceed the max or reset() would hand a value the
+    // ceiling then has to clamp (qBound in reset()). Tied to the max so the two
+    // cannot drift; was a private 6000 literal.
+    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = DEFAULT_MAX_BITRATE_KBPS;
     static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 50;
 
     static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 2000;  

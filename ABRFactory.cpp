@@ -1,4 +1,6 @@
 #include "ABRFactory.h"
+#include "XBAdaptiveBitrateStreaming.h"
+#include "ABRSwitchAdopt.h"   // abrSwitchDebounced — switch anti-jitter predicate
 #include <QDebug>
 
 ABRFactory* ABRFactory::_instance = nullptr;
@@ -7,6 +9,9 @@ ABRFactory::ABRFactory(QObject *parent)
     : QObject(parent)
     , _srtAdaptiveBitrateStreaming(nullptr)
 {
+    // Monotonic clock for the switch debounce. Started once; elapsed() is what
+    // _lastSwitchMs is compared against.
+    _switchClock.start();
 }
 
 ABRFactory *ABRFactory::instance()
@@ -46,6 +51,243 @@ void ABRFactory::startCameraSocketAbr()
 void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
 {
     emit onC2TelemetryData(peers);
+}
+
+void ABRFactory::setHeadroomPct(int pct)
+{
+    // Phase 09 (headroom): store for the next startRouterAbr. No validation here
+    // — the ABR instance clamps to [0.5, 1.0] and logs, so the single source of
+    // truth for the valid range lives with the consumer.
+    _headroomPct = pct;
+}
+
+void ABRFactory::startRouterAbr(const QStringList &ifaces, bool isC2Configured)
+{
+    qInfo().nospace() << "ABRFactory: start router ABR for " << ifaces.size()
+                      << " interface(s), isC2Configured=" << isC2Configured
+                      << ", headroom=" << _headroomPct << "%";
+
+    for (const QString &name : ifaces) {
+        if (_routerAbrs.contains(name)) continue;
+        auto *abr = new XBAdaptiveBitrateStreaming(name, isC2Configured, this);
+        abr->setMaxAbrBitrate(ABR_DEFAULT_MAX_ABR_BITRATE);
+        // Phase 09 (headroom): percent -> factor, applied before start() so the
+        // first ramp tick already respects the cap.
+        abr->setHeadroomFactor(_headroomPct / 100.0);
+        _routerAbrs.insert(name, abr);
+        connect(abr, &XBAdaptiveBitrateStreaming::bitrateProposed,
+                this, &ABRFactory::handleRouterAbrBitrate);
+        // Relay the full decision (with branch/reason/maxAbr/ceiling) out of the
+        // factory, so a tap does not need the instance map.
+        connect(abr, &XBAdaptiveBitrateStreaming::decisionMade,
+                this, &ABRFactory::routerAbrDecision);
+        // The ceiling edge, relayed the same way so the QS channel fires the
+        // EVENT the moment it is learned rather than a tick later.
+        connect(abr, &XBAdaptiveBitrateStreaming::ceilingChanged,
+                this, &ABRFactory::routerAbrCeiling);
+        // Phase 11: the loss-ladder reset request (loss > ABR_LOSS_RESET_PCT). The
+        // instance emits it rate-limited; the factory relays it so the executor
+        // (XBQoSService) does not need a pointer to every instance.
+        //
+        // PRIMARY-GATED, like handleRouterAbrBitrate: the camera streams over the
+        // PRIMARY interface, so a SPARE interface collapsing past the reset
+        // threshold must NOT refresh the camera (that is a failover signal, not a
+        // camera action). The lambda
+        // filters by name (the instance owns exactly `name`), consistent with the
+        // "only the effective interface drives the camera" rule.
+        connect(abr, &XBAdaptiveBitrateStreaming::requestStreamReset,
+                this, [this](const QString &iface, const QString &reason) {
+                    if (iface == _primaryIface) {
+                        emit routerAbrResetRequested(iface, reason);
+                    } else {
+                        qInfo().nospace() << "[ABR][RESET] " << iface
+                                          << " (" << reason << ") — spare iface, not refreshing camera";
+                    }
+                });
+    }
+    qInfo().nospace() << "ABRFactory: router ABR started for " << _routerAbrs.size() << " ifaces";
+}
+
+void ABRFactory::stopRouterAbr()
+{
+    qDeleteAll(_routerAbrs);
+    _routerAbrs.clear();
+    _primaryIface.clear();
+}
+
+void ABRFactory::handleRouterRow(const RouterInterfaceStat &row)
+{
+    // Router's view, not XBSRTFactory's. Units are the router's own and are
+    // printed rather than normalised — `lossRatePct` is a PERCENT while the SRT
+    // side reports packet counts, and `throughputKbps` is kbps while the SRT
+    // side reports Mbps. Normalising would hide the discrepancy this line
+    // exists to expose.
+    const char *label = (row.connType == ConnType::VIDEO) ? "VIDEO" : "C2   ";
+
+    qDebug().nospace()
+        << "[ROUTER] " << label
+        << " if="      << row.interfaceName
+        << " prio="    << row.priority
+        << " act="     << row.isActivated
+        << " conn="    << row.isConnected
+        << " mptcp="   << row.isMptcp
+        << " usable="  << row.usable
+        << " score="   << QString::number(row.score, 'f', 2)
+        << " trend="   << row.trend
+        << " thr="     << QString::number(row.throughputKbps(), 'f', 2) << "kbps"
+        << " loss="    << QString::number(row.lossRatePct, 'f', 4) << "%"
+        << " rtt="     << QString::number(row.rttMs(), 'f', 2) << "ms"
+        << " minRtt="  << QString::number(row.minRttMs(), 'f', 2) << "ms"
+        << " qdelay="  << QString::number(row.queuingDelayMs, 'f', 2) << "ms"
+        << " jitter="  << QString::number(row.jitterMs, 'f', 2) << "ms"
+        << (row.parseFailed ? "  [PARSE FAILURES]" : "");
+
+    // Route to the instance owning this interface. An unmatched name is the
+    // declared-vs-seen mismatch (report risk #5) — warn, do not swallow.
+    auto it = _routerAbrs.find(row.interfaceName);
+    if (it == _routerAbrs.end()) {
+        qWarning().nospace() << "[ROUTER] row for unknown iface '" << row.interfaceName
+                             << "' — not in declared list";
+        return;
+    }
+    (*it)->handleRouterRow(row);
+}
+
+void ABRFactory::handleNetworkStrength(const QString &name, int strength)
+{
+    // Route to the instance owning this interface (same key as handleRouterRow).
+    auto it = _routerAbrs.find(name);
+    if (it == _routerAbrs.end()) {
+        qWarning().nospace() << "[ROUTER] strength for unknown iface '" << name
+                             << "' — not in declared list";
+        return;
+    }
+    (*it)->handleNetworkStrength(strength);
+}
+
+void ABRFactory::handleGpsFix(double lat, double lon)
+{
+    // GPS is GLOBAL (no <name>), so BROADCAST rather than route by name. Snapshot
+    // first, exactly as handleRouterTick does: the fan-out can emit, and a
+    // consumer reacting synchronously by calling stop/startRouterAbr() would
+    // mutate _routerAbrs mid-iteration (UB). Each instance keeps its OWN anchor,
+    // so the same fix yields a per-link verdict — no shared state to synchronise.
+    const QList<XBAdaptiveBitrateStreaming *> abrs = _routerAbrs.values();
+    for (auto *abr : abrs) {
+        abr->handleGpsFix(lat, lon);
+    }
+}
+
+void ABRFactory::handleRouterTick(const QString &primaryInterface)
+{
+    qDebug().nospace() << "[ROUTER][TICK] primary=" << primaryInterface;
+    // Capture the PREVIOUS primary before overwriting, so the switch below is an
+    // edge (A != B), not a level. Comparing after the assignment would always be
+    // false and the forced dispatch would never fire.
+    const QString prevPrimary = _primaryIface;
+    _primaryIface = primaryInterface;
+    // Snapshot the instances before fanning out. handleRouterTick can emit
+    // requestStreamReset, and a consumer that reacts synchronously by calling
+    // stopRouterAbr()/startRouterAbr() would mutate _routerAbrs mid-iteration
+    // (qDeleteAll/insert during range-for = UB). Safe today only because no
+    // consumer is connected yet; the copy makes it safe regardless.
+    const QList<XBAdaptiveBitrateStreaming *> abrs = _routerAbrs.values();
+    for (auto *abr : abrs) {
+        abr->handleRouterTick(primaryInterface);
+    }
+
+    // ── Switch: the new primary ADOPTS the effective bitrate ──────────────
+    // The per-tick proposal path is deadbanded (handleRouterTick drops an emit
+    // when the value is unchanged), so a switch A→B where B already sits at its
+    // value would emit NOTHING and the camera would keep A's old bitrate. This
+    // edge forces a dispatch.
+    //
+    // ADOPT MODEL (PORT DEVIATION): bitrate is a property of the PRIMARY ROLE, so
+    // the new primary takes the value the camera is ALREADY running —
+    // _lastEffectiveKbps, the last thing this factory dispatched (=
+    // XBQoSService::m_currentBitrate) — instead of its own stale internal value.
+    // The old path force-dispatched B's internal value; because a spare's ladder
+    // (pre-fix) had collapsed ITSELF to the floor, the camera dropped 1200 -> 30
+    // in one tick with a ~22 s climb back. Carrying the effective value keeps the
+    // camera continuous; B's own ABR then continues from there.
+    //
+    // ANTI-JITTER: A->B->A inside ABR_SWITCH_DEBOUNCE_MS must not re-adopt (a
+    // bouncing router would otherwise reseed the camera back and forth). The
+    // debounce skips only the ADOPT+emit; _primaryIface is already updated, so the
+    // per-tick primary-gated path is consistent regardless.
+    if (primaryInterface != prevPrimary) {
+        auto it = _routerAbrs.find(primaryInterface);
+        if (it == _routerAbrs.end()) {
+            qWarning().nospace() << "[ABR][SWITCH] primary '" << primaryInterface
+                                 << "' is not a known interface — no dispatch";
+        } else {
+            // Carry = what the camera runs NOW. -1 means NEVER dispatched (true
+            // startup) — fall back to B's own value so we still emit one. A pause
+            // does not update the cache (see handleRouterAbrBitrate), so a switch
+            // during a pause carries the last RUNNING value (H1).
+            const unsigned int carry = (_lastEffectiveKbps >= 0)
+                                           ? static_cast<unsigned int>(_lastEffectiveKbps)
+                                           : static_cast<unsigned int>((*it)->currentBitrate());
+            const qint64 now = _switchClock.elapsed();
+            const bool debounced = abrSwitchDebounced(now, _lastSwitchMs,
+                                                      static_cast<long long>(ABR_SWITCH_DEBOUNCE_MS));
+            // Always bridge B's internal bitrate to the carried value; only a
+            // NON-debounced edge resets the ceiling. Skipping the bridge entirely
+            // on a debounced edge would leave B's ladder base diverged from the
+            // camera and its next proposal would jump it (M1).
+            (*it)->adoptPrimaryBitrate(carry, /*resetCeiling=*/!debounced);
+            // Do NOT arm the debounce on the startup edge ("" -> first): it is not
+            // jitter, and arming it would swallow a genuine re-elect in the first
+            // window (M2).
+            if (!prevPrimary.isEmpty()) _lastSwitchMs = now;
+            if (debounced) {
+                qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
+                                  << primaryInterface << " within debounce ("
+                                  << ABR_SWITCH_DEBOUNCE_MS << "ms) — bridged to "
+                                  << (*it)->currentBitrate() << "kbps, ceiling kept";
+            } else {
+                qInfo().nospace() << "[ABR][SWITCH] " << prevPrimary << " -> "
+                                  << primaryInterface << " — adopting effective "
+                                  << (*it)->currentBitrate() << "kbps";
+            }
+            // One emit: the service dedups (newBitrate == m_currentBitrate is a
+            // no-op), so a carry equal to the camera's current value dispatches
+            // nothing — the camera stays continuous across the switch. Cache it
+            // too, so the NEXT switch adopts this same effective value.
+            _lastEffectiveKbps = (*it)->currentBitrate();
+            emit routerAbrEffectiveBitrate(_lastEffectiveKbps);
+        }
+    }
+}
+
+void ABRFactory::handleRouterAbrBitrate(const QString &iface, unsigned int kbps)
+{
+    const bool effective = (iface == _primaryIface);
+    qInfo().nospace() << "[ABR][PROPOSE] if=" << iface << " " << kbps << "kbps "
+                      << (effective ? "EFFECTIVE (primary)" : "spare");
+    // Only the primary's proposal reaches the camera. A spare interface's
+    // proposal is logged but never dispatched — acting on it would drive the
+    // video with a link the router is not currently using.
+    if (effective) {
+        // Cache the last NON-ZERO dispatched value: it IS what the camera runs
+        // now, and the switch edge adopts it as the carry. Cached only on the
+        // EFFECTIVE (primary) path, so a spare's proposal never poisons the carry.
+        // 0 is the telemetry-collapse PAUSE — deliberately NOT cached (H1), so a
+        // switch during a pause carries the last RUNNING value, not an ambiguous 0
+        // that the edge cannot tell from "never dispatched".
+        if (kbps > 0) _lastEffectiveKbps = static_cast<int>(kbps);
+        emit routerAbrEffectiveBitrate(static_cast<int>(kbps));
+    }
+}
+
+void ABRFactory::handleCameraReportedBitrate(int achievedKbps)
+{
+    // Route to the primary instance only: it is the one that asked the camera
+    // for a bitrate, so it is the only one whose collapse verdict is meaningful.
+    auto it = _routerAbrs.find(_primaryIface);
+    if (it != _routerAbrs.end()) {
+        (*it)->handleCameraReportedBitrate(achievedKbps);
+    }
 }
 
 void ABRFactory::handleSiyiData(const SiyiLinkStat &stat)
