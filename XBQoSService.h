@@ -8,6 +8,7 @@
 
 class ABRFactory;
 class NetworkHandler;
+class RouterNetworkHandler;
 class SiyiLinkHandler;
 class CameraControl;
 class QoSDebugSender;
@@ -17,6 +18,8 @@ class XBQoSService : public QObject
 {
     Q_OBJECT
 public:
+    enum class ProtocolMode { Srt, Tcp };
+
     explicit XBQoSService(QObject *parent = nullptr);
     virtual ~XBQoSService();
 
@@ -25,6 +28,7 @@ public:
     // flag every instance needs (report §6b). Adding/removing an interface is
     // one line here — see main.cpp.
     void setRouterAbrInterfaces(const QStringList &ifaces, bool isC2Configured);
+    void setProtocolMode(ProtocolMode mode);
 
     // Phase 09 (headroom): the steady-state cap percent for the router ABR
     // (--abr-headroom). Declared before start(); forwarded to ABRFactory, which
@@ -60,6 +64,7 @@ private:
 
     ABRFactory *m_abrFactory;
     NetworkHandler *m_networkHandler;
+    RouterNetworkHandler *m_routerNetworkHandler;
     SiyiLinkHandler *m_siyiHandler;
     CameraControl *m_cameraControl;
     QoSDebugSender *m_qosDebug;
@@ -72,6 +77,7 @@ private:
     QString m_qosDebugLogDir;
 
     QStringList m_routerAbrIfaces;
+    ProtocolMode m_protocolMode = ProtocolMode::Srt;
     bool m_isC2Configured = false;
     // Phase 09 (headroom): steady-state cap percent, from --abr-headroom.
     int m_abrHeadroomPct = ABR_HEADROOM_FACTOR_PCT;
