@@ -29,6 +29,10 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_clearSinceMs(0)
     , m_lastCongestedBitrate(0)
     , m_lastProbeTime(0)
+    , m_probeHealthySince(0)
+    , m_probeStartedAt(0)
+    , m_probeRetryDelayMs(FAILURE_MEMORY_PROBE_INTERVAL_MS)
+    , m_probePreviousCeiling(0)
     , m_heartbeatTimer(nullptr)
     , m_latestSmoothedRtt(0.0)
     , m_latestSmoothedBw(0.0)
@@ -93,6 +97,13 @@ void SRTAdaptiveBitrateStreaming::start()
     m_isExplicitC2Only = false;
     m_clearSinceMs = 0;
     m_lastCongestedBitrate = 0;
+    m_lastProbeTime = 0;
+    m_probeHealthySince = 0;
+    m_probeStartedAt = 0;
+    m_probePreviousCeiling = 0;
+    m_probeRetryDelayMs = FAILURE_MEMORY_PROBE_INTERVAL_MS;
+    m_previousStableBitrate = 0;
+    m_bottleneckBwMbps = 0.0;
     m_c2Quality = C2Quality::Good;
     m_c2Priority = C2PriorityLevel::Normal;
     m_c2Rtt = 0.0;
@@ -176,6 +187,10 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_previousStableBitrate = 0;
     m_lastCongestedBitrate = 0;
     m_lastProbeTime = 0;
+    m_probeHealthySince = 0;
+    m_probeStartedAt = 0;
+    m_probePreviousCeiling = 0;
+    m_probeRetryDelayMs = FAILURE_MEMORY_PROBE_INTERVAL_MS;
     m_bottleneckBwMbps = 0.0;
     m_hasLastLoss = false;
     m_lastLossTotal = 0;
@@ -378,6 +393,7 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
 
     if (!hasRecentQos) {
         if (m_lastCameraQosTime > 0) {
+            cancelQosProbe(now, false);
             if (now - m_lastCollapseLogTime >= 5000) {
                 m_lastCollapseLogTime = now;
                 qWarning().noquote() << QString(">>> [QoS WATCHDOG] ⚠️ LOST CAMERA QoS %1s (prefix 9990)! "
@@ -519,6 +535,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
 
     // Reconnecting in the same region must preserve the learned safe ceiling.
     if (env.ceilingKbps != m_currentEnvCeiling) {
+        cancelQosProbe(m_lastSiyiPacketTime, false);
         unsigned int oldCeiling = m_currentEnvCeiling;
         m_currentEnvCeiling = env.ceilingKbps;
         m_currentEnvName = env.name;
@@ -548,8 +565,28 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
     }
 }
 
+void SRTAdaptiveBitrateStreaming::cancelQosProbe(qint64 now, bool failed)
+{
+    if (m_probePreviousCeiling > 0) {
+        m_lastCongestedBitrate = m_probePreviousCeiling;
+        if (failed) {
+            m_probeRetryDelayMs = qMin<qint64>(m_probeRetryDelayMs * 2, 120000);
+        }
+        qInfo().noquote() << QString("[QoS Engine] QoS probe cancelled; ceiling restored to %1 kbps")
+                                 .arg(m_lastCongestedBitrate);
+        if (failed && m_currentBitrateKbps > m_lastCongestedBitrate) {
+            applyNewBitrate(m_lastCongestedBitrate, m_latestSmoothedRtt, m_latestSmoothedBw, 0);
+        }
+    }
+    m_probePreviousCeiling = 0;
+    m_probeStartedAt = 0;
+    m_probeHealthySince = 0;
+    m_lastProbeTime = now;
+}
+
 void SRTAdaptiveBitrateStreaming::handleSiyiLinkLost()
 {
+    cancelQosProbe(QDateTime::currentMSecsSinceEpoch(), false);
     if (m_hasSiyiTelemetry) {
         qWarning() << "[RF Environment] SIYI RSSI unavailable; ABR paused at"
                    << m_currentBitrateKbps << "kbps until valid RSSI returns.";
@@ -825,6 +862,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
 
     if (m_isTrafficIdle) {
+        cancelQosProbe(ctime, false);
         m_latestSmoothedRtt = smoothedRtt;
         m_latestSmoothedBw = smoothedBw;
         m_latestDeltaLoss = 0;
@@ -915,7 +953,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
     }
 
+    // Do not wait for the next increase decision to abandon a probe when a
+    // fresh sample shows loss or congestion.
+    if (deltaFailures > 0 || state != CongestionState::Clear) {
+        cancelQosProbe(ctime, m_probePreviousCeiling > 0);
+    }
     if (isStaleSample) {
+        cancelQosProbe(ctime, false);
         return;
     }
 
@@ -1036,16 +1080,39 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 return;
             }
 
-            // If physical link bandwidth was previously restricted to extreme survival levels (<= 400 kbps)
-            // and user opens bandwidth limit to broadband (>= 1000 kbps), lift the ceiling to match.
-            // (Does NOT touch normal operational ceilings like 1800k, 2100k, etc.)
-            if (m_lastCongestedBitrate > 0 && m_lastCongestedBitrate <= 400u && bandwidthCapKbps >= 1000u &&
-                m_lossPercentAvg == 0.0 && rttInflation < 4.0) {
-                unsigned int oldCeiling = m_lastCongestedBitrate;
-                m_lastCongestedBitrate = bandwidthCapKbps;
-                m_lastProbeTime = ctime;
-                qInfo().noquote() << QString("[QoS Engine] Network capacity expanded: Ceiling lifted from %1 kbps to %2 kbps")
-                                         .arg(oldCeiling).arg(m_lastCongestedBitrate);
+            // A learned QoS ceiling is temporary: wait for continuous clean
+            // traffic, then test one small step and confirm it before committing.
+            const bool probeHealthy = deltaFailures == 0 && m_lossPercentAvg == 0.0
+                && rttInflation < 4.0 && rawRtt > 0.0 && rawBandwidthMbps > 0.1
+                && !m_isExplicitC2Only && !m_isVideoCollapsed && !m_isTrafficIdle;
+            if (!probeHealthy) {
+                cancelQosProbe(ctime, m_probePreviousCeiling > 0);
+            } else {
+                if (m_probeHealthySince == 0) m_probeHealthySince = ctime;
+                if (m_probePreviousCeiling > 0 && m_currentBitrateKbps >= m_lastCongestedBitrate) {
+                    if (m_probeStartedAt == 0) m_probeStartedAt = ctime;
+                    if (ctime - m_probeStartedAt >= 10000) {
+                        m_probePreviousCeiling = 0;
+                        m_probeStartedAt = 0;
+                        m_probeRetryDelayMs = FAILURE_MEMORY_PROBE_INTERVAL_MS;
+                        m_lastProbeTime = ctime;
+                        qInfo().noquote() << QString("[QoS Engine] QoS probe confirmed: %1 kbps")
+                                                 .arg(m_lastCongestedBitrate);
+                    }
+                }
+                const unsigned int probeCap = qMin(bandwidthCapKbps, m_currentEnvCeiling);
+                if (m_probePreviousCeiling == 0 && m_lastCongestedBitrate > 0
+                    && m_currentBitrateKbps == m_lastCongestedBitrate
+                    && probeCap >= m_lastCongestedBitrate + FAILURE_MEMORY_PROBE_STEP_KBPS
+                    && ctime - m_probeHealthySince >= FAILURE_MEMORY_RETENTION_MS
+                    && ctime - m_lastProbeTime >= m_probeRetryDelayMs) {
+                    m_probePreviousCeiling = m_lastCongestedBitrate;
+                    m_lastCongestedBitrate += FAILURE_MEMORY_PROBE_STEP_KBPS;
+                    m_probeStartedAt = 0;
+                    m_lastProbeTime = ctime;
+                    qInfo().noquote() << QString("[QoS Engine] QoS probe: %1 -> %2 kbps")
+                                             .arg(m_probePreviousCeiling).arg(m_lastCongestedBitrate);
+                }
             }
 
             // In a given network environment, once a failure ceiling is recorded,
@@ -1069,8 +1136,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                                            .arg(effectiveMax);
                 return;
             } else {
-                m_lastProbeTime = 0;
-
                 // Strictly require ZERO loss before incrementing:
                 // If there is ANY loss (even 0.5%), HOLD current bitrate!
                 if (m_lossPercentAvg > 0.0) {
@@ -1101,6 +1166,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
     }
     else {
+        cancelQosProbe(ctime, m_probePreviousCeiling > 0);
         if (m_lastCongestionState == CongestionState::Panic && state != CongestionState::Panic) {
             if (ctime - m_lastKeyframeRequestTime >= 3000) {
                 m_lastKeyframeRequestTime = ctime;
