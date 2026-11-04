@@ -31,9 +31,7 @@ void CameraControl::sendAdaptBitrate(int bitrate)
 {
     // A new command SUPERSEDES any in-flight one: the camera would otherwise
     // receive both, and the older reply would arrive after the newer ask.
-    bool superseded = false;
     if (m_currentReply && m_currentReply->isRunning()) {
-        superseded = true;
         m_currentReply->disconnect();
         m_currentReply->abort();
         m_currentReply->deleteLater();
@@ -48,11 +46,6 @@ void CameraControl::sendAdaptBitrate(int bitrate)
     QJsonObject payload;
     payload["bitrate"] = bitrate;
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
-
-    qDebug().noquote() << QString("[CameraControl] -> POST %1 %2%3")
-                              .arg(url.toString())
-                              .arg(QString::fromUtf8(body))
-                              .arg(superseded ? QStringLiteral("  [superseded an in-flight command]") : QString());
 
     QNetworkReply* reply = m_nam->post(request, body);
     m_currentReply = reply;
@@ -103,10 +96,6 @@ void CameraControl::sendAdaptBitrate(int bitrate)
             reply->deleteLater();
             return;
         }
-        qDebug().noquote() << QString("[CameraControl] <- HTTP %1  asked=%2 kbps  achieved=%3 kbps")
-                                  .arg(statusCode)
-                                  .arg(bitrate)
-                                  .arg(achievedKbps);
         emit bitrateReported(bitrate, achievedKbps);
         reply->deleteLater();
     });

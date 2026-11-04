@@ -34,7 +34,7 @@
 // Bitrate video tối đa (kbps) — trần tuyệt đối của mọi đề xuất bitrate.
 // Đây là 1 nguồn duy nhất: ABRConfigs.h alias ABR_DEFAULT_MAX_ABR_BITRATE về đây.
 // [xbfirm] = xbfirm MAX_BITRATE_KBPS (2000).
-#define ABR_MAX_BITRATE_KBPS                   2000
+#define ABR_MAX_BITRATE_KBPS                   4000
 
 // Bitrate video tối thiểu (kbps) — sàn; không bao giờ đề xuất dưới mức này.
 // [xbfirm] — NÂNG 30 -> 100 (2026-10-15): 30 quá thấp, video gần như không xem

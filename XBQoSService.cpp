@@ -6,6 +6,7 @@
 #include <QTimer>
 #include "ABRFactory.h"
 #include "dev/NetworkHandler.h"
+#include "dev/RouterNetworkHandler.h"
 #include "dev/CameraControl.h"
 #include "dev/QoSDebugSender.h"
 #include "dev/SiyiLinkHandler.h"
@@ -15,6 +16,7 @@ XBQoSService::XBQoSService(QObject *parent)
     : QObject(parent)
     , m_abrFactory(nullptr)
     , m_networkHandler(nullptr)
+    , m_routerNetworkHandler(nullptr)
     , m_siyiHandler(nullptr)
     , m_cameraControl(nullptr)
     , m_qosDebug(nullptr)
@@ -34,6 +36,11 @@ void XBQoSService::setRouterAbrInterfaces(const QStringList &ifaces, bool isC2Co
 {
     m_routerAbrIfaces = ifaces;
     m_isC2Configured = isC2Configured;
+}
+
+void XBQoSService::setProtocolMode(ProtocolMode mode)
+{
+    m_protocolMode = mode;
 }
 
 void XBQoSService::setQosDebug(bool enabled, const QString &host, quint16 port,
@@ -58,7 +65,8 @@ void XBQoSService::setAbrDisabled(bool disabled)
 void XBQoSService::printStartupBanner()
 {
     qInfo() << "============================================================";
-    qInfo() << "  XB-QOS-SERVICE : BELACODER ADAPTIVE BITRATE (SRT -> RF)   ";
+    qInfo().noquote() << QString("  XB-QOS-SERVICE : %1 ADAPTIVE BITRATE")
+                            .arg(m_protocolMode == ProtocolMode::Srt ? "SRT" : "TCP/ROUTER");
     qInfo() << "============================================================";
     // Loud on purpose: a service left in this mode does not adapt, and the
     // symptom (flat camera bitrate) looks like a bug unless the log says so.
@@ -124,10 +132,10 @@ void XBQoSService::setupConnections()
     // (its 12345 path is unused) and must not overwrite the router's decision.
     // A flag, not a deletion: re-enabling SRT is flipping this one line, and the
     // SRT object stays alive as an observer (its signals still fire and log).
-    constexpr bool ROUTER_ABR_OWNS_CAMERA = true;
+    const bool routerAbrOwnsCamera = (m_protocolMode == ProtocolMode::Tcp);
 
     if (m_abrFactory && m_abrFactory->srtAbr()) {
-        if (!ROUTER_ABR_OWNS_CAMERA) {
+        if (!routerAbrOwnsCamera) {
             connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::bitrateChanged, this, handleBitrateChange);
         } else {
             qInfo().noquote() << "[QoS Engine] ROUTER_ABR_OWNS_CAMERA: SRT engine's "
@@ -164,8 +172,8 @@ void XBQoSService::setupConnections()
         // seconds = permanent video outage, bypassing the router ABR's rate limit.
         // SRT is not implemented today (its 12345 path is inert), so this is a
         // latent-bug guard, not a live fix.
-        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this]() {
-            if (ROUTER_ABR_OWNS_CAMERA) {
+        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this, routerAbrOwnsCamera]() {
+            if (routerAbrOwnsCamera) {
                 qInfo().noquote() << "[QoS Engine] ROUTER_ABR_OWNS_CAMERA: SRT keyframe ask "
                                      "ignored (would restart the video socket).";
                 return;
@@ -182,7 +190,9 @@ void XBQoSService::setupConnections()
         // one thing that drives the camera. It replaces the SRT bitrateChanged
         // connect above (guarded off by ROUTER_ABR_OWNS_CAMERA). Carries only
         // the primary's number — a spare interface's proposal never lands here.
-        connect(m_abrFactory, &ABRFactory::routerAbrEffectiveBitrate, this, handleBitrateChange);
+        if (routerAbrOwnsCamera) {
+            connect(m_abrFactory, &ABRFactory::routerAbrEffectiveBitrate, this, handleBitrateChange);
+        }
 
         // ── Router ABR stream-reset → camera video-socket restart (Phase 11/12) ──
         // Two emit sites reach here, both rate-limited by the SHARED 30s token at
@@ -223,27 +233,30 @@ void XBQoSService::setupConnections()
             }
         });
 
-        connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
-        connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+        if (m_networkHandler) {
+            connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
+            connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+        }
         // Router telemetry (UDP 12346). Routed to the per-interface ABR
         // instances (ABRFactory::handleRouterRow → XBAdaptiveBitrateStreaming).
         // Deliberately SEPARATE from the 12345 SRT QoS path below: they
         // describe different things (router's own per-interface view vs.
         // XBSRTFactory's measurement of the SRT stream) and must not be merged.
-        connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow,
-                m_abrFactory, &ABRFactory::handleRouterRow);
-        connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
-                m_abrFactory, &ABRFactory::handleRouterTick);
+        if (m_routerNetworkHandler) {
+            connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow,
+                    m_abrFactory, &ABRFactory::handleRouterRow);
+            connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
+                    m_abrFactory, &ABRFactory::handleRouterTick);
         // Radio strength (row 603) → the owning instance's NetworkReference.
-        connect(m_routerNetworkHandler, &RouterNetworkHandler::onNetworkStrength,
-                m_abrFactory, &ABRFactory::handleNetworkStrength);
+            connect(m_routerNetworkHandler, &RouterNetworkHandler::onNetworkStrength,
+                    m_abrFactory, &ABRFactory::handleNetworkStrength);
         // GPS fix (row 604, GLOBAL) → BROADCAST to every instance's NetworkReference.
-        connect(m_routerNetworkHandler, &RouterNetworkHandler::onGpsFix,
-                m_abrFactory, &ABRFactory::handleGpsFix);
+            connect(m_routerNetworkHandler, &RouterNetworkHandler::onGpsFix,
+                    m_abrFactory, &ABRFactory::handleGpsFix);
 
         // QoS debug channel taps the SAME signals. It only reads, so the tap
         // order relative to the factory does not matter.
-        if (m_qosDebug) {
+            if (m_qosDebug) {
             connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow,
                     m_qosDebug, &QoSDebugSender::handleRouterRow);
             connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
@@ -257,11 +270,13 @@ void XBQoSService::setupConnections()
             // learned, not on the next 1 Hz SAMPLE.
             connect(m_abrFactory, &ABRFactory::routerAbrCeiling,
                     m_qosDebug, &QoSDebugSender::handleAbrCeiling);
+            }
+        }
         if (m_siyiHandler) {
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkUpdated, m_abrFactory, &ABRFactory::handleSiyiData);
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkLost, m_abrFactory, &ABRFactory::handleSiyiLost);
         }
-        connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
+        if (m_networkHandler) connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi
             if (m_cameraNeedsSync && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
                 m_cameraNeedsSync = false;
@@ -279,12 +294,13 @@ void XBQoSService::setupConnections()
                     qWarning().noquote() << QString("[CameraControl] Note: Camera reported bitrate %1 kbps (differs from target %2 kbps)")
                                                 .arg(achievedKbps).arg(requestedKbps);
                 }
-                // Closed loop: the camera's achieved value feeds the PRIMARY
-                // interface's instance (the one that owns the camera), so its
-                // collapse verdict gates the next INCREASE. Routed through the
-                // factory, not srtAbr(): the SRT engine no longer drives the
-                // camera, so its collapse verdict would be meaningless.
-                m_abrFactory->handleCameraReportedBitrate(achievedKbps);
+                if (m_protocolMode == ProtocolMode::Srt && m_abrFactory->srtAbr()) {
+                    m_abrFactory->srtAbr()->handleCameraReportedBitrate(achievedKbps);
+                } else {
+                    // TCP/router mode closes the loop through the primary
+                    // interface instance that currently owns the camera.
+                    m_abrFactory->handleCameraReportedBitrate(achievedKbps);
+                }
             }
         });
         connect(m_cameraControl, &CameraControl::bitrateRejected, this, [this](int requestedKbps, const QString &reason) {
@@ -313,21 +329,27 @@ void XBQoSService::start()
     // router ABR instances are created (startRouterAbr), so each is built with
     // the right cap. Router ABR only; the SRT engine is untouched.
     m_abrFactory->setHeadroomPct(m_abrHeadroomPct);
-    m_abrFactory->startCameraSocketAbr();
+    if (m_protocolMode == ProtocolMode::Srt) {
+        m_abrFactory->startCameraSocketAbr();
+    }
 
     // Per-interface router ABR. Declared list comes from main.cpp (see
     // setRouterAbrInterfaces) — the router's config.ini `interfaces=` is a
     // SEPARATE list and is never regenerated; a mismatch surfaces as the
     // "unknown iface" warning in ABRFactory::handleRouterRow (report risk #5).
-    if (!m_routerAbrIfaces.isEmpty()) {
+    if (m_protocolMode == ProtocolMode::Tcp && !m_routerAbrIfaces.isEmpty()) {
         m_abrFactory->startRouterAbr(m_routerAbrIfaces, m_isC2Configured);
-    } else {
+    } else if (m_protocolMode == ProtocolMode::Tcp) {
         qWarning().noquote() << "[QoS Engine] No router ABR interfaces declared — "
                                 "per-interface ABR disabled (router rows will be logged only).";
     }
 
-    m_networkHandler = new NetworkHandler(this);
-    m_siyiHandler = new SiyiLinkHandler(this);
+    if (m_protocolMode == ProtocolMode::Srt) {
+        m_networkHandler = new NetworkHandler(this);
+        m_siyiHandler = new SiyiLinkHandler(this);
+    } else {
+        m_routerNetworkHandler = new RouterNetworkHandler(this);
+    }
 
     // Created BEFORE setupConnections so the tap connects to a live object.
     // The debug channel is harmless when disabled: it logs but never opens a
@@ -337,13 +359,13 @@ void XBQoSService::start()
 
     setupConnections();
 
-    m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
-    m_siyiHandler->start();
+    if (m_networkHandler) m_networkHandler->start(SRT_ABR_QOS_UDP_PORT);
+    if (m_siyiHandler) m_siyiHandler->start();
 
     // RouterNetworkHandler logs its own bind result (success or errorString),
     // so no service-level "listening" line here to avoid claiming success on a
     // failed bind.
-    m_routerNetworkHandler->start(ROUTER_TELEMETRY_UDP_PORT);
+    if (m_routerNetworkHandler) m_routerNetworkHandler->start(ROUTER_TELEMETRY_UDP_PORT);
 
     // Activate the debug channel's I/O (if enabled) and announce the topology.
     // No local file log: capture-recorder on XBLINK stores the stream and
@@ -361,11 +383,10 @@ void XBQoSService::start()
         qInfo().noquote() << "[QoS Engine] QoS debug channel disabled "
                              "(qDebug only, no UDP/file). Enable with --qos-debug.";
     }
-    qInfo() << "[QoS Engine] Service started. Listening on UDP port" << SRT_ABR_QOS_UDP_PORT;
-    qInfo().noquote() << QString("[QoS Engine] SIYI HM30 Handler started. Polling AU at %1:%2 (Local bind %3)")
-                                .arg(SIYI_AU_DEFAULT_IP)
-                                .arg(SIYI_AU_DEFAULT_PORT)
-                                .arg(SIYI_LOCAL_DEFAULT_PORT);
+    qInfo().noquote() << QString("[QoS Engine] Service started in %1 mode on UDP %2")
+                            .arg(m_protocolMode == ProtocolMode::Srt ? "SRT" : "TCP")
+                            .arg(m_protocolMode == ProtocolMode::Srt
+                                     ? SRT_ABR_QOS_UDP_PORT : ROUTER_TELEMETRY_UDP_PORT);
 }
 
 void XBQoSService::stop()
@@ -375,6 +396,9 @@ void XBQoSService::stop()
     }
     if (m_networkHandler) {
         m_networkHandler->stop();
+    }
+    if (m_routerNetworkHandler) {
+        m_routerNetworkHandler->stop();
     }
     if (m_siyiHandler) {
         m_siyiHandler->stop();

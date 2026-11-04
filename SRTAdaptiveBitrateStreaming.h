@@ -153,6 +153,11 @@ private:
     unsigned int m_previousStableBitrate;
     unsigned int m_lastCongestedBitrate;
     qint64 m_lastProbeTime;
+    qint64 m_probeHealthySince;
+    qint64 m_probeStartedAt;
+    qint64 m_probeRetryDelayMs;
+    unsigned int m_probePreviousCeiling;
+    void cancelQosProbe(qint64 now, bool failed);
     double m_bottleneckBwMbps;
 
     QTimer *m_heartbeatTimer;

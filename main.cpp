@@ -53,6 +53,10 @@ int main(int argc, char *argv[])
         "disable-abr", "Do not change the camera bitrate. The ABR still runs and logs.");
     cli.addOption(optDisableAbr);
 
+    const QCommandLineOption optEnable(
+        "enable", "Select exactly one adaptation protocol: srt or tcp.", "protocol");
+    cli.addOption(optEnable);
+
     // One-shot log upload. When set, the service does NOT start: it finds the
     // newest .qsdb in --qos-debug-log-dir, POSTs it to the given host:port, and
     // exits. The log dir is REUSED (not a separate flag) — the same directory
@@ -61,7 +65,13 @@ int main(int argc, char *argv[])
         "upload", "Upload the latest .qsdb log to <host>:<port>, then exit.",
         "host:port");
     cli.addOption(optUpload);
-    cli.process(a);
+    QStringList arguments = a.arguments();
+    for (QString &argument : arguments) {
+        if (argument.startsWith("--enable:")) {
+            argument.replace(0, QString("--enable:").size(), "--enable=");
+        }
+    }
+    cli.process(arguments);
 
     // ── One-shot upload mode ──
     // Runs BEFORE any service construction: no ABR factory, no UDP listeners,
@@ -81,6 +91,12 @@ int main(int argc, char *argv[])
         return QCoreApplication::exec();
     }
 
+    const QString protocol = cli.value(optEnable).trimmed().toLower();
+    if (protocol != "srt" && protocol != "tcp") {
+        qCritical().noquote() << "Missing or invalid protocol. Use --enable:srt or --enable:tcp";
+        return 2;
+    }
+
     qRegisterMetaType<SRTPeerStat>("SRTPeerStat");
     qRegisterMetaType<QVector<SRTPeerStat>>("QVector<SRTPeerStat>");
     qRegisterMetaType<SiyiLinkStat>("SiyiLinkStat");
@@ -93,6 +109,9 @@ int main(int argc, char *argv[])
     qRegisterMetaType<RouterInterfaceStat>("RouterInterfaceStat");
 
     XBQoSService qosService;
+    qosService.setProtocolMode(protocol == "srt"
+                                   ? XBQoSService::ProtocolMode::Srt
+                                   : XBQoSService::ProtocolMode::Tcp);
 
     // ── Router ABR interface list ──
     // MUST mirror the router's own `interfaces=` in config.ini. The router's

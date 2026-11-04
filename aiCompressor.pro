@@ -29,7 +29,7 @@ HEADERS += \
     dev/LogUploader.h \
     dev/QoSDebugProtocol.h \
     dev/QoSDebugSender.h \
-    dev/RouterNetworkHandler.h
+    dev/RouterNetworkHandler.h \
     dev/SiyiLinkHandler.h
 
 SOURCES += \
@@ -46,5 +46,6 @@ SOURCES += \
     dev/NetworkHandler.cpp \
     dev/LogUploader.cpp \
     dev/QoSDebugProtocol.cpp \
-    dev/QoSDebugSender.cpp
+    dev/QoSDebugSender.cpp \
+    dev/RouterNetworkHandler.cpp \
     dev/SiyiLinkHandler.cpp
