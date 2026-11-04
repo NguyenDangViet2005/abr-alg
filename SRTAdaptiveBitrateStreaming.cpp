@@ -64,7 +64,7 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_smoothedSignal(0)
     , m_lastSiyiPacketTime(0)
     , m_currentEnvCeiling(DEFAULT_MAX_BITRATE_KBPS)
-    , m_currentEnvName("LOS/Ultra (1080p60)")
+    , m_currentEnvName("Ultra")
     , m_hasSiyiTelemetry(false)
 {
     m_heartbeatTimer = new QTimer(this);
@@ -86,7 +86,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_smoothedSignal = 0;
     m_lastSiyiPacketTime = 0;
     m_currentEnvCeiling = DEFAULT_MAX_BITRATE_KBPS;
-    m_currentEnvName = "LOS/Ultra (1080p60)";
+    m_currentEnvName = "Ultra";
     m_hasSiyiTelemetry = false;
 
     m_isVideoEnabled = true;
@@ -223,7 +223,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_smoothedSignal = 0;
     m_lastSiyiPacketTime = 0;
     m_currentEnvCeiling = DEFAULT_MAX_BITRATE_KBPS;
-    m_currentEnvName = "LOS/Ultra (1080p60)";
+    m_currentEnvName = "Ultra";
     m_hasSiyiTelemetry = false;
 
     qInfo() << "[BelaCoder-SRT] Reset bitrate to:" << m_currentBitrateKbps << "kbps";
@@ -967,9 +967,9 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     } else if (state == CongestionState::Clear) {
         m_latestStatusReason = "CLEAR (1080p)";
     } else if (state == CongestionState::Moderate) {
-        m_latestStatusReason = "MODERATE (720p 2.2M)";
+        m_latestStatusReason = "MODERATE (1.5M)";
     } else if (state == CongestionState::Severe) {
-        m_latestStatusReason = "SEVERE (480p 1.0M)";
+        m_latestStatusReason = "SEVERE (0.7M)";
     } else {
         m_latestStatusReason = "\033[1;31mPANIC (Survival 50k)\033[0m";
     }
@@ -985,11 +985,11 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         requiredInterval = BITRATE_DECR_FAST_INTERVAL_MS;
         break;
     case CongestionState::Severe:
-        targetProfileBitrate = 1000;
+        targetProfileBitrate = 700;
         requiredInterval = BITRATE_DECR_FAST_INTERVAL_MS;
         break;
     case CongestionState::Moderate:
-        targetProfileBitrate = 2200;
+        targetProfileBitrate = 1500;
         requiredInterval = BITRATE_DECR_NORMAL_INTERVAL_MS;
         break;
     case CongestionState::Clear:

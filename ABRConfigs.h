@@ -66,12 +66,16 @@ struct RfEnvironment {
     const char *name;         // Tên môi trường
 };
 
+// RSSI ceilings are conservative starting points; measure on the actual link.
+// Entries must remain ordered strongest to weakest with distinct ceilings.
 static const RfEnvironment RF_ENVIRONMENTS[] = {
-    { -65, 6000, "LOS/Ultra (1080p60)" },      // Môi trường 1: Sóng cực tốt
-    { -74, 3500, "Mid-Range (1080p30)" },      // Môi trường 2: Tầm trung
-    { -81, 1800, "Far-Range (720p30)"  },      // Môi trường 3: Tầm xa
-    { -86,  800, "Edge-Link (480p30)"  },      // Môi trường 4: Ranh giới yếu
-    { -99,  200, "Critical (C2 Sống còn)"}     // Môi trường 5: Sóng cận sập
+    { -62, ABR_DEFAULT_MAX_ABR_BITRATE, "Ultra" }, // >= -62 dBm
+    { -69, 2500, "Strong" },                       // -69..-63 dBm
+    { -74, 1500, "Mid-Range Weak" },              // -74..-70
+    { -79,  800, "Far-Range" },                   // -79..-75
+    { -85,  500, "Weak-Link" },                   // -85..-80
+    { -86,  350, "Edge-Link" },                   // -86
+    { -99,  150, "Critical" }                     // <= -87
 };
 
 static const int RF_ENVIRONMENT_COUNT = sizeof(RF_ENVIRONMENTS) / sizeof(RF_ENVIRONMENTS[0]);
