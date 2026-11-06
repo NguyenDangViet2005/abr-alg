@@ -65,9 +65,15 @@ void NetworkHandler::parsePrefixDatagram(const QByteArray &data)
 
     if (peers.isEmpty()) return;
 
+    // Arrival probe, one line per prefix per tick. Same shape on both sides so a
+    // log excerpt shows at a glance WHICH stream is landing: camera usually works
+    // (pilot opens 3344), C2 silently does not when nothing connects to 3345.
+    // 1 Hz, matching the sender's QoS timer.
     if (isCamera) {
+        qDebug().noquote() << QString("[NetworkHandler][9990][CAM] peers=%1").arg(peers.size());
         emit onQosDataReceived(peers);
     } else {
+        qDebug().noquote() << QString("[NetworkHandler][9991][C2] peers=%1").arg(peers.size());
         emit onC2DataReceived(peers);
     }
 }

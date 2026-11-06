@@ -36,12 +36,12 @@ void ABRFactory::startCameraSocketAbr()
     }
 
     this->disconnect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
-    this->disconnect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
+    this->disconnect(this, &ABRFactory::onSrtC2Connection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
     this->disconnect(this, &ABRFactory::onSiyiTelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkStat);
     this->disconnect(this, &ABRFactory::onSiyiTelemetryLost, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkLost);
 
     this->connect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
-    this->connect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
+    this->connect(this, &ABRFactory::onSrtC2Connection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
     this->connect(this, &ABRFactory::onSiyiTelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkStat);
     this->connect(this, &ABRFactory::onSiyiTelemetryLost, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkLost);
 
@@ -50,7 +50,23 @@ void ABRFactory::startCameraSocketAbr()
 
 void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
 {
-    emit onC2TelemetryData(peers);
+    // Receive-side probe for the 9991 path. Prints BEFORE the relay so this line
+    // proves the NetworkHandler->factory connect is alive even when the ABR
+    // consumer drops the packet later (Siyi gate in handleC2ConnectionStats).
+    // Camera counterpart prints far downstream instead, inside processSrtQos.
+    if (peers.isEmpty()) {
+        qDebug() << "[ABRFactory][C2] relay peers=0 (empty)";
+    } else {
+        const SRTPeerStat &p = peers.first();
+        qDebug().noquote() << QString("[ABRFactory][C2] relay peers=%1 first=%2:%3 rtt=%4ms retrans=%5 drop=%6")
+                                  .arg(peers.size())
+                                  .arg(p.peerAddress)
+                                  .arg(p.peerPort)
+                                  .arg(p.msRTT, 0, 'f', 2)
+                                  .arg(p.pktRetransTotal)
+                                  .arg(p.pktSndDropTotal);
+    }
+    emit onSrtC2Connection(peers);
 }
 
 void ABRFactory::setHeadroomPct(int pct)
@@ -306,7 +322,7 @@ void ABRFactory::stopCameraSocketAbr()
 
     if (_srtAdaptiveBitrateStreaming) {
         this->disconnect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);
-        this->disconnect(this, &ABRFactory::onC2TelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
+        this->disconnect(this, &ABRFactory::onSrtC2Connection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleC2ConnectionStats);
         this->disconnect(this, &ABRFactory::onSiyiTelemetryData, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkStat);
         this->disconnect(this, &ABRFactory::onSiyiTelemetryLost, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleSiyiLinkLost);
         _srtAdaptiveBitrateStreaming->stop();

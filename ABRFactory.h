@@ -92,7 +92,10 @@ public slots:
 
 signals:
     void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);
-    void onC2TelemetryData(const QVector<SRTPeerStat> &peers);
+    // SRT C2 QoS (prefix 9991 on UDP 12345). Named to mirror onSrtCameraConnection
+    // so the pair reads as one SRT family; the "C2" vocabulary matches the rest of
+    // this repo (NetworkHandler::onC2DataReceived, handleC2Data, handleC2ConnectionStats).
+    void onSrtC2Connection(const QVector<SRTPeerStat> &peers);
     void onSiyiTelemetryData(const SiyiLinkStat &stat);
     void onSiyiTelemetryLost();
 
