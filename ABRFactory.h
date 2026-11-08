@@ -122,6 +122,25 @@ signals:
     // Already rate-limited at the instance's emit site.
     void routerAbrResetRequested(const QString &iface, const QString &reason);
 
+    // ── DECLARED ONLY — NO PRODUCER, NO CONSUMER YET ─────────────────────
+    // Intent: pending the VIDEO stream so the C2 (control) path gets the link
+    // first. When the C2 subflow is under pressure the video encoder is held
+    // back rather than allowed to compete, so control traffic keeps the
+    // bandwidth it needs. `isPending == true` = video is being held.
+    //
+    // DECLARED NOW SO THE NAME AND SEMANTICS ARE FIXED BEFORE THE CONSUMERS
+    // EXIST. Nothing emits it and nothing connects to it; adding it changes no
+    // runtime behaviour. Whoever implements the feature must decide WHERE it is
+    // emitted (the SRT engine's C2 priority state is the obvious source — see
+    // C2PriorityLevel in SRTAdaptiveBitrateStreaming.h) and what the receiver
+    // does with it. Do NOT wire it up by guesswork.
+    //
+    // Kept in ABRFactory (not AICompressor) because ABRFactory exists in BOTH
+    // this repo and xbfirm/aiCompressor; this header is the shared seam, and a
+    // signal declared only in xbfirm's AICompressor would be erased by the next
+    // copy-over port.
+    void pendingVideoForC2(bool isPending);
+
 private:
     static ABRFactory* _instance;
     SRTAdaptiveBitrateStreaming* _srtAdaptiveBitrateStreaming;
