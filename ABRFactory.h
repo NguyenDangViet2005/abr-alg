@@ -82,6 +82,13 @@ public slots:
     // the PRIMARY interface's instance (it owns the camera). Closes the loop.
     void handleCameraReportedBitrate(int achievedKbps);
 
+    // PRIMARY gate for a per-interface stream-reset request. The instance owns
+    // exactly one interface, so a SPARE collapsing past the reset threshold is a
+    // failover signal, NOT a camera action: only the PRIMARY refreshes the
+    // camera, the spare is logged. Lives in the factory because the gate needs
+    // _primaryIface, which only the factory knows.
+    void handleRequestStreamReset(const QString &iface, const QString &reason);
+
     // The last NON-ZERO bitrate the factory relayed for the PRIMARY interface —
     // i.e. the value the camera was last told to run. Sentinel -1 = never
     // dispatched. While --disable-abr is on, XBQoSService::m_currentBitrate

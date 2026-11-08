@@ -108,18 +108,10 @@ void ABRFactory::startRouterAbr(const QStringList &ifaces, bool isC2Configured)
         // PRIMARY-GATED, like handleRouterAbrBitrate: the camera streams over the
         // PRIMARY interface, so a SPARE interface collapsing past the reset
         // threshold must NOT refresh the camera (that is a failover signal, not a
-        // camera action). The lambda
-        // filters by name (the instance owns exactly `name`), consistent with the
-        // "only the effective interface drives the camera" rule.
+        // camera action). The gate lives in the named slot below, not in a lambda
+        // — it has a branch and a log line.
         connect(abr, &XBAdaptiveBitrateStreaming::requestStreamReset,
-                this, [this](const QString &iface, const QString &reason) {
-                    if (iface == _primaryIface) {
-                        emit routerAbrResetRequested(iface, reason);
-                    } else {
-                        qInfo().nospace() << "[ABR][RESET] " << iface
-                                          << " (" << reason << ") — spare iface, not refreshing camera";
-                    }
-                });
+                this, &ABRFactory::handleRequestStreamReset);
     }
     qInfo().nospace() << "ABRFactory: router ABR started for " << _routerAbrs.size() << " ifaces";
 }
@@ -294,6 +286,20 @@ void ABRFactory::handleRouterAbrBitrate(const QString &iface, unsigned int kbps)
         if (kbps > 0) _lastEffectiveKbps = static_cast<int>(kbps);
         emit routerAbrEffectiveBitrate(static_cast<int>(kbps));
     }
+}
+
+void ABRFactory::handleRequestStreamReset(const QString &iface, const QString &reason)
+{
+    // A spare interface collapsing is a failover signal, not a camera action:
+    // the camera streams over the PRIMARY, so refreshing its socket because a
+    // SPARE lost >70% of its packets would churn the video for nothing. Mirrors
+    // the primary gate in handleRouterAbrBitrate.
+    if (iface == _primaryIface) {
+        emit routerAbrResetRequested(iface, reason);
+        return;
+    }
+    qInfo().nospace() << "[ABR][RESET] " << iface << " (" << reason
+                      << ") — spare iface, not refreshing camera";
 }
 
 void ABRFactory::handleCameraReportedBitrate(int achievedKbps)
