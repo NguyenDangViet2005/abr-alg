@@ -43,6 +43,7 @@ private:
 
     SiyiLinkStat m_lastStat;
     qint64 m_lastResponseTime;
+    qint64 m_lastInvalidRfLogTime = 0;
     bool m_isLinkAlive;
 };
 

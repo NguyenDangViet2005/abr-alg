@@ -1,6 +1,7 @@
 #include "NetworkHandler.h"
 #include <QNetworkDatagram>
 #include <QDebug>
+#include <cmath>
 
 // Giao thức UDP production từ SRT daemon trên xblink:
 //   prefix "9990" = QoS camera metrics, "9991" = C2 telemetry4
@@ -60,7 +61,8 @@ void NetworkHandler::parsePrefixDatagram(const QByteArray &data)
     const QList<QByteArray> entries = data.mid(STREAM_PREFIX_LEN).split('#');
     for (const QByteArray &entry : entries) {
         if (entry.isEmpty()) continue;
-        peers.append(parsePeerEntry(QString::fromLatin1(entry)));
+        const auto peer = parsePeerEntry(QString::fromLatin1(entry));
+        if (!peer.peerAddress.isEmpty()) peers.append(peer);
     }
 
     if (peers.isEmpty()) return;
@@ -84,6 +86,19 @@ SRTPeerStat NetworkHandler::parsePeerEntry(const QString &entry)
     const QStringList f = entry.split(';');
     if (f.size() < 16) {
         qWarning() << "[NetworkHandler] Expected 16 fields, got" << f.size() << ":" << entry;
+        return {};
+    }
+
+    // Malformed entries must not manufacture a healthy all-zero C2 sample.
+    bool portOk = false, rttOk = false, retransOk = false, dropOk = false;
+    const int port = f[1].toInt(&portOk);
+    const double rtt = f[12].toDouble(&rttOk);
+    const int retrans = f[7].toInt(&retransOk);
+    const int drops = f[14].toInt(&dropOk);
+    if (f[0].isEmpty() || !portOk || port <= 0 || port > 65535 ||
+        !rttOk || !std::isfinite(rtt) || rtt < 0 ||
+        !retransOk || retrans < 0 || !dropOk || drops < 0) {
+        qWarning() << "[NetworkHandler] Invalid peer QoS entry:" << entry;
         return {};
     }
 

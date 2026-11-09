@@ -80,6 +80,8 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
 void SRTAdaptiveBitrateStreaming::start()
 {
     m_isRunning = true;
+    m_c2RateClock.start();
+    m_c2RateTracker = C2BitrateGuard();
     m_currentBitrateKbps = 0;
     m_rttHistory.clear();
     m_bwHistory.clear();
@@ -168,6 +170,8 @@ void SRTAdaptiveBitrateStreaming::stop()
 
 void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
 {
+    m_c2RateClock.start();
+    m_c2RateTracker = C2BitrateGuard();
     unsigned int target = (bitrateKbps > 0) ? static_cast<unsigned int>(bitrateKbps) : DEFAULT_INITIAL_BITRATE_KBPS;
     m_currentBitrateKbps = qBound(m_minBitrateKbps, target, m_maxBitrateKbps);
     m_rttHistory.clear();
@@ -352,21 +356,17 @@ void SRTAdaptiveBitrateStreaming::handleC2ConnectionStats(const QVector<SRTPeerS
 {
     if (!m_isRunning || peers.isEmpty()) return;
 
-    double worstRtt = 0.0;
-    int worstRetrans = 0;
-    int worstUnacked = 0;
+    std::vector<C2BitrateGuard::Peer> samples;
     bool explicitC2Only = false;
-
     for (const SRTPeerStat &p : peers) {
-        worstRtt = qMax(worstRtt, p.msRTT);
-        worstRetrans = qMax(worstRetrans, p.pktRetransTotal);
-        worstUnacked = qMax(worstUnacked, p.pktSndDropTotal);
+        samples.push_back({(p.peerAddress + ':' + QString::number(p.peerPort)).toStdString(),
+                           p.msRTT, p.pktRetransTotal, p.pktSndDropTotal, p.isC2Only});
         explicitC2Only = explicitC2Only || p.isC2Only;
     }
-
-    m_c2Rtt = worstRtt;
-    m_c2Retransmits = worstRetrans;
-    m_c2Unacked = worstUnacked;
+    m_c2RateTracker.receive(samples, m_c2RateClock.elapsed(), 0);
+    m_c2Rtt = m_c2RateTracker.rtt;
+    m_c2Retransmits = m_c2RateTracker.retransRate;
+    m_c2Unacked = m_c2RateTracker.dropRate;
     m_isExplicitC2Only = explicitC2Only;
     m_lastC2PacketTime = QDateTime::currentMSecsSinceEpoch();
 
@@ -384,9 +384,7 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
     qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (!m_hasSiyiTelemetry || now - m_lastSiyiPacketTime > SIYI_LINK_TIMEOUT_MS) {
         handleSiyiLinkLost();
-        qInfo() << "[QoS] ABR PAUSED: waiting for valid SIYI RSSI; bitrate:"
-                << m_currentBitrateKbps << "kbps";
-        return;
+        // QoS visibility and the camera watchdog remain active without RF data.
     }
     bool hasRecentQos = (m_lastCameraQosTime > 0 &&
                          (now - m_lastCameraQosTime) < CAMERA_QOS_STALE_TIMEOUT_MS);
@@ -443,6 +441,9 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
         videoStr = QString("\033[1;32m%1 kbps\033[0m").arg(m_currentBitrateKbps);
     }
 
+    if (!m_hasSiyiTelemetry)
+        m_latestStatusReason = "RF UNAVAILABLE (QoS active; increases frozen)";
+
     const QString timeStr = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
     QString siyiLabel = m_hasSiyiTelemetry
                             ? QString("SIYI: %1dBm (%2% | %3)").arg(m_smoothedRssi, 0, 'f', 0).arg(m_smoothedSignal).arg(m_currentEnvName)
@@ -494,6 +495,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
         m_consecutiveZeroLossCount = 0;
         m_networkEnvironmentChanged = false;
         m_needRecoveryRefresh = true;
+        m_latestStatusReason = "RF RESTORED (Waiting for QoS decision)";
         qInfo() << "[RF Environment] Valid SIYI RSSI restored; resuming ABR.";
     }
     m_siyiStat = stat;
@@ -588,8 +590,8 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkLost()
 {
     cancelQosProbe(QDateTime::currentMSecsSinceEpoch(), false);
     if (m_hasSiyiTelemetry) {
-        qWarning() << "[RF Environment] SIYI RSSI unavailable; ABR paused at"
-                   << m_currentBitrateKbps << "kbps until valid RSSI returns.";
+        qWarning() << "[RF Environment] SIYI RSSI unavailable; increases frozen at"
+                   << m_currentBitrateKbps << "kbps until valid RSSI returns (QoS and reductions remain active).";
     }
     m_hasSiyiTelemetry = false;
     m_siyiStat.isAlive = false;
@@ -598,7 +600,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkLost()
     m_lastProbeTime = 0;
     m_consecutiveZeroLossCount = 0;
     m_networkEnvironmentChanged = false;
-    m_latestStatusReason = "PAUSED (Waiting for valid SIYI RSSI)";
+    m_latestStatusReason = "RF UNAVAILABLE (QoS active; increases frozen)";
 }
 
 void SRTAdaptiveBitrateStreaming::handleQosCameraConnection(const QVector<SRTPeerStat> &peers)
@@ -706,7 +708,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     qint64 ctime = QDateTime::currentMSecsSinceEpoch();
     if (!m_hasSiyiTelemetry || ctime - m_lastSiyiPacketTime > SIYI_LINK_TIMEOUT_MS) {
         handleSiyiLinkLost();
-        return;
     }
 
     bool isStreamRecovering = m_needRecoveryRefresh || (m_lastQosPacketTime > 0 && (ctime - m_lastQosPacketTime) >= CAMERA_QOS_STALE_TIMEOUT_MS);
@@ -1306,11 +1307,15 @@ void SRTAdaptiveBitrateStreaming::applyNewBitrate(unsigned int targetBitrateKbps
     Q_UNUSED(bandwidthMbps);
     Q_UNUSED(deltaLoss);
 
-    // Last guard for every bitrate writer, including C2 and watchdog paths.
+    // Without RF telemetry, allow a low QoS-driven bootstrap and reductions,
+    // but never increase an already running stream. Do not invent an RSSI.
+    // This applies to every writer, including C2 and watchdog paths.
     if (!m_hasSiyiTelemetry ||
         QDateTime::currentMSecsSinceEpoch() - m_lastSiyiPacketTime > SIYI_LINK_TIMEOUT_MS) {
         handleSiyiLinkLost();
-        return;
+        const unsigned int ceiling = m_currentBitrateKbps > 0
+            ? m_currentBitrateKbps : 100u;
+        targetBitrateKbps = qMin(targetBitrateKbps, ceiling);
     }
 
     if (m_isExplicitC2Only) {

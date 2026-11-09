@@ -112,6 +112,13 @@ void SiyiLinkHandler::handleUdpReadyRead()
                 qInfo().noquote() << QString("[SiyiLinkHandler] 🟢 SIYI HM30 Link Established! RSSI: %1 dBm | Signal: %2%")
                                             .arg(stat.rssi).arg(stat.signal);
             }
+            // Rate-limit diagnostics; packet arrival does not imply usable RF data.
+            if ((stat.rssi >= 0 || stat.rssi < -120 || stat.signal <= 0 || stat.signal > 100) &&
+                (m_lastInvalidRfLogTime == 0 || stat.timestampMs - m_lastInvalidRfLogTime >= 5000)) {
+                m_lastInvalidRfLogTime = stat.timestampMs;
+                qWarning().noquote() << "[SiyiLinkHandler] Invalid RF values; QoS fallback active. RSSI:"
+                    << stat.rssi << "signal:" << stat.signal << "raw_hex:" << data.toHex(' ');
+            }
             emit onSiyiLinkUpdated(m_lastStat);
         }
     }
@@ -152,7 +159,7 @@ void SiyiLinkHandler::checkLinkWatchdog()
     if (m_isLinkAlive && (now - m_lastResponseTime > SIYI_LINK_TIMEOUT_MS)) {
         m_isLinkAlive = false;
         m_lastStat.isAlive = false;
-        qWarning().noquote() << QString("[SiyiLinkHandler] 🔴 LOST SIYI RF Telemetry (> %1ms). Pausing ABR until valid RSSI returns.")
+        qWarning().noquote() << QString("[SiyiLinkHandler] 🔴 LOST SIYI RF Telemetry (> %1ms). Freezing bitrate increases until valid RSSI returns.")
                                     .arg(SIYI_LINK_TIMEOUT_MS);
         emit onSiyiLinkLost();
     }

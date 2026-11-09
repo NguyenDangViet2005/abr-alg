@@ -2,8 +2,10 @@
 #define XB_QOS_SERVICE_H
 
 #include <QObject>
+#include <QElapsedTimer>
 #include <QStringList>
 #include "VideoResolutionAdapter.h"
+#include "C2BitrateGuard.h"
 #include "ABRConfigs.h"   // → ABRTuning.h (ABR_HEADROOM_FACTOR_PCT headroom default)
 
 class ABRFactory;
@@ -89,6 +91,11 @@ private:
     unsigned int m_currentBitrate;
     bool m_cameraNeedsSync;
     QTimer *m_cameraKeepAliveTimer;
+    QTimer *m_c2GuardTimer = nullptr;
+    C2BitrateGuard m_c2Guard{ABR_DEFAULT_MAX_ABR_BITRATE, 250};
+    unsigned int m_requestedBitrate = 0;
+    QElapsedTimer m_c2Clock;
+    qint64 m_lastValidSiyiMs = -1;
 };
 
 #endif // XB_QOS_SERVICE_H
