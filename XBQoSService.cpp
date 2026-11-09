@@ -94,6 +94,14 @@ void XBQoSService::setupConnections()
     });
 
     auto handleBitrateChange = [this](unsigned int newBitrate) {
+        m_requestedBitrate = newBitrate;
+        newBitrate = static_cast<unsigned int>(m_c2Guard.clamp(static_cast<int>(newBitrate)));
+        // Missing RSSI may freeze recovery, but must never block a C2 reduction.
+        if (m_protocolMode == ProtocolMode::Srt && newBitrate > m_currentBitrate &&
+            m_currentBitrate > 0 &&
+            (m_lastValidSiyiMs < 0 || m_c2Clock.elapsed() - m_lastValidSiyiMs > SIYI_LINK_TIMEOUT_MS)) {
+            newBitrate = m_currentBitrate;
+        }
         // --disable-abr: THE mute. Returning here is the whole feature — this
         // lambda is the only writer of m_currentBitrate and the only caller of
         // dispatchToCameraServer for bitrate, so one early return stops the
@@ -184,6 +192,41 @@ void XBQoSService::setupConnections()
         });
     }
 
+    // C2 protection runs at the final output and can reduce video without RSSI.
+    m_c2Clock.start();
+    auto publishC2 = [this, handleBitrateChange](bool sample) {
+        handleBitrateChange(m_requestedBitrate);
+        const QString detail = QString("source=SRT_C2 state=%1 rtt_ms=%2 retrans_ps=%3 drop_ps=%4 cap_kbps=%5 requested_kbps=%6 commanded_kbps=%7 shadow=%8 camera_sync_pending=%9")
+            .arg(m_c2Guard.name()).arg(m_c2Guard.rtt, 0, 'f', 2)
+            .arg(m_c2Guard.retransRate, 0, 'f', 2).arg(m_c2Guard.dropRate, 0, 'f', 2)
+            .arg(m_c2Guard.ceiling).arg(m_requestedBitrate).arg(m_currentBitrate).arg(m_abrDisabled ? 1 : 0)
+            .arg(m_cameraNeedsSync ? 1 : 0);
+        if (sample || m_c2Guard.state == C2BitrateGuard::State::Stale) {
+            qInfo().noquote() << "[C2 Guard]" << detail;
+            if (m_qosDebug) m_qosDebug->handleEvent(QStringLiteral("SRT_C2"), QS_EVT_C2_STATE_CHANGE, detail);
+        }
+    };
+    if (m_networkHandler) {
+        connect(m_networkHandler, &NetworkHandler::onC2DataReceived, this,
+                [this, publishC2](const QVector<SRTPeerStat> &peers) {
+            std::vector<C2BitrateGuard::Peer> samples;
+            for (const auto &p : peers) {
+                samples.push_back({(p.peerAddress + ':' + QString::number(p.peerPort)).toStdString(),
+                                   p.msRTT, p.pktRetransTotal, p.pktSndDropTotal, p.isC2Only});
+            }
+            m_c2Guard.receive(samples, m_c2Clock.elapsed(), static_cast<int>(m_currentBitrate));
+            publishC2(true);
+        });
+    }
+    m_c2GuardTimer = new QTimer(this);
+    m_c2GuardTimer->setInterval(1000);
+    connect(m_c2GuardTimer, &QTimer::timeout, this, [this, publishC2]() {
+        const auto before = m_c2Guard.state;
+        m_c2Guard.tick(m_c2Clock.elapsed());
+        if (before != m_c2Guard.state) publishC2(false);
+    });
+    m_c2GuardTimer->start();
+
     if (m_abrFactory) {
         // ── Router ABR → camera ──────────────────────────────────────────
         // The per-interface router ABR's EFFECTIVE (primary) proposal is the
@@ -273,6 +316,12 @@ void XBQoSService::setupConnections()
             }
         }
         if (m_siyiHandler) {
+            connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkUpdated, this, [this](const SiyiLinkStat &stat) {
+                if (stat.isAlive && stat.signal > 0 && stat.signal <= 100 && stat.rssi < 0 && stat.rssi >= -120)
+                    m_lastValidSiyiMs = m_c2Clock.elapsed();
+                else m_lastValidSiyiMs = -1;
+            });
+            connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkLost, this, [this]() { m_lastValidSiyiMs = -1; });
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkUpdated, m_abrFactory, &ABRFactory::handleSiyiData);
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkLost, m_abrFactory, &ABRFactory::handleSiyiLost);
         }
@@ -321,6 +370,9 @@ void XBQoSService::dispatchToCameraServer(int bitrate)
 
 void XBQoSService::start()
 {
+    m_c2Guard = C2BitrateGuard(ABR_DEFAULT_MAX_ABR_BITRATE, 250);
+    m_requestedBitrate = 0;
+    m_lastValidSiyiMs = -1;
     printStartupBanner();
 
     m_abrFactory = ABRFactory::instance();
@@ -344,8 +396,9 @@ void XBQoSService::start()
                                 "per-interface ABR disabled (router rows will be logged only).";
     }
 
+    // Listen for SRT C2 in either mode; router proposals share its final cap.
+    m_networkHandler = new NetworkHandler(this);
     if (m_protocolMode == ProtocolMode::Srt) {
-        m_networkHandler = new NetworkHandler(this);
         m_siyiHandler = new SiyiLinkHandler(this);
     } else {
         m_routerNetworkHandler = new RouterNetworkHandler(this);
@@ -391,6 +444,7 @@ void XBQoSService::start()
 
 void XBQoSService::stop()
 {
+    if (m_c2GuardTimer) m_c2GuardTimer->stop();
     if (m_cameraKeepAliveTimer) {
         m_cameraKeepAliveTimer->stop();
     }

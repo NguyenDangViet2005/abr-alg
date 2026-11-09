@@ -11,6 +11,8 @@
 #include "SRTPeerStat.h"
 #include "ABRConfigs.h"
 #include "SiyiLinkStat.h"
+#include "C2BitrateGuard.h"
+#include <QElapsedTimer>
 
 class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
@@ -130,8 +132,10 @@ private:
     bool m_isExplicitC2Only;
     bool m_isStrictVideoCutoff;
     double m_c2Rtt;
-    int m_c2Retransmits;
-    int m_c2Unacked;
+    double m_c2Retransmits; // packets per second, not lifetime counters
+    double m_c2Unacked;
+    QElapsedTimer m_c2RateClock;
+    C2BitrateGuard m_c2RateTracker;
     qint64 m_lastC2PacketTime;
 
     // Sliding window sample histories

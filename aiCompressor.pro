@@ -7,6 +7,7 @@ TEMPLATE = app
 TARGET = aiCompressor
 
 HEADERS += \
+    C2BitrateGuard.h \
     ABRConfigs.h \
     ABRGpsMove.h \
     ABRJitter.h \
