@@ -144,6 +144,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_isTrafficIdle = true;
     m_isVideoCollapsed = false;
     m_needRecoveryRefresh = false;
+    m_cameraQosRecoverySamplesRemaining = 0;
     m_lastCollapseLogTime = 0;
     m_lastAchievedBitrateKbps = 0;
     m_latestStatusReason = "IDLE (Waiting for QoS from Server...)";
@@ -220,6 +221,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_isTrafficIdle = true;
     m_isVideoCollapsed = false;
     m_needRecoveryRefresh = false;
+    m_cameraQosRecoverySamplesRemaining = 0;
     m_lastCollapseLogTime = 0;
     m_lastAchievedBitrateKbps = 0;
     m_isBootstrapped = false;
@@ -379,6 +381,13 @@ void SRTAdaptiveBitrateStreaming::handleC2ConnectionStats(const QVector<SRTPeerS
 }
 
 
+bool SRTAdaptiveBitrateStreaming::canResyncCameraBitrate() const
+{
+    return m_lastCameraQosTime > 0 &&
+           QDateTime::currentMSecsSinceEpoch() - m_lastCameraQosTime < CAMERA_QOS_STALE_TIMEOUT_MS &&
+           m_cameraQosRecoverySamplesRemaining == 0 && !m_isTrafficIdle;
+}
+
 void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
 {
     if (!m_isRunning) return;
@@ -393,17 +402,19 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
 
     if (!hasRecentQos) {
         if (m_lastCameraQosTime > 0) {
+            const qint64 qosAgeMs = now - m_lastCameraQosTime;
+            const bool useFallback = qosAgeMs >= CAMERA_QOS_FALLBACK_TIMEOUT_MS;
             cancelQosProbe(now, false);
-            if (now - m_lastCollapseLogTime >= 5000) {
+            const bool reduceToFloor = useFallback && m_currentBitrateKbps > MIN_ACTIVE_VIDEO_BITRATE_KBPS;
+            if (reduceToFloor || now - m_lastCollapseLogTime >= 5000) {
                 m_lastCollapseLogTime = now;
-                qWarning().noquote() << QString(">>> [QoS WATCHDOG] ⚠️ LOST CAMERA QoS %1s (prefix 9990)! "
-                                                "Video: OFF (camera QoS timeout), forcing floor %2 kbps <<<")
-                                            .arg((now - m_lastCameraQosTime) / 1000.0, 0, 'f', 1)
-                                            .arg(MIN_ACTIVE_VIDEO_BITRATE_KBPS);
+                qWarning().noquote() << QString("[QoS WATCHDOG] Camera QoS stale for %1s (prefix 9990), %2")
+                                            .arg(qosAgeMs / 1000.0, 0, 'f', 1)
+                                            .arg(useFallback ? "using survival floor" : "holding bitrate target");
             }
             m_isVideoCollapsed = true;
             m_needRecoveryRefresh = true;
-            if (m_currentBitrateKbps > MIN_ACTIVE_VIDEO_BITRATE_KBPS) {
+            if (reduceToFloor) {
                 applyNewBitrate(MIN_ACTIVE_VIDEO_BITRATE_KBPS, m_latestSmoothedRtt,
                                 m_latestSmoothedBw, 0);
             }
@@ -716,7 +727,19 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         handleSiyiLinkLost();
     }
 
-    bool isStreamRecovering = m_needRecoveryRefresh || (m_lastQosPacketTime > 0 && (ctime - m_lastQosPacketTime) >= CAMERA_QOS_STALE_TIMEOUT_MS);
+    const qint64 qosGapMs = m_lastQosPacketTime > 0 ? ctime - m_lastQosPacketTime : 0;
+    const bool cameraQosInterrupted = qosGapMs >= CAMERA_QOS_STALE_TIMEOUT_MS;
+    if (cameraQosInterrupted) {
+        m_cameraQosRecoverySamplesRemaining = CAMERA_QOS_RECOVERY_SAMPLES;
+        m_clearSinceMs = 0;
+        m_clearBandwidthOverCapSamples = 0;
+        cancelQosProbe(ctime, false);
+        if (qosGapMs >= CAMERA_QOS_FALLBACK_TIMEOUT_MS &&
+            m_currentBitrateKbps > MIN_ACTIVE_VIDEO_BITRATE_KBPS) {
+            applyNewBitrate(MIN_ACTIVE_VIDEO_BITRATE_KBPS, 0.0, 0.0, 0);
+        }
+    }
+    const bool isStreamRecovering = m_needRecoveryRefresh || cameraQosInterrupted;
     if (isStreamRecovering) {
         m_needRecoveryRefresh = false;
         m_isVideoCollapsed = false;
@@ -736,9 +759,12 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_latestSmoothedLossPercent = 0.0;
         m_consecutiveZeroLossCount = 0;
 
-        m_lastKeyframeRequestTime = ctime;
         m_cooldownUntilMs = ctime + 800;
-        emit requestKeyframe();
+        // A camera recovery refresh would restart the video socket again.
+        if (m_cameraQosRecoverySamplesRemaining == 0) {
+            m_lastKeyframeRequestTime = ctime;
+            emit requestKeyframe();
+        }
     }
 
     // Sliding Window Smoothing
@@ -774,6 +800,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     double dt = (m_lastQosPacketTime > 0) ? (ctime - m_lastQosPacketTime) / 1000.0 : 0.25;
     bool isStaleSample = (dt > 2.0);
     if (isStaleSample) {
+        if (m_cameraQosRecoverySamplesRemaining > 0)
+            m_cameraQosRecoverySamplesRemaining = CAMERA_QOS_RECOVERY_SAMPLES;
         dt = 0.5;
     }
     if (dt < 0.05) dt = 0.05;
@@ -869,6 +897,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
 
     if (m_isTrafficIdle) {
+        if (m_cameraQosRecoverySamplesRemaining > 0)
+            m_cameraQosRecoverySamplesRemaining = CAMERA_QOS_RECOVERY_SAMPLES;
         m_clearBandwidthOverCapSamples = 0;
         cancelQosProbe(ctime, false);
         m_latestSmoothedRtt = smoothedRtt;
@@ -966,7 +996,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     if (deltaFailures > 0 || state != CongestionState::Clear) {
         cancelQosProbe(ctime, m_probePreviousCeiling > 0);
     }
-    if (isStaleSample) {
+    if (isStaleSample && !cameraQosInterrupted) {
         m_clearBandwidthOverCapSamples = 0;
         cancelQosProbe(ctime, false);
         return;
@@ -1058,6 +1088,30 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         targetProfileBitrate = m_maxBitrateKbps;
         requiredInterval = BITRATE_INCR_DECISION_INTERVAL_MS;
         break;
+    }
+
+    if (m_cameraQosRecoverySamplesRemaining > 0) {
+        const bool validSample = hasActiveTraffic && rawRtt > 0.0 &&
+                                 rawBandwidthMbps > 0.0 && rawBandwidthMbps <= 150.0;
+        if (state != CongestionState::Clear) {
+            const unsigned int target = qMin(targetProfileBitrate, bandwidthCapKbps);
+            if (target < m_currentBitrateKbps)
+                applyNewBitrate(target, smoothedRtt, smoothedBw, deltaLoss);
+        }
+        if (isStreamRecovering || !validSample || state != CongestionState::Clear || deltaFailures > 0) {
+            m_cameraQosRecoverySamplesRemaining = CAMERA_QOS_RECOVERY_SAMPLES;
+            return;
+        }
+        if (--m_cameraQosRecoverySamplesRemaining == 0) {
+            const unsigned int warmStart = qMax(CAMERA_QOS_WARM_START_MIN_KBPS, m_currentBitrateKbps / 2);
+            const unsigned int target = qMin(m_currentBitrateKbps, qMin(warmStart, bandwidthCapKbps));
+            m_clearSinceMs = ctime;
+            m_lastBitrateChangeTime = ctime;
+            m_lastBitrateIncrTime = ctime;
+            m_wasCongested = false;
+            applyNewBitrate(target, smoothedRtt, smoothedBw, deltaLoss);
+        }
+        return;
     }
 
     if (state == CongestionState::Clear) {
