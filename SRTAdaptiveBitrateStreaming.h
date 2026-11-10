@@ -55,6 +55,9 @@ public:
     static constexpr qint64 MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE      = 20;
 
     static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 5000;
+    static constexpr qint64 CAMERA_QOS_FALLBACK_TIMEOUT_MS          = 15000;
+    static constexpr int CAMERA_QOS_RECOVERY_SAMPLES                = 3;
+    static constexpr unsigned int CAMERA_QOS_WARM_START_MIN_KBPS    = 250;
     static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS                 = 5000;
 
     static constexpr double LOSS_THRESHOLD_BOTTLENECK_PERCENT       = 2.5;
@@ -91,6 +94,8 @@ public:
     void reset(int bitrateKbps) override;
     void setMaxAbrBitrate(unsigned int newMaxAbrBitrate) override;
     bool isTrafficActive() const override { return !m_isTrafficIdle; }
+
+    bool canResyncCameraBitrate() const;
 
 public slots:
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);
@@ -190,6 +195,7 @@ private:
     int m_consecutivePanicCount;
     qint64 m_congestionStartTimeMs;
     int m_consecutiveCongestedSamples;
+    int m_clearBandwidthOverCapSamples = 0;
     bool m_networkEnvironmentChanged;
 
     qint64 m_lastCameraQosTime;
@@ -197,6 +203,7 @@ private:
     bool m_isTrafficIdle;
     bool m_isVideoCollapsed;
     bool m_needRecoveryRefresh;
+    int m_cameraQosRecoverySamplesRemaining = 0;
     qint64 m_lastCollapseLogTime;
     unsigned int m_lastAchievedBitrateKbps;
 

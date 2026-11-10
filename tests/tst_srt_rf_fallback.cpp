@@ -3,6 +3,50 @@
 class RfFallbackTest : public QObject {
     Q_OBJECT
 private slots:
+    void clearStateRespectsBandwidthCap() {
+        SRTAdaptiveBitrateStreaming abr;
+        QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
+        abr.setMaxAbrBitrate(400);
+        abr.start();
+
+        SiyiLinkStat rf;
+        rf.isAlive = true;
+        rf.signal = 100;
+        rf.rssi = -30;
+        SRTPeerStat peer;
+        peer.peerAddress = "192.168.144.30";
+        peer.peerPort = 49975;
+        peer.msRTT = 7;
+        peer.mbpsSendRate = 0.2;
+
+        const auto sample = [&](double bandwidth) {
+            QTest::qWait(250);
+            abr.handleSiyiLinkStat(rf);
+            peer.mbpsBandwidth = bandwidth;
+            peer.pktSentTotal += 100;
+            abr.handleQosCameraConnection({peer});
+        };
+        const auto bitrate = [&]() {
+            return changes.isEmpty() ? 0u : changes.last().at(0).toUInt();
+        };
+
+        for (int i = 0; i < 60 && bitrate() < 400; ++i) sample(0.5);
+        QCOMPARE(bitrate(), 400u);
+
+        // A lone estimate dip can put the moving average below the cap.
+        for (int i = 0; i < 5; ++i) sample(0.5);
+        sample(0.2);
+        QCOMPARE(bitrate(), 400u);
+        sample(0.5);
+        QCOMPARE(bitrate(), 400u);
+
+        // RTT and loss stay clean while the sustained bandwidth cap drops.
+        for (int i = 0; i < 12; ++i) sample(0.25);
+        QCOMPARE(bitrate(), 200u);
+        for (int i = 0; i < 10; ++i) sample(0.25);
+        QCOMPARE(bitrate(), 200u);
+    }
+
     void invalidRfKeepsQosAndWatchdogActive() {
         SRTAdaptiveBitrateStreaming abr;
         QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);

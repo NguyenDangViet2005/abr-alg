@@ -79,27 +79,29 @@ void XBQoSService::printStartupBanner()
 
 void XBQoSService::setupConnections()
 {
+    const auto canResyncCameraBitrate = [this]() {
+        return m_protocolMode != ProtocolMode::Srt || !m_abrFactory || !m_abrFactory->srtAbr() ||
+               m_abrFactory->srtAbr()->canResyncCameraBitrate();
+    };
     m_cameraKeepAliveTimer = new QTimer(this);
     m_cameraKeepAliveTimer->setInterval(5000);
-    connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this]() {
-        // The timer's own running state IS the traffic gate: handleBitrateChange
-        // starts it on a live bitrate and stops it on PAUSE. It used to also
-        // read srtAbr()->isTrafficActive(), but the SRT engine is inert
-        // (m_isTrafficIdle defaults true and only a 12345 QoS packet clears it),
-        // so that read was permanently false and silently disabled the
-        // keep-alive — the router now owns the camera, so drop it.
-        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+    connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this, canResyncCameraBitrate]() {
+        // The router keep-alive only needs a live target. SRT also waits for
+        // fresh camera QoS before replaying the target after an interruption.
+        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && canResyncCameraBitrate()) {
             dispatchToCameraServer(static_cast<int>(m_currentBitrate));
         }
     });
 
-    auto handleBitrateChange = [this](unsigned int newBitrate) {
+    auto handleBitrateChange = [this, canResyncCameraBitrate](unsigned int newBitrate) {
         m_requestedBitrate = newBitrate;
         newBitrate = static_cast<unsigned int>(m_c2Guard.clamp(static_cast<int>(newBitrate)));
-        // Missing RSSI may freeze recovery, but must never block a C2 reduction.
+        // Stale camera QoS or missing RSSI freezes SRT increases, including
+        // increases from the final C2 guard. Reductions still pass through.
         if (m_protocolMode == ProtocolMode::Srt && newBitrate > m_currentBitrate &&
             m_currentBitrate > 0 &&
-            (m_lastValidSiyiMs < 0 || m_c2Clock.elapsed() - m_lastValidSiyiMs > SIYI_LINK_TIMEOUT_MS)) {
+            (!canResyncCameraBitrate() || m_lastValidSiyiMs < 0 ||
+             m_c2Clock.elapsed() - m_lastValidSiyiMs > SIYI_LINK_TIMEOUT_MS)) {
             newBitrate = m_currentBitrate;
         }
         // --disable-abr: THE mute. Returning here is the whole feature — this
@@ -114,7 +116,7 @@ void XBQoSService::setupConnections()
         if (m_abrDisabled) {
             return;
         }
-        if (newBitrate == m_currentBitrate && !m_cameraNeedsSync) {
+        if (newBitrate == m_currentBitrate && (!m_cameraNeedsSync || !canResyncCameraBitrate())) {
             return;
         }
         m_currentBitrate = newBitrate;
@@ -149,9 +151,9 @@ void XBQoSService::setupConnections()
             qInfo().noquote() << "[QoS Engine] ROUTER_ABR_OWNS_CAMERA: SRT engine's "
                                  "bitrateChanged is NOT wired to the camera.";
         }
-        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::trafficActiveChanged, this, [this](bool isActive) {
+        connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::trafficActiveChanged, this, [this, canResyncCameraBitrate](bool isActive) {
             if (isActive) {
-                if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+                if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && canResyncCameraBitrate()) {
                     qInfo().noquote() << QString("[QoS Engine] Video traffic resumed! Resyncing camera to %1 kbps").arg(m_currentBitrate);
                     dispatchToCameraServer(static_cast<int>(m_currentBitrate));
                 }
@@ -202,7 +204,9 @@ void XBQoSService::setupConnections()
             .arg(m_c2Guard.ceiling).arg(m_requestedBitrate).arg(m_currentBitrate).arg(m_abrDisabled ? 1 : 0)
             .arg(m_cameraNeedsSync ? 1 : 0);
         if (sample || m_c2Guard.state == C2BitrateGuard::State::Stale) {
-            qInfo().noquote() << "[C2 Guard]" << detail;
+            if (qEnvironmentVariableIntValue("XB_QOS_MONITOR_TELEMETRY") == 1) {
+                qInfo().noquote() << "[XB_MONITOR] [C2 Guard]" << detail;
+            }
             if (m_qosDebug) m_qosDebug->handleEvent(QStringLiteral("SRT_C2"), QS_EVT_C2_STATE_CHANGE, detail);
         }
     };
@@ -325,9 +329,9 @@ void XBQoSService::setupConnections()
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkUpdated, m_abrFactory, &ABRFactory::handleSiyiData);
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkLost, m_abrFactory, &ABRFactory::handleSiyiLost);
         }
-        if (m_networkHandler) connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this]() {
+        if (m_networkHandler) connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this, canResyncCameraBitrate]() {
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi
-            if (m_cameraNeedsSync && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+            if (m_cameraNeedsSync && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && canResyncCameraBitrate()) {
                 m_cameraNeedsSync = false;
                 qInfo().noquote() << QString("[QoS Engine] Camera stream active, resyncing bitrate to %1 kbps").arg(m_currentBitrate);
                 dispatchToCameraServer(static_cast<int>(m_currentBitrate));

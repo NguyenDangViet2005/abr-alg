@@ -80,6 +80,7 @@ public:
             }
         }
     }
+    bool hasFreshSample(int64_t now) const { return seen && now - lastSample <= staleMs; }
     static int roundDown(int bitrate) { return std::max(0, bitrate) / 50 * 50; }
     int clamp(int requested) const { return roundDown(std::min(requested, ceiling)); }
     const char *name() const {

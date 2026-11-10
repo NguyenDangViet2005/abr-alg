@@ -50,15 +50,10 @@ void ABRFactory::startCameraSocketAbr()
 
 void ABRFactory::handleC2Data(const QVector<SRTPeerStat> &peers)
 {
-    // Receive-side probe for the 9991 path. Prints BEFORE the relay so this line
-    // proves the NetworkHandler->factory connect is alive even when the ABR
-    // consumer drops the packet later (Siyi gate in handleC2ConnectionStats).
-    // Camera counterpart prints far downstream instead, inside processSrtQos.
-    if (peers.isEmpty()) {
-        qDebug() << "[ABRFactory][C2] relay peers=0 (empty)";
-    } else {
+    // The monitor uses relay metadata for peer identity and cumulative counters.
+    if (qEnvironmentVariableIntValue("XB_QOS_MONITOR_TELEMETRY") == 1 && !peers.isEmpty()) {
         const SRTPeerStat &p = peers.first();
-        qDebug().noquote() << QString("[ABRFactory][C2] relay peers=%1 first=%2:%3 rtt=%4ms retrans=%5 drop=%6")
+        qDebug().noquote() << QString("[XB_MONITOR] [ABRFactory][C2] relay peers=%1 first=%2:%3 rtt=%4ms retrans=%5 drop=%6")
                                   .arg(peers.size())
                                   .arg(p.peerAddress)
                                   .arg(p.peerPort)
