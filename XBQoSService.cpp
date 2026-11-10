@@ -202,7 +202,9 @@ void XBQoSService::setupConnections()
             .arg(m_c2Guard.ceiling).arg(m_requestedBitrate).arg(m_currentBitrate).arg(m_abrDisabled ? 1 : 0)
             .arg(m_cameraNeedsSync ? 1 : 0);
         if (sample || m_c2Guard.state == C2BitrateGuard::State::Stale) {
-            qInfo().noquote() << "[C2 Guard]" << detail;
+            if (qEnvironmentVariableIntValue("XB_QOS_MONITOR_TELEMETRY") == 1) {
+                qInfo().noquote() << "[XB_MONITOR] [C2 Guard]" << detail;
+            }
             if (m_qosDebug) m_qosDebug->handleEvent(QStringLiteral("SRT_C2"), QS_EVT_C2_STATE_CHANGE, detail);
         }
     };

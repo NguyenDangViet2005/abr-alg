@@ -363,7 +363,7 @@ void QoSDebugSender::handleEvent(const QString &iface, quint8 type, const QStrin
     e.eventType = type;
     e.detail = detail;
 
-    logEvent(e);
+    if (type != QS_EVT_C2_STATE_CHANGE) logEvent(e);
     if (!m_enabled) return;
     writeRecord(QS_EVENT, buildQsDatagram(QS_EVENT, encodeQsEvent(e)));
 }

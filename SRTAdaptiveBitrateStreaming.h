@@ -190,6 +190,7 @@ private:
     int m_consecutivePanicCount;
     qint64 m_congestionStartTimeMs;
     int m_consecutiveCongestedSamples;
+    int m_clearBandwidthOverCapSamples = 0;
     bool m_networkEnvironmentChanged;
 
     qint64 m_lastCameraQosTime;
