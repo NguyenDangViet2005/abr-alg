@@ -138,6 +138,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_lastCongestionState = CongestionState::Clear;
     m_wasCongested = false;
     m_lastKeyframeRequestTime = 0;
+    m_sawFailuresDuringIdle = false;
     m_consecutivePanicCount = 0;
     m_lastCameraQosTime = 0;
     m_lastActiveTrafficTime = 0;
@@ -211,6 +212,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_lastCongestionState = CongestionState::Clear;
     m_wasCongested = false;
     m_lastKeyframeRequestTime = 0;
+    m_sawFailuresDuringIdle = false;
     m_consecutivePanicCount = 0;
     m_congestionStartTimeMs = 0;
     m_consecutiveCongestedSamples = 0;
@@ -356,6 +358,19 @@ void SRTAdaptiveBitrateStreaming::evaluateC2Quality()
     }
 }
 
+void SRTAdaptiveBitrateStreaming::setSerialConnected(bool connected)
+{
+    m_serialConnected = connected;
+    if (connected) return;
+    m_c2RateTracker = C2BitrateGuard();
+    m_c2Rtt = 0.0;
+    m_c2Retransmits = 0;
+    m_c2Unacked = 0;
+    m_isExplicitC2Only = false;
+    m_lastC2PacketTime = 0;
+    evaluateC2Quality();
+}
+
 void SRTAdaptiveBitrateStreaming::handleC2ConnectionStats(const QVector<SRTPeerStat> &peers)
 {
     if (!m_isRunning || peers.isEmpty()) return;
@@ -461,17 +476,29 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
     QString state = m_latestStatusReason.section(" (", 0, 0);
     state.remove(QStringLiteral("\033[1;31m"));
 
+    const QString c2Metrics = m_serialConnected
+        ? QStringLiteral("C2_RTT: %1, C2_retrans/s: %2, C2_drop/s: %3, ")
+            .arg(hasC2 ? QString("%1ms").arg(m_c2Rtt, 0, 'f', 2) : unavailable)
+            .arg(rate(m_c2Retransmits))
+            .arg(rate(m_c2Unacked))
+        : QString();
+    unsigned int abrCeiling = m_maxBitrateKbps;
+    if (m_hasSiyiTelemetry && m_siyiStat.isAlive) {
+        abrCeiling = qMin(abrCeiling, m_currentEnvCeiling);
+    }
+    if (m_lastCongestedBitrate > 0) {
+        abrCeiling = qMin(abrCeiling, m_lastCongestedBitrate);
+    }
     qInfo().noquote() << QString("[%1] RTT: %2ms, BW: %3 Mbps, Loss: %4%, SIYI: %5 | "
-                                 "C2_RTT: %6, C2_retrans/s: %7, C2_drop/s: %8, State: %9 "
-                                 "--> Video: %10 | %11 kbps")
+                                 "serialConnected: %6, ABR ceiling: %7 kbps, %8State: %9 --> Video: %10 | %11 kbps")
         .arg(QDateTime::currentDateTime().toString("MM-dd HH:mm:ss"))
         .arg(m_latestSmoothedRtt, 0, 'f', 0)
         .arg(m_latestSmoothedBw, 0, 'f', 2)
         .arg(m_latestSmoothedLossPercent, 0, 'f', 1)
         .arg(siyi)
-        .arg(hasC2 ? QString("%1ms").arg(m_c2Rtt, 0, 'f', 2) : unavailable)
-        .arg(rate(m_c2Retransmits))
-        .arg(rate(m_c2Unacked))
+        .arg(m_serialConnected ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(abrCeiling)
+        .arg(c2Metrics)
         .arg(state)
         .arg(videoStateLabel)
         .arg(m_currentBitrateKbps);
@@ -730,6 +757,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     const qint64 qosGapMs = m_lastQosPacketTime > 0 ? ctime - m_lastQosPacketTime : 0;
     const bool cameraQosInterrupted = qosGapMs >= CAMERA_QOS_STALE_TIMEOUT_MS;
     if (cameraQosInterrupted) {
+        m_sawFailuresDuringIdle = false;
+        if (!m_isTrafficIdle) m_lastActiveTrafficTime = ctime;
         m_cameraQosRecoverySamplesRemaining = CAMERA_QOS_RECOVERY_SAMPLES;
         m_clearSinceMs = 0;
         m_clearBandwidthOverCapSamples = 0;
@@ -760,11 +789,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_consecutiveZeroLossCount = 0;
 
         m_cooldownUntilMs = ctime + 800;
-        // A camera recovery refresh would restart the video socket again.
-        if (m_cameraQosRecoverySamplesRemaining == 0) {
-            m_lastKeyframeRequestTime = ctime;
-            emit requestKeyframe();
-        }
     }
 
     // Sliding Window Smoothing
@@ -874,6 +898,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
     const bool hasActiveTraffic = (deltaSent > 0 || rawSendRateMbps >= 0.02);
     if (hasActiveTraffic) {
+        m_sawFailuresDuringIdle = false;
         m_lastActiveTrafficTime = ctime;
         if (m_isTrafficIdle) {
             m_isTrafficIdle = false;
@@ -888,10 +913,19 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             emit trafficActiveChanged(true);
         }
     } else {
+        m_sawFailuresDuringIdle |= deltaLossRaw > 0 || deltaRetrans > 0 ||
+                                   deltaDropSnd > 0 || deltaDropRcv > 0;
         if (m_lastActiveTrafficTime > 0 && (ctime - m_lastActiveTrafficTime >= TRAFFIC_IDLE_TIMEOUT_MS)) {
             if (!m_isTrafficIdle) {
                 m_isTrafficIdle = true;
                 emit trafficActiveChanged(false);
+                if (m_sawFailuresDuringIdle && m_isVideoEnabled && !m_isExplicitC2Only &&
+                    m_c2RateTracker.ceiling > 0 &&
+                    ctime - m_lastKeyframeRequestTime >= STALL_RESTART_COOLDOWN_MS) {
+                    m_lastKeyframeRequestTime = ctime;
+                    qWarning() << "[QoS Engine] Video stalled with ongoing QoS and packet failures";
+                    emit requestKeyframe();
+                }
             }
         }
     }
@@ -1037,7 +1071,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         // absolute value before treating CLEAR as a healthy startup.
         constexpr double maxStartupRttMs = 60.0;
         const bool canStartFast = state == CongestionState::Clear && m_hasSiyiTelemetry &&
-                                  m_c2Priority == C2PriorityLevel::Normal && hasActiveTraffic &&
+                                  m_c2RateTracker.state != C2BitrateGuard::State::Degraded &&
+                                  m_c2RateTracker.ceiling > 0 && hasActiveTraffic &&
                                   rawRtt > 0.0 && rawRtt <= maxStartupRttMs &&
                                   rawBandwidthMbps > 0.1 && rawBandwidthMbps < 150.0;
         unsigned int calculatedInitialBitrate = canStartFast ? 1000u : 100u;
@@ -1129,13 +1164,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             m_clearSinceMs = ctime;
         }
 
-        if (m_wasCongested) {
-            m_wasCongested = false;
-            if (ctime - m_lastKeyframeRequestTime >= KEYFRAME_REQUEST_COOLDOWN_MS) {
-                m_lastKeyframeRequestTime = ctime;
-                emit requestKeyframe();
-            }
-        }
+        m_wasCongested = false;
 
         if (clearAboveBandwidthCap) {
             // Confirm with consecutive fresh samples before reacting to an estimate dip.
@@ -1261,12 +1290,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
     else {
         cancelQosProbe(ctime, m_probePreviousCeiling > 0);
-        if (m_lastCongestionState == CongestionState::Panic && state != CongestionState::Panic) {
-            if (ctime - m_lastKeyframeRequestTime >= 3000) {
-                m_lastKeyframeRequestTime = ctime;
-                emit requestKeyframe();
-            }
-        }
 
         // Track onset of congestion for transient occlusion debounce:
         if (m_congestionStartTimeMs == 0) {

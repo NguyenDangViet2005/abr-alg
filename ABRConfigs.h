@@ -72,9 +72,9 @@ static const RfEnvironment RF_ENVIRONMENTS[] = {
     { -62, ABR_DEFAULT_MAX_ABR_BITRATE, "Ultra" }, // >= -62 dBm
     { -69, 2500, "Strong" },                       // -69..-63 dBm
     { -74, 1500, "Mid-Range Weak" },              // -74..-70
-    { -79,  800, "Far-Range" },                   // -79..-75
-    { -85,  500, "Weak-Link" },                   // -85..-80
-    { -86,  350, "Edge-Link" },                   // -86
+    { -77,  800, "Far-Range" },                   // -77..-75
+    { -79,  400, "Weak-Link" },                   // -79..-78
+    { -86,  250, "Edge-Link" },                   // -86..-80
     { -99,  150, "Critical" }                     // <= -87
 };
 

@@ -4,6 +4,10 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QTimer>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include "ABRFactory.h"
 #include "dev/NetworkHandler.h"
 #include "dev/RouterNetworkHandler.h"
@@ -88,7 +92,8 @@ void XBQoSService::setupConnections()
     connect(m_cameraKeepAliveTimer, &QTimer::timeout, this, [this, canResyncCameraBitrate]() {
         // The router keep-alive only needs a live target. SRT also waits for
         // fresh camera QoS before replaying the target after an interruption.
-        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && canResyncCameraBitrate()) {
+        if (m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS &&
+            (canResyncCameraBitrate() || (m_c2ResumePending && m_cameraNeedsSync))) {
             dispatchToCameraServer(static_cast<int>(m_currentBitrate));
         }
     });
@@ -116,12 +121,16 @@ void XBQoSService::setupConnections()
         if (m_abrDisabled) {
             return;
         }
-        if (newBitrate == m_currentBitrate && (!m_cameraNeedsSync || !canResyncCameraBitrate())) {
+        const bool c2Cutoff = m_c2Guard.ceiling == VIDEO_DISABLED_BITRATE_KBPS;
+        if (newBitrate == m_currentBitrate &&
+            (!m_cameraNeedsSync || (!c2Cutoff && !canResyncCameraBitrate()))) {
             return;
         }
         m_currentBitrate = newBitrate;
 
         if (newBitrate == VIDEO_DISABLED_BITRATE_KBPS) {
+            m_c2ResumePending = c2Cutoff;
+            m_cameraNeedsSync = false;
             dispatchToCameraServer(VIDEO_DISABLED_BITRATE_KBPS);
             if (m_cameraKeepAliveTimer) {
                 m_cameraKeepAliveTimer->stop();
@@ -174,14 +183,8 @@ void XBQoSService::setupConnections()
                 qWarning().noquote() << QString("[C2 Priority] %1").arg(name);
             }
         });
-        // Phase 12 (H1 fix): requestStreamRefresh is now a HARD socket restart, so
-        // this SRT keyframe ask must respect the SAME ROUTER_ABR_OWNS_CAMERA gate as
-        // bitrateChanged above. The SRT engine emits requestKeyframe on congestion
-        // transitions with cooldowns of only 800ms–4s and NO 30s token — if it ever
-        // fires, an un-gated connect here would restart the video socket every few
-        // seconds = permanent video outage, bypassing the router ABR's rate limit.
-        // SRT is not implemented today (its 12345 path is inert), so this is a
-        // latent-bug guard, not a live fix.
+        // SRT requests a hard socket restart only for a confirmed stall.
+        // The active ABR engine owns the camera restart decision.
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this, routerAbrOwnsCamera]() {
             if (routerAbrOwnsCamera) {
                 qInfo().noquote() << "[QoS Engine] ROUTER_ABR_OWNS_CAMERA: SRT keyframe ask "
@@ -213,23 +216,74 @@ void XBQoSService::setupConnections()
     if (m_networkHandler) {
         connect(m_networkHandler, &NetworkHandler::onC2DataReceived, this,
                 [this, publishC2](const QVector<SRTPeerStat> &peers) {
+            if (!m_serialConnected) return;
             std::vector<C2BitrateGuard::Peer> samples;
             for (const auto &p : peers) {
                 samples.push_back({(p.peerAddress + ':' + QString::number(p.peerPort)).toStdString(),
                                    p.msRTT, p.pktRetransTotal, p.pktSndDropTotal, p.isC2Only});
             }
+            const int previousCeiling = m_c2Guard.ceiling;
             m_c2Guard.receive(samples, m_c2Clock.elapsed(), static_cast<int>(m_currentBitrate));
+            if (previousCeiling > 0 && m_c2Guard.ceiling == VIDEO_DISABLED_BITRATE_KBPS) {
+                m_cameraNeedsSync = true;
+            }
             publishC2(true);
         });
     }
     m_c2GuardTimer = new QTimer(this);
     m_c2GuardTimer->setInterval(1000);
     connect(m_c2GuardTimer, &QTimer::timeout, this, [this, publishC2]() {
+        if (!m_serialConnected) return;
         const auto before = m_c2Guard.state;
         m_c2Guard.tick(m_c2Clock.elapsed());
-        if (before != m_c2Guard.state) publishC2(false);
+        if (before != m_c2Guard.state ||
+            (m_c2Guard.ceiling == VIDEO_DISABLED_BITRATE_KBPS && m_cameraNeedsSync)) {
+            publishC2(false);
+        }
     });
     m_c2GuardTimer->start();
+
+    auto *statusClient = new QNetworkAccessManager(m_c2GuardTimer);
+    const auto pollSerialStatus = [this, statusClient, handleBitrateChange]() {
+        if (m_serialStatusReply) return;
+        const QByteArray endpoint = qgetenv("XB_QOS_SERIAL_STATUS_URL");
+        const QUrl url = endpoint.isEmpty()
+            ? QUrl(QStringLiteral("http://127.0.0.1:3009/connections/status"))
+            : QUrl(QString::fromUtf8(endpoint));
+        auto *reply = statusClient->get(QNetworkRequest(url));
+        m_serialStatusReply = reply;
+        QTimer::singleShot(2000, reply, [reply]() {
+            if (reply->isRunning()) reply->abort();
+        });
+        connect(reply, &QNetworkReply::finished, this, [this, reply, handleBitrateChange]() {
+            reply->deleteLater();
+            if (m_serialStatusReply != reply) return;
+            m_serialStatusReply = nullptr;
+            if (reply->error() != QNetworkReply::NoError) return;
+            const auto status = QJsonDocument::fromJson(reply->readAll()).object();
+            const auto serial = status.value("data").toObject().value("serialConnected");
+            if (!status.value("success").toBool() || !serial.isBool()) return;
+            if (qEnvironmentVariableIntValue("XB_QOS_MONITOR_TELEMETRY") == 1) {
+                qInfo().noquote() << "[XB_MONITOR] [Serial Status] serialConnected ="
+                                  << (serial.toBool() ? "true" : "false");
+            }
+            if (serial.toBool() == m_serialConnected) return;
+
+            m_serialConnected = serial.toBool();
+            qInfo() << "[QoS Engine] serialConnected =" << m_serialConnected;
+            if (!m_serialConnected) {
+                m_c2Guard = C2BitrateGuard(ABR_DEFAULT_MAX_ABR_BITRATE, 250);
+            }
+            if (m_abrFactory && m_abrFactory->srtAbr()) {
+                m_abrFactory->srtAbr()->setSerialConnected(m_serialConnected);
+            }
+            if (!m_serialConnected) {
+                handleBitrateChange(m_requestedBitrate);
+            }
+        });
+    };
+    connect(m_c2GuardTimer, &QTimer::timeout, this, pollSerialStatus);
+    pollSerialStatus();
 
     if (m_abrFactory) {
         // ── Router ABR → camera ──────────────────────────────────────────
@@ -282,7 +336,10 @@ void XBQoSService::setupConnections()
 
         if (m_networkHandler) {
             connect(m_networkHandler, &NetworkHandler::onQosDataReceived, m_abrFactory, &ABRFactory::onSrtCameraConnection);
-            connect(m_networkHandler, &NetworkHandler::onC2DataReceived, m_abrFactory, &ABRFactory::handleC2Data);
+            connect(m_networkHandler, &NetworkHandler::onC2DataReceived, this,
+                    [this](const QVector<SRTPeerStat> &peers) {
+                if (m_serialConnected) m_abrFactory->handleC2Data(peers);
+            });
         }
         // Router telemetry (UDP 12346). Routed to the per-interface ABR
         // instances (ABRFactory::handleRouterRow → XBAdaptiveBitrateStreaming).
@@ -342,6 +399,7 @@ void XBQoSService::setupConnections()
     if (m_cameraControl && m_abrFactory) {
         connect(m_cameraControl, &CameraControl::bitrateReported, this, [this](int requestedKbps, int achievedKbps) {
             m_cameraNeedsSync = false;
+            if (requestedKbps > 0) m_c2ResumePending = false;
             if (achievedKbps > 0) {
                 if (qAbs(achievedKbps - requestedKbps) > 250) {
                     qWarning().noquote() << QString("[CameraControl] Note: Camera reported bitrate %1 kbps (differs from target %2 kbps)")
@@ -375,7 +433,9 @@ void XBQoSService::dispatchToCameraServer(int bitrate)
 void XBQoSService::start()
 {
     m_c2Guard = C2BitrateGuard(ABR_DEFAULT_MAX_ABR_BITRATE, 250);
+    m_serialConnected = false;
     m_requestedBitrate = 0;
+    m_c2ResumePending = false;
     m_lastValidSiyiMs = -1;
     printStartupBanner();
 
@@ -449,6 +509,10 @@ void XBQoSService::start()
 void XBQoSService::stop()
 {
     if (m_c2GuardTimer) m_c2GuardTimer->stop();
+    if (auto *reply = m_serialStatusReply) {
+        m_serialStatusReply = nullptr;
+        reply->abort();
+    }
     if (m_cameraKeepAliveTimer) {
         m_cameraKeepAliveTimer->stop();
     }

@@ -15,6 +15,7 @@ class SiyiLinkHandler;
 class CameraControl;
 class QoSDebugSender;
 class QTimer;
+class QNetworkReply;
 
 class XBQoSService : public QObject
 {
@@ -90,8 +91,11 @@ private:
 
     unsigned int m_currentBitrate;
     bool m_cameraNeedsSync;
+    bool m_c2ResumePending = false;
     QTimer *m_cameraKeepAliveTimer;
     QTimer *m_c2GuardTimer = nullptr;
+    QNetworkReply *m_serialStatusReply = nullptr;
+    bool m_serialConnected = false;
     C2BitrateGuard m_c2Guard{ABR_DEFAULT_MAX_ABR_BITRATE, 250};
     unsigned int m_requestedBitrate = 0;
     QElapsedTimer m_c2Clock;

@@ -50,7 +50,7 @@ public:
     static constexpr double RTT_BASELINE_DRIFT_PER_SEC              = 0.002;
 
     static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 50;
-    static constexpr qint64 KEYFRAME_REQUEST_COOLDOWN_MS            = 10000;
+    static constexpr qint64 STALL_RESTART_COOLDOWN_MS               = 30000;
     static constexpr qint64 KEYFRAME_IMMUNITY_DURATION_MS           = 800;
     static constexpr qint64 MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE      = 20;
 
@@ -100,6 +100,7 @@ public:
 public slots:
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);
     void handleC2ConnectionStats(const QVector<SRTPeerStat> &peers);
+    void setSerialConnected(bool connected);
     void handleSiyiLinkStat(const SiyiLinkStat &stat);
     void handleSiyiLinkLost();
     void onHeartbeatTimeout();
@@ -141,6 +142,7 @@ private:
     double m_c2Unacked;
     QElapsedTimer m_c2RateClock;
     C2BitrateGuard m_c2RateTracker;
+    bool m_serialConnected = false;
     qint64 m_lastC2PacketTime;
 
     // Sliding window sample histories
@@ -192,6 +194,7 @@ private:
     CongestionState m_lastCongestionState;
     bool m_wasCongested;
     qint64 m_lastKeyframeRequestTime;
+    bool m_sawFailuresDuringIdle = false;
     int m_consecutivePanicCount;
     qint64 m_congestionStartTimeMs;
     int m_consecutiveCongestedSamples;
