@@ -3,6 +3,41 @@
 class RfFallbackTest : public QObject {
     Q_OBJECT
 private slots:
+    void initialBitrateUsesHealthyQos_data() {
+        QTest::addColumn<double>("bandwidthMbps");
+        QTest::addColumn<double>("rttMs");
+        QTest::addColumn<uint>("expectedKbps");
+        QTest::newRow("healthy") << 4.0 << 7.0 << 1000u;
+        QTest::newRow("bandwidth-limited") << 0.7 << 7.0 << 600u;
+        QTest::newRow("missing-bandwidth") << 0.0 << 7.0 << 100u;
+        QTest::newRow("high-rtt") << 4.0 << 100.0 << 100u;
+    }
+
+    void initialBitrateUsesHealthyQos() {
+        QFETCH(double, bandwidthMbps);
+        QFETCH(double, rttMs);
+        QFETCH(uint, expectedKbps);
+        SRTAdaptiveBitrateStreaming abr;
+        QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
+        abr.start();
+
+        SiyiLinkStat rf;
+        rf.isAlive = true;
+        rf.signal = 100;
+        rf.rssi = -30;
+        abr.handleSiyiLinkStat(rf);
+
+        SRTPeerStat peer;
+        peer.msRTT = rttMs;
+        peer.mbpsBandwidth = bandwidthMbps;
+        peer.mbpsSendRate = 0.2;
+        peer.pktSentTotal = 100;
+        abr.handleQosCameraConnection({peer});
+
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(changes.first().at(0).toUInt(), expectedKbps);
+    }
+
     void clearStateRespectsBandwidthCap() {
         SRTAdaptiveBitrateStreaming abr;
         QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
@@ -74,6 +109,9 @@ private slots:
         abr.handleQosCameraConnection({p});
         for (const auto &change : changes) QVERIFY(change.at(0).toUInt() <= 100u);
         QTest::qWait(5100);
+        abr.onHeartbeatTimeout();
+        QCOMPARE(changes.last().at(0).toUInt(), 100u); // A brief gap holds the target.
+        QTest::qWait(static_cast<int>(abr.CAMERA_QOS_FALLBACK_TIMEOUT_MS - abr.CAMERA_QOS_STALE_TIMEOUT_MS));
         abr.onHeartbeatTimeout();
         QCOMPARE(changes.last().at(0).toUInt(), 50u); // Watchdog can reduce without RSSI.
         rf.rssi = -60;

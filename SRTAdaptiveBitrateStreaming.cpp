@@ -1032,11 +1032,17 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_clearBandwidthOverCapSamples = 0;
     }
 
-    // Live Bootstrapping: initial bitrate starts low and ramps smoothly
     if (!m_isBootstrapped) {
-        unsigned int calculatedInitialBitrate = (state == CongestionState::Panic)
-            ? MIN_ACTIVE_VIDEO_BITRATE_KBPS
-            : 100u;
+        // The first RTT sample also seeds the baseline, so check its
+        // absolute value before treating CLEAR as a healthy startup.
+        constexpr double maxStartupRttMs = 60.0;
+        const bool canStartFast = state == CongestionState::Clear && m_hasSiyiTelemetry &&
+                                  m_c2Priority == C2PriorityLevel::Normal && hasActiveTraffic &&
+                                  rawRtt > 0.0 && rawRtt <= maxStartupRttMs &&
+                                  rawBandwidthMbps > 0.1 && rawBandwidthMbps < 150.0;
+        unsigned int calculatedInitialBitrate = canStartFast ? 1000u : 100u;
+        if (state == CongestionState::Panic)
+            calculatedInitialBitrate = MIN_ACTIVE_VIDEO_BITRATE_KBPS;
 
         calculatedInitialBitrate = qMin(calculatedInitialBitrate, bandwidthCapKbps);
         calculatedInitialBitrate = (calculatedInitialBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
