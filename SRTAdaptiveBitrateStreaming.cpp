@@ -138,7 +138,6 @@ void SRTAdaptiveBitrateStreaming::start()
     m_lastCongestionState = CongestionState::Clear;
     m_wasCongested = false;
     m_lastKeyframeRequestTime = 0;
-    m_sawFailuresDuringIdle = false;
     m_consecutivePanicCount = 0;
     m_lastCameraQosTime = 0;
     m_lastActiveTrafficTime = 0;
@@ -212,7 +211,6 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_lastCongestionState = CongestionState::Clear;
     m_wasCongested = false;
     m_lastKeyframeRequestTime = 0;
-    m_sawFailuresDuringIdle = false;
     m_consecutivePanicCount = 0;
     m_congestionStartTimeMs = 0;
     m_consecutiveCongestedSamples = 0;
@@ -757,8 +755,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     const qint64 qosGapMs = m_lastQosPacketTime > 0 ? ctime - m_lastQosPacketTime : 0;
     const bool cameraQosInterrupted = qosGapMs >= CAMERA_QOS_STALE_TIMEOUT_MS;
     if (cameraQosInterrupted) {
-        m_sawFailuresDuringIdle = false;
-        if (!m_isTrafficIdle) m_lastActiveTrafficTime = ctime;
         m_cameraQosRecoverySamplesRemaining = CAMERA_QOS_RECOVERY_SAMPLES;
         m_clearSinceMs = 0;
         m_clearBandwidthOverCapSamples = 0;
@@ -789,6 +785,10 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_consecutiveZeroLossCount = 0;
 
         m_cooldownUntilMs = ctime + 800;
+        if (m_cameraQosRecoverySamplesRemaining == 0) {
+            m_lastKeyframeRequestTime = ctime;
+            emit requestKeyframe();
+        }
     }
 
     // Sliding Window Smoothing
@@ -898,7 +898,6 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
     const bool hasActiveTraffic = (deltaSent > 0 || rawSendRateMbps >= 0.02);
     if (hasActiveTraffic) {
-        m_sawFailuresDuringIdle = false;
         m_lastActiveTrafficTime = ctime;
         if (m_isTrafficIdle) {
             m_isTrafficIdle = false;
@@ -913,19 +912,10 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             emit trafficActiveChanged(true);
         }
     } else {
-        m_sawFailuresDuringIdle |= deltaLossRaw > 0 || deltaRetrans > 0 ||
-                                   deltaDropSnd > 0 || deltaDropRcv > 0;
         if (m_lastActiveTrafficTime > 0 && (ctime - m_lastActiveTrafficTime >= TRAFFIC_IDLE_TIMEOUT_MS)) {
             if (!m_isTrafficIdle) {
                 m_isTrafficIdle = true;
                 emit trafficActiveChanged(false);
-                if (m_sawFailuresDuringIdle && m_isVideoEnabled && !m_isExplicitC2Only &&
-                    m_c2RateTracker.ceiling > 0 &&
-                    ctime - m_lastKeyframeRequestTime >= STALL_RESTART_COOLDOWN_MS) {
-                    m_lastKeyframeRequestTime = ctime;
-                    qWarning() << "[QoS Engine] Video stalled with ongoing QoS and packet failures";
-                    emit requestKeyframe();
-                }
             }
         }
     }
@@ -1164,7 +1154,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             m_clearSinceMs = ctime;
         }
 
-        m_wasCongested = false;
+        if (m_wasCongested) {
+            m_wasCongested = false;
+            if (ctime - m_lastKeyframeRequestTime >= KEYFRAME_REQUEST_COOLDOWN_MS) {
+                m_lastKeyframeRequestTime = ctime;
+                emit requestKeyframe();
+            }
+        }
 
         if (clearAboveBandwidthCap) {
             // Confirm with consecutive fresh samples before reacting to an estimate dip.
@@ -1290,6 +1286,11 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
     else {
         cancelQosProbe(ctime, m_probePreviousCeiling > 0);
+        if (currentSeverity == static_cast<int>(CongestionState::Panic) &&
+            state != CongestionState::Panic && ctime - m_lastKeyframeRequestTime >= 3000) {
+            m_lastKeyframeRequestTime = ctime;
+            emit requestKeyframe();
+        }
 
         // Track onset of congestion for transient occlusion debounce:
         if (m_congestionStartTimeMs == 0) {

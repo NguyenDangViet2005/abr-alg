@@ -183,8 +183,7 @@ void XBQoSService::setupConnections()
                 qWarning().noquote() << QString("[C2 Priority] %1").arg(name);
             }
         });
-        // SRT requests a hard socket restart only for a confirmed stall.
-        // The active ABR engine owns the camera restart decision.
+        // SRT's keyframe request restarts the video socket when SRT owns the camera.
         connect(m_abrFactory->srtAbr(), &IAdaptiveBitrateStreaming::requestKeyframe, this, [this, routerAbrOwnsCamera]() {
             if (routerAbrOwnsCamera) {
                 qInfo().noquote() << "[QoS Engine] ROUTER_ABR_OWNS_CAMERA: SRT keyframe ask "
