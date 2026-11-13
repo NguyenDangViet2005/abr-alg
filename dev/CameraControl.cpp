@@ -14,6 +14,11 @@ static const QString CAMERA_ADAPT_BITRATE_URL = QString("http://%1:%2%3")
     .arg(CAMERA_ADAPT_BITRATE_PORT)
     .arg(CAMERA_ADAPT_BITRATE_PATH);
 
+static const QString CAMERA_PENDING_FOR_C2_URL = QString("http://%1:%2%3")
+    .arg(CAMERA_ADAPT_BITRATE_HOST)
+    .arg(CAMERA_ADAPT_BITRATE_PORT)
+    .arg(CAMERA_PENDING_FOR_C2_PATH);
+
 // xbfirm video-socket restart endpoint (HTTP POST, no body). Drops + reopens the
 // camera's video WebSocket, which sends an RST and clears the TCP retransmit
 // queue — the only userspace cure for retransmit head-of-line blocking.
@@ -25,10 +30,16 @@ static const QString CAMERA_VIDEO_RESTART_URL = QString("http://%1:%2%3")
 CameraControl::CameraControl(QObject *parent)
     : QObject{parent}
     , m_nam(new QNetworkAccessManager(this))
-{}
+{
+    m_c2PendingRetry.setSingleShot(true);
+    m_c2PendingRetry.setInterval(1000);
+    connect(&m_c2PendingRetry, &QTimer::timeout, this, &CameraControl::syncVideoPendingForC2);
+}
 
 void CameraControl::sendAdaptBitrate(int bitrate)
 {
+    if (bitrate <= 0) return;
+
     // A new command SUPERSEDES any in-flight one: the camera would otherwise
     // receive both, and the older reply would arrive after the newer ask.
     if (m_currentReply && m_currentReply->isRunning()) {
@@ -98,6 +109,51 @@ void CameraControl::sendAdaptBitrate(int bitrate)
         }
         emit bitrateReported(bitrate, achievedKbps);
         reply->deleteLater();
+    });
+}
+
+void CameraControl::setVideoPendingForC2(bool pending)
+{
+    if (pending == m_videoPendingForC2) return;
+
+    m_videoPendingForC2 = pending;
+    m_c2PendingNeedsSync = true;
+    m_c2PendingRetry.stop();
+    syncVideoPendingForC2();
+}
+
+void CameraControl::syncVideoPendingForC2()
+{
+    // Serialize transitions so recovery cannot overtake a pending request.
+    if (m_c2PendingReply || !m_c2PendingNeedsSync) return;
+
+    const bool pending = m_videoPendingForC2;
+    QNetworkRequest request{QUrl(CAMERA_PENDING_FOR_C2_URL)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setTransferTimeout(2000);
+    const QJsonObject payload{{"pending", pending}};
+    auto *reply = m_nam->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    m_c2PendingReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, pending]() {
+        m_c2PendingReply = nullptr;
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const auto response = QJsonDocument::fromJson(reply->readAll()).object();
+        const bool success = reply->error() == QNetworkReply::NoError &&
+                             status >= 200 && status < 300 && response.value("success").toBool();
+        if (success) {
+            qInfo() << "[CameraControl] pendingForC2 applied:" << pending;
+        } else {
+            qWarning() << "[CameraControl] pendingForC2 failed:" << pending
+                       << "HTTP" << status << reply->errorString();
+        }
+        reply->deleteLater();
+
+        m_c2PendingNeedsSync = !success || pending != m_videoPendingForC2;
+        if (pending != m_videoPendingForC2) {
+            syncVideoPendingForC2();
+        } else if (!success) {
+            m_c2PendingRetry.start();
+        }
     });
 }
 

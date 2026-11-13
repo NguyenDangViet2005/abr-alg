@@ -109,34 +109,26 @@ void XBQoSService::setupConnections()
              m_c2Clock.elapsed() - m_lastValidSiyiMs > SIYI_LINK_TIMEOUT_MS)) {
             newBitrate = m_currentBitrate;
         }
-        // --disable-abr: THE mute. Returning here is the whole feature — this
-        // lambda is the only writer of m_currentBitrate and the only caller of
-        // dispatchToCameraServer for bitrate, so one early return stops the
-        // camera adapting. The keep-alive and the QoS-resync POST then go inert
-        // on their own, because both are guarded on m_currentBitrate > 0 and it
-        // now stays 0. Deliberately NOT gated downstream: keeping the exit door
-        // (dispatchToCameraServer) dumb makes it obvious the mute is upstream.
-        // The loss-driven socket restart is NOT muted — see its lambda below,
-        // which reads the factory's cached last effective bitrate instead.
+        // Keep camera bitrate and C2 pending commands in shadow mode.
         if (m_abrDisabled) {
             return;
         }
         const bool c2Cutoff = m_c2Guard.ceiling == VIDEO_DISABLED_BITRATE_KBPS;
+        m_cameraControl->setVideoPendingForC2(c2Cutoff);
+        if (c2Cutoff) {
+            m_c2ResumePending = true;
+        }
+        if (newBitrate == VIDEO_DISABLED_BITRATE_KBPS) {
+            m_currentBitrate = newBitrate;
+            m_cameraNeedsSync = false;
+            m_cameraKeepAliveTimer->stop();
+            return;
+        }
         if (newBitrate == m_currentBitrate &&
-            (!m_cameraNeedsSync || (!c2Cutoff && !canResyncCameraBitrate()))) {
+            (!m_cameraNeedsSync || !canResyncCameraBitrate())) {
             return;
         }
         m_currentBitrate = newBitrate;
-
-        if (newBitrate == VIDEO_DISABLED_BITRATE_KBPS) {
-            m_c2ResumePending = c2Cutoff;
-            m_cameraNeedsSync = false;
-            dispatchToCameraServer(VIDEO_DISABLED_BITRATE_KBPS);
-            if (m_cameraKeepAliveTimer) {
-                m_cameraKeepAliveTimer->stop();
-            }
-            return;
-        }
 
         m_resolutionAdapter.updateBitrate(newBitrate);
         dispatchToCameraServer(static_cast<int>(newBitrate));
@@ -221,11 +213,7 @@ void XBQoSService::setupConnections()
                 samples.push_back({(p.peerAddress + ':' + QString::number(p.peerPort)).toStdString(),
                                    p.msRTT, p.pktRetransTotal, p.pktSndDropTotal, p.isC2Only});
             }
-            const int previousCeiling = m_c2Guard.ceiling;
             m_c2Guard.receive(samples, m_c2Clock.elapsed(), static_cast<int>(m_currentBitrate));
-            if (previousCeiling > 0 && m_c2Guard.ceiling == VIDEO_DISABLED_BITRATE_KBPS) {
-                m_cameraNeedsSync = true;
-            }
             publishC2(true);
         });
     }
@@ -235,8 +223,7 @@ void XBQoSService::setupConnections()
         if (!m_serialConnected) return;
         const auto before = m_c2Guard.state;
         m_c2Guard.tick(m_c2Clock.elapsed());
-        if (before != m_c2Guard.state ||
-            (m_c2Guard.ceiling == VIDEO_DISABLED_BITRATE_KBPS && m_cameraNeedsSync)) {
+        if (before != m_c2Guard.state) {
             publishC2(false);
         }
     });
@@ -398,7 +385,7 @@ void XBQoSService::setupConnections()
     if (m_cameraControl && m_abrFactory) {
         connect(m_cameraControl, &CameraControl::bitrateReported, this, [this](int requestedKbps, int achievedKbps) {
             m_cameraNeedsSync = false;
-            if (requestedKbps > 0) m_c2ResumePending = false;
+            if (m_currentBitrate > 0) m_c2ResumePending = false;
             if (achievedKbps > 0) {
                 if (qAbs(achievedKbps - requestedKbps) > 250) {
                     qWarning().noquote() << QString("[CameraControl] Note: Camera reported bitrate %1 kbps (differs from target %2 kbps)")

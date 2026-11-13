@@ -19,6 +19,7 @@
 #define CAMERA_ADAPT_BITRATE_HOST "127.0.0.1"
 #define CAMERA_ADAPT_BITRATE_PORT 4002
 #define CAMERA_ADAPT_BITRATE_PATH "/api/camera/adapt-bitrate"
+#define CAMERA_PENDING_FOR_C2_PATH "/api/camera/pendingForC2"
 
 // ── CameraControl (xbfirm video-socket restart) ──
 // xbfirm's HTTP API (SERVER_HTTP_XBFIRM = 3009) exposes /connections/video/restart,
