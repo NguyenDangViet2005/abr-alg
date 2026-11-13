@@ -82,6 +82,54 @@ private slots:
         QCOMPARE(bitrate(), 200u);
     }
 
+    void strongerRfAcceleratesOnlyWithCleanQos_data() {
+        QTest::addColumn<double>("bandwidthMbps");
+        QTest::addColumn<bool>("packetLoss");
+        QTest::addColumn<uint>("expectedFirstIncrease");
+        QTest::newRow("healthy") << 5.0 << false << 1250u;
+        QTest::newRow("bandwidth-limited") << 1.0 << false << 500u;
+        QTest::newRow("loss-after-rf-recovery") << 5.0 << true << 450u;
+    }
+
+    void strongerRfAcceleratesOnlyWithCleanQos() {
+        QFETCH(double, bandwidthMbps);
+        QFETCH(bool, packetLoss);
+        QFETCH(uint, expectedFirstIncrease);
+        SRTAdaptiveBitrateStreaming abr;
+        QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
+        abr.start();
+
+        SiyiLinkStat rf;
+        rf.isAlive = true;
+        rf.signal = 100;
+        rf.rssi = -83;
+        SRTPeerStat peer;
+        peer.msRTT = 7;
+        peer.mbpsBandwidth = bandwidthMbps;
+        peer.mbpsSendRate = 0.25;
+
+        const auto sample = [&]() {
+            abr.handleSiyiLinkStat(rf);
+            peer.pktSentTotal += 100;
+            abr.handleQosCameraConnection({peer});
+        };
+        for (int i = 0; i < 5; ++i) sample();
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(changes.last().at(0).toUInt(), 250u);
+
+        rf.rssi = -55;
+        for (int i = 0; i < 3; ++i) abr.handleSiyiLinkStat(rf);
+        QCOMPARE(changes.size(), 1);
+        if (packetLoss) ++peer.pktSndLossTotal;
+
+        for (int i = 0; i < 28 && changes.size() == 1; ++i) {
+            sample();
+            if (changes.size() == 1) QTest::qWait(200);
+        }
+        QVERIFY(changes.size() > 1);
+        QCOMPARE(changes.at(1).at(0).toUInt(), expectedFirstIncrease);
+    }
+
     void invalidRfKeepsQosAndWatchdogActive() {
         SRTAdaptiveBitrateStreaming abr;
         QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);

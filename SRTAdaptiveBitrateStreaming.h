@@ -36,6 +36,9 @@ public:
     static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 3000;
  
     static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 1500;
+    static constexpr unsigned int RF_RECOVERY_MIN_HEADROOM_KBPS      = 500;
+    static constexpr unsigned int RF_RECOVERY_STEP_PERCENT           = 40;
+    static constexpr unsigned int RF_RECOVERY_MAX_STEP_KBPS          = 1000;
     static constexpr int SLIDING_WINDOW_SIZE                        = 5;
     static constexpr double MIN_VALID_RTT_MS                        = 5.0;
 
@@ -198,7 +201,7 @@ private:
     qint64 m_congestionStartTimeMs;
     int m_consecutiveCongestedSamples;
     int m_clearBandwidthOverCapSamples = 0;
-    bool m_networkEnvironmentChanged;
+    bool m_rfRecoveryRampActive;
 
     qint64 m_lastCameraQosTime;
     qint64 m_lastActiveTrafficTime;

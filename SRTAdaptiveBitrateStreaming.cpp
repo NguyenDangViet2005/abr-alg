@@ -56,7 +56,7 @@ SRTAdaptiveBitrateStreaming::SRTAdaptiveBitrateStreaming(QObject *parent)
     , m_consecutivePanicCount(0)
     , m_congestionStartTimeMs(0)
     , m_consecutiveCongestedSamples(0)
-    , m_networkEnvironmentChanged(false)
+    , m_rfRecoveryRampActive(false)
     , m_lastCameraQosTime(0)
     , m_lastActiveTrafficTime(0)
     , m_isTrafficIdle(true)
@@ -94,6 +94,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_currentEnvCeiling = DEFAULT_MAX_BITRATE_KBPS;
     m_currentEnvName = "Ultra";
     m_hasSiyiTelemetry = false;
+    m_rfRecoveryRampActive = false;
 
     m_isVideoEnabled = true;
     m_isExplicitC2Only = false;
@@ -215,7 +216,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_congestionStartTimeMs = 0;
     m_consecutiveCongestedSamples = 0;
     m_clearBandwidthOverCapSamples = 0;
-    m_networkEnvironmentChanged = false;
+    m_rfRecoveryRampActive = false;
     m_lastCameraQosTime = 0;
     m_lastActiveTrafficTime = 0;
     m_isTrafficIdle = true;
@@ -535,7 +536,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
         m_clearSinceMs = 0;
         m_lastProbeTime = 0;
         m_consecutiveZeroLossCount = 0;
-        m_networkEnvironmentChanged = false;
+        m_rfRecoveryRampActive = false;
         m_needRecoveryRefresh = true;
         m_latestStatusReason = "RF RESTORED (Waiting for QoS decision)";
         qInfo() << "[RF Environment] Valid SIYI RSSI restored; resuming ABR.";
@@ -592,8 +593,9 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
             m_lastCongestedBitrate = m_currentEnvCeiling;
             m_clearSinceMs = m_lastSiyiPacketTime;
             m_lastBitrateIncrTime = m_lastSiyiPacketTime;
-            m_networkEnvironmentChanged = true;
+            m_rfRecoveryRampActive = true;
         } else {
+            m_rfRecoveryRampActive = false;
             // Môi trường mạng YẾU HƠN (bay ra xa GCS / khuất sóng): Khóa trần thấp hơn, chủ động hạ bitrate xuống trước khi rớt gói
             qWarning().noquote() << QString("[RF Environment] ⚠️ Entered WEAKER environment: %1 | Lowering Ceiling: %2 kbps (RSSI: %3 dBm)")
                                         .arg(m_currentEnvName).arg(m_currentEnvCeiling).arg(m_smoothedRssi, 0, 'f', 1);
@@ -641,7 +643,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkLost()
     m_clearSinceMs = 0;
     m_lastProbeTime = 0;
     m_consecutiveZeroLossCount = 0;
-    m_networkEnvironmentChanged = false;
+    m_rfRecoveryRampActive = false;
     m_latestStatusReason = "RF UNAVAILABLE (QoS active; increases frozen)";
 }
 
@@ -1018,7 +1020,11 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     // Do not wait for the next increase decision to abandon a probe when a
     // fresh sample shows loss or congestion.
     if (deltaFailures > 0 || state != CongestionState::Clear) {
+        m_rfRecoveryRampActive = false;
         cancelQosProbe(ctime, m_probePreviousCeiling > 0);
+    }
+    if (isStaleSample) {
+        m_rfRecoveryRampActive = false;
     }
     if (isStaleSample && !cameraQosInterrupted) {
         m_clearBandwidthOverCapSamples = 0;
@@ -1163,6 +1169,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
 
         if (clearAboveBandwidthCap) {
+            m_rfRecoveryRampActive = false;
             // Confirm with consecutive fresh samples before reacting to an estimate dip.
             m_clearBandwidthOverCapSamples = qMin(m_clearBandwidthOverCapSamples + 1, 2);
             if (m_clearBandwidthOverCapSamples >= 2 &&
@@ -1247,6 +1254,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             effectiveMax = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, effectiveMax, m_maxBitrateKbps);
 
             if (m_currentBitrateKbps >= effectiveMax) {
+                m_rfRecoveryRampActive = false;
                 // ĐÃ CHẠM MỨC TRẦN CỦA MÔI TRƯỜNG HIỆN TẠI:
                 // KHÓA CỨNG HOÀN TOÀN! THÀNH 1 ĐƯỜNG THẲNG TẮP!
                 // TUYỆT ĐỐI KHÔNG BÒ LÊN THĂM DÒ NỮA KHI MÔI TRƯỜNG MẠNG CHƯA ĐỔI!
@@ -1263,7 +1271,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 }
 
                 // Smooth and gradual ramp-up (fast recovery when far below capacity, gentle near ceiling)
-                unsigned int headroom = (effectiveMax > m_currentBitrateKbps) ? (effectiveMax - m_currentBitrateKbps) : 0;
+                const unsigned int headroom = effectiveMax - m_currentBitrateKbps;
                 unsigned int stepKbps = BITRATE_ROUNDING_STEP_KBPS;
                 if (headroom >= 500u) {
                     stepKbps = 200u;
@@ -1272,6 +1280,20 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                 }
                 unsigned int targetBitrate = m_currentBitrateKbps + stepKbps;
                 targetBitrate = qMin(targetBitrate, effectiveMax);
+                if (m_rfRecoveryRampActive && probeHealthy && hasActiveTraffic &&
+                    rttInflation < 3.0 && rawRtt <= m_rttMin + 8.0 &&
+                    rawBandwidthMbps < 150.0 && m_c2Priority == C2PriorityLevel::Normal &&
+                    m_c2RateTracker.state != C2BitrateGuard::State::Degraded &&
+                    m_c2RateTracker.ceiling > 0) {
+                    const auto rawCap = static_cast<unsigned int>(rawBandwidthMbps * 1000.0 * BW_UTILIZATION_RATIO);
+                    const unsigned int recoveryCap = qMin(effectiveMax, rawCap);
+                    if (recoveryCap >= m_currentBitrateKbps + RF_RECOVERY_MIN_HEADROOM_KBPS) {
+                        const unsigned int recoveryHeadroom = recoveryCap - m_currentBitrateKbps;
+                        const unsigned int recoveryStep = qMin(RF_RECOVERY_MAX_STEP_KBPS,
+                                                               recoveryHeadroom * RF_RECOVERY_STEP_PERCENT / 100);
+                        targetBitrate = m_currentBitrateKbps + recoveryStep;
+                    }
+                }
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
                 targetBitrate = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, targetBitrate, m_maxBitrateKbps);
 
