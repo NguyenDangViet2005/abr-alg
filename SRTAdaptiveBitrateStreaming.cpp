@@ -794,6 +794,9 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_cooldownUntilMs = ctime + 800;
         if (m_cameraQosRecoverySamplesRemaining == 0) {
             m_lastKeyframeRequestTime = ctime;
+            qInfo().noquote() << "[requestKeyframe EMIT] reason=stream-recovery"
+                              << "ts_ms=" << ctime << "qos_gap_ms=" << qosGapMs
+                              << "bitrate_kbps=" << m_currentBitrateKbps;
             emit requestKeyframe();
         }
     }
@@ -1163,6 +1166,10 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             m_wasCongested = false;
             if (ctime - m_lastKeyframeRequestTime >= KEYFRAME_REQUEST_COOLDOWN_MS) {
                 m_lastKeyframeRequestTime = ctime;
+                qInfo().noquote() << "[requestKeyframe EMIT] reason=congestion-cleared"
+                                  << "ts_ms=" << ctime << "rtt_ms=" << smoothedRtt
+                                  << "loss_pct=" << m_lossPercentAvg
+                                  << "bitrate_kbps=" << m_currentBitrateKbps;
                 emit requestKeyframe();
             }
         }
@@ -1310,6 +1317,10 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         if (currentSeverity == static_cast<int>(CongestionState::Panic) &&
             state != CongestionState::Panic && ctime - m_lastKeyframeRequestTime >= 3000) {
             m_lastKeyframeRequestTime = ctime;
+            qInfo().noquote() << "[requestKeyframe EMIT] reason=leaving-panic"
+                              << "ts_ms=" << ctime << "rtt_ms=" << smoothedRtt
+                              << "loss_pct=" << m_lossPercentAvg
+                              << "bitrate_kbps=" << m_currentBitrateKbps;
             emit requestKeyframe();
         }
 
