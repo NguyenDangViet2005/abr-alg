@@ -577,6 +577,11 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
         }
     }
     const RfEnvironment &env = RF_ENVIRONMENTS[envIndex];
+    // The default ceiling is already Ultra, so a strong first sample or
+    // reconnect in Ultra can qualify without an RF ceiling change.
+    if (recoveringRf && env.ceilingKbps == RF_ENVIRONMENTS[0].ceilingKbps) {
+        m_rfRecoveryRampActive = true;
+    }
 
     // Reconnecting in the same region must preserve the learned safe ceiling.
     if (env.ceilingKbps != m_currentEnvCeiling) {
@@ -824,10 +829,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
 
     double dt = (m_lastQosPacketTime > 0) ? (ctime - m_lastQosPacketTime) / 1000.0 : 0.25;
-    bool isStaleSample = (dt > 2.0);
-    if (isStaleSample) {
-        if (m_cameraQosRecoverySamplesRemaining > 0)
-            m_cameraQosRecoverySamplesRemaining = CAMERA_QOS_RECOVERY_SAMPLES;
+    if (cameraQosInterrupted) {
         dt = 0.5;
     }
     if (dt < 0.05) dt = 0.05;
@@ -1023,13 +1025,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_rfRecoveryRampActive = false;
         cancelQosProbe(ctime, m_probePreviousCeiling > 0);
     }
-    if (isStaleSample) {
+    if (cameraQosInterrupted) {
         m_rfRecoveryRampActive = false;
-    }
-    if (isStaleSample && !cameraQosInterrupted) {
-        m_clearBandwidthOverCapSamples = 0;
-        cancelQosProbe(ctime, false);
-        return;
     }
 
     unsigned int bandwidthCapKbps = calculateNetworkPartitionCeiling(smoothedBw, m_lossPercentAvg, state);
@@ -1071,7 +1068,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                                   m_c2RateTracker.ceiling > 0 && hasActiveTraffic &&
                                   rawRtt > 0.0 && rawRtt <= maxStartupRttMs &&
                                   rawBandwidthMbps > 0.1 && rawBandwidthMbps < 150.0;
-        unsigned int calculatedInitialBitrate = canStartFast ? 1000u : 100u;
+        unsigned int calculatedInitialBitrate = canStartFast ? ABR_STARTUP_BITRATE_KBPS : 100u;
         if (state == CongestionState::Panic)
             calculatedInitialBitrate = MIN_ACTIVE_VIDEO_BITRATE_KBPS;
 
@@ -1146,6 +1143,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             m_lastBitrateChangeTime = ctime;
             m_lastBitrateIncrTime = ctime;
             m_wasCongested = false;
+            m_rfRecoveryRampActive = m_hasSiyiTelemetry &&
+                m_currentEnvCeiling == RF_ENVIRONMENTS[0].ceilingKbps;
             applyNewBitrate(target, smoothedRtt, smoothedBw, deltaLoss);
         }
         return;

@@ -46,6 +46,7 @@
 // start()/reset(). Router ABR được dispatch tới camera ngay tick đầu (switch
 // edge "" -> primary), nên đây CHÍNH LÀ bitrate camera thấy lúc vào, không chờ
 // ramp. 1000 = vào thẳng 1000 thay vì 800 rồi bò lên (+100/2s).
+// SRT dùng cùng mức mục tiêu khi mẫu QoS đầu tiên đủ điều kiện khởi động.
 // [PORT DEVIATION] (xbfirm ctor = 800, start() = 1000 — lệch nhau; đây gộp về 1).
 #define ABR_STARTUP_BITRATE_KBPS               1000
 
