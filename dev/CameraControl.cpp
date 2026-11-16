@@ -132,7 +132,10 @@ void CameraControl::syncVideoPendingForC2()
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setTransferTimeout(2000);
     const QJsonObject payload{{"pending", pending}};
-    auto *reply = m_nam->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+    qInfo().noquote() << "[pendingForC2 POST]" << request.url().toString()
+                      << QString::fromUtf8(body);
+    auto *reply = m_nam->post(request, body);
     m_c2PendingReply = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply, pending]() {
         m_c2PendingReply = nullptr;
