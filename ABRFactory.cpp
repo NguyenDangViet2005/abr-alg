@@ -263,6 +263,15 @@ void ABRFactory::handleRouterTick(const QString &primaryInterface)
     }
 }
 
+int ABRFactory::primaryBitrateForVideoRow(const RouterInterfaceStat &row) const
+{
+    if (row.connType != ConnType::VIDEO || row.parseFailed || !row.isConnected ||
+        row.interfaceName != _primaryIface) return -1;
+
+    const auto abr = _routerAbrs.value(_primaryIface, nullptr);
+    return abr ? abr->currentBitrate() : -1;
+}
+
 void ABRFactory::handleRouterAbrBitrate(const QString &iface, unsigned int kbps)
 {
     const bool effective = (iface == _primaryIface);

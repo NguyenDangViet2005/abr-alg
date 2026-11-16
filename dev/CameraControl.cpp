@@ -58,6 +58,8 @@ void CameraControl::sendAdaptBitrate(int bitrate)
     payload["bitrate"] = bitrate;
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
+    qInfo().noquote() << "[adapt-bitrate POST]" << request.url().toString()
+                      << QString::fromUtf8(body);
     QNetworkReply* reply = m_nam->post(request, body);
     m_currentReply = reply;
     QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, url, bitrate]() {
@@ -114,18 +116,26 @@ void CameraControl::sendAdaptBitrate(int bitrate)
 
 void CameraControl::setVideoPendingForC2(bool pending)
 {
-    if (pending == m_videoPendingForC2) return;
+    const bool wasSuspended = m_c2PendingSuspended;
+    m_c2PendingSuspended = false;
+    if (pending == m_videoPendingForC2 && !wasSuspended) return;
 
+    m_c2PendingNeedsSync |= pending != m_videoPendingForC2;
     m_videoPendingForC2 = pending;
-    m_c2PendingNeedsSync = true;
     m_c2PendingRetry.stop();
     syncVideoPendingForC2();
+}
+
+void CameraControl::suspendVideoPendingForC2()
+{
+    m_c2PendingSuspended = true;
+    m_c2PendingRetry.stop();
 }
 
 void CameraControl::syncVideoPendingForC2()
 {
     // Serialize transitions so recovery cannot overtake a pending request.
-    if (m_c2PendingReply || !m_c2PendingNeedsSync) return;
+    if (m_c2PendingSuspended || m_c2PendingReply || !m_c2PendingNeedsSync) return;
 
     const bool pending = m_videoPendingForC2;
     QNetworkRequest request{QUrl(CAMERA_PENDING_FOR_C2_URL)};
@@ -152,6 +162,7 @@ void CameraControl::syncVideoPendingForC2()
         reply->deleteLater();
 
         m_c2PendingNeedsSync = !success || pending != m_videoPendingForC2;
+        if (m_c2PendingSuspended) return;
         if (pending != m_videoPendingForC2) {
             syncVideoPendingForC2();
         } else if (!success) {

@@ -89,13 +89,9 @@ public slots:
     // _primaryIface, which only the factory knows.
     void handleRequestStreamReset(const QString &iface, const QString &reason);
 
-    // The last NON-ZERO bitrate the factory relayed for the PRIMARY interface —
-    // i.e. the value the camera was last told to run. Sentinel -1 = never
-    // dispatched. While --disable-abr is on, XBQoSService::m_currentBitrate
-    // stays 0 (the mute is upstream of it), so the loss-driven socket-restart
-    // guard reads THIS instead: a camera collapse must still be able to trigger
-    // a restart while the bitrate itself is frozen.
+    // Last nonzero proposal relayed for the primary, or -1 before any proposal.
     int lastEffectiveBitrate() const { return _lastEffectiveKbps; }
+    int primaryBitrateForVideoRow(const RouterInterfaceStat &row) const;
 
 signals:
     void onSrtCameraConnection(const QVector<SRTPeerStat> &peers);

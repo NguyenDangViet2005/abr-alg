@@ -38,17 +38,7 @@ public:
     // applies it per instance at creation. Router ABR only.
     void setAbrHeadroomPct(int pct);
 
-    // --disable-abr: stop CHANGING the camera bitrate. The ABR instances keep
-    // running and keep logging (shadow mode), and the router ABR keeps
-    // publishing to the QS dashboard, so an A/B run can compare "ABR in
-    // control" against "camera on its own default" with the decision stream
-    // still visible. Declared before start().
-    //
-    // MUTED: CameraControl::sendAdaptBitrate, and — as a consequence — the 3 s
-    // keep-alive and the QoS-resync POST, because both read m_currentBitrate,
-    // which the mute leaves at 0. NOT muted: the loss-driven socket restart
-    // (requestStreamRefresh); its guard reads the factory's cached last
-    // effective bitrate instead, so it still fires.
+    // Toggle camera control while continuing to process telemetry.
     void setAbrDisabled(bool disabled);
 
     // QoS debug channel. Default OFF. When on, taps the SAME router rows the
@@ -85,9 +75,8 @@ private:
     // Phase 09 (headroom): steady-state cap percent, from --abr-headroom.
     int m_abrHeadroomPct = ABR_HEADROOM_FACTOR_PCT;
 
-    // --disable-abr: do not change the camera bitrate (see setAbrDisabled).
-    // Read at the top of the bitrate-change lambda; never toggled at runtime.
     bool m_abrDisabled = false;
+    bool m_awaitingAbrInput = false;
 
     unsigned int m_currentBitrate;
     bool m_cameraNeedsSync;

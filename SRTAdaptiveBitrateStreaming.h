@@ -99,6 +99,7 @@ public:
     bool isTrafficActive() const override { return !m_isTrafficIdle; }
 
     bool canResyncCameraBitrate() const;
+    unsigned int currentBitrate() const { return m_currentBitrateKbps; }
 
 public slots:
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);

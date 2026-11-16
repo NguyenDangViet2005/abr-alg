@@ -63,7 +63,17 @@ void XBQoSService::setAbrHeadroomPct(int pct)
 
 void XBQoSService::setAbrDisabled(bool disabled)
 {
+    if (m_abrDisabled == disabled) return;
     m_abrDisabled = disabled;
+    m_awaitingAbrInput = !disabled;
+    m_cameraNeedsSync = !disabled;
+    if (disabled) {
+        if (m_cameraKeepAliveTimer) m_cameraKeepAliveTimer->stop();
+        m_cameraControl->suspendVideoPendingForC2();
+    } else if (m_c2ResumePending && m_c2Guard.ceiling != VIDEO_DISABLED_BITRATE_KBPS) {
+        // A camera held for C2 may need to resume before it can send fresh video QoS.
+        m_cameraControl->setVideoPendingForC2(false);
+    }
 }
 
 void XBQoSService::printStartupBanner()
@@ -75,9 +85,7 @@ void XBQoSService::printStartupBanner()
     // Loud on purpose: a service left in this mode does not adapt, and the
     // symptom (flat camera bitrate) looks like a bug unless the log says so.
     if (m_abrDisabled) {
-        qWarning().noquote() << "[QoS Engine] --disable-abr: camera bitrate is FROZEN. "
-                                "ABR still runs, logs and publishes (shadow mode). "
-                                "Socket restarts on loss/cliff stay enabled.";
+        qInfo() << "[QoS Engine] Observing QoS with camera control disabled.";
     }
 }
 
@@ -110,7 +118,11 @@ void XBQoSService::setupConnections()
             newBitrate = m_currentBitrate;
         }
         // Keep camera bitrate and C2 pending commands in shadow mode.
-        if (m_abrDisabled) {
+        if (m_abrDisabled) return;
+        if (m_awaitingAbrInput) {
+            if (m_c2ResumePending && m_c2Guard.ceiling != VIDEO_DISABLED_BITRATE_KBPS) {
+                m_cameraControl->setVideoPendingForC2(false);
+            }
             return;
         }
         const bool c2Cutoff = m_c2Guard.ceiling == VIDEO_DISABLED_BITRATE_KBPS;
@@ -182,7 +194,8 @@ void XBQoSService::setupConnections()
                                      "ignored (would restart the video socket).";
                 return;
             }
-            if (m_cameraControl && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
+            if (!m_abrDisabled && !m_awaitingAbrInput &&
+                m_cameraControl && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS) {
                 m_cameraControl->requestStreamRefresh(static_cast<int>(m_currentBitrate));
             }
         });
@@ -195,7 +208,8 @@ void XBQoSService::setupConnections()
         const QString detail = QString("source=SRT_C2 state=%1 rtt_ms=%2 retrans_ps=%3 drop_ps=%4 cap_kbps=%5 requested_kbps=%6 commanded_kbps=%7 shadow=%8 camera_sync_pending=%9")
             .arg(m_c2Guard.name()).arg(m_c2Guard.rtt, 0, 'f', 2)
             .arg(m_c2Guard.retransRate, 0, 'f', 2).arg(m_c2Guard.dropRate, 0, 'f', 2)
-            .arg(m_c2Guard.ceiling).arg(m_requestedBitrate).arg(m_currentBitrate).arg(m_abrDisabled ? 1 : 0)
+            .arg(m_c2Guard.ceiling).arg(m_requestedBitrate).arg(m_currentBitrate)
+            .arg(m_abrDisabled || m_awaitingAbrInput ? 1 : 0)
             .arg(m_cameraNeedsSync ? 1 : 0);
         if (sample || m_c2Guard.state == C2BitrateGuard::State::Stale) {
             if (qEnvironmentVariableIntValue("XB_QOS_MONITOR_TELEMETRY") == 1) {
@@ -291,20 +305,11 @@ void XBQoSService::setupConnections()
         // requestStreamRefresh connect above. Lambda stays dumb (already rate-limited
         // at the emit site). Guarded on a live bitrate: no restart while the camera
         // is disabled (PAUSE).
-        //
-        // --disable-abr: the mute in handleBitrateChange leaves m_currentBitrate at
-        // 0, so this guard would go permanently false — a camera collapsing under
-        // --disable-abr could never be rescued. Read the factory's cached last
-        // effective bitrate instead whenever the mute is on: the ABR still computes
-        // proposals (shadow mode), so it still knows what the camera is running.
-        // requestStreamRefresh() changes NO bitrate — it only drops the socket — so
-        // firing it here does not breach the "do not change the bitrate" contract.
         connect(m_abrFactory, &ABRFactory::routerAbrResetRequested, this,
                 [this](const QString &iface, const QString &reason) {
-            const int cameraKbps = m_abrDisabled
-                ? m_abrFactory->lastEffectiveBitrate()
-                : static_cast<int>(m_currentBitrate);
-            if (m_cameraControl && cameraKbps > static_cast<int>(VIDEO_DISABLED_BITRATE_KBPS)) {
+            const int cameraKbps = static_cast<int>(m_currentBitrate);
+            if (!m_abrDisabled && !m_awaitingAbrInput &&
+                m_cameraControl && cameraKbps > static_cast<int>(VIDEO_DISABLED_BITRATE_KBPS)) {
                 qWarning().noquote() << QString("[QoS Engine] ABR reset requested (iface=%1, %2) "
                                                 "— restarting camera video socket")
                                             .arg(iface).arg(reason);
@@ -335,6 +340,14 @@ void XBQoSService::setupConnections()
         if (m_routerNetworkHandler) {
             connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow,
                     m_abrFactory, &ABRFactory::handleRouterRow);
+            connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterRow, this,
+                    [this, handleBitrateChange](const RouterInterfaceStat &row) {
+                if (!m_awaitingAbrInput) return;
+                const int bitrate = m_abrFactory->primaryBitrateForVideoRow(row);
+                if (bitrate < 0) return;
+                m_awaitingAbrInput = false;
+                handleBitrateChange(static_cast<unsigned int>(bitrate));
+            });
             connect(m_routerNetworkHandler, &RouterNetworkHandler::onRouterTick,
                     m_abrFactory, &ABRFactory::handleRouterTick);
         // Radio strength (row 603) → the owning instance's NetworkReference.
@@ -372,9 +385,17 @@ void XBQoSService::setupConnections()
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkUpdated, m_abrFactory, &ABRFactory::handleSiyiData);
             connect(m_siyiHandler, &SiyiLinkHandler::onSiyiLinkLost, m_abrFactory, &ABRFactory::handleSiyiLost);
         }
-        if (m_networkHandler) connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this, [this, canResyncCameraBitrate]() {
+        if (m_networkHandler) connect(m_networkHandler, &NetworkHandler::onQosDataReceived, this,
+                                      [this, canResyncCameraBitrate, handleBitrateChange]() {
+            if (m_protocolMode == ProtocolMode::Srt && m_awaitingAbrInput &&
+                canResyncCameraBitrate()) {
+                m_awaitingAbrInput = false;
+                handleBitrateChange(m_abrFactory->srtAbr()->currentBitrate());
+                return;
+            }
             // Khi nhận lại được gói QoS camera (prefix 9990) mà trước đó lệnh gửi camera bị lỗi
-            if (m_cameraNeedsSync && m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && canResyncCameraBitrate()) {
+            if (!m_abrDisabled && !m_awaitingAbrInput && m_cameraNeedsSync &&
+                m_currentBitrate > VIDEO_DISABLED_BITRATE_KBPS && canResyncCameraBitrate()) {
                 m_cameraNeedsSync = false;
                 qInfo().noquote() << QString("[QoS Engine] Camera stream active, resyncing bitrate to %1 kbps").arg(m_currentBitrate);
                 dispatchToCameraServer(static_cast<int>(m_currentBitrate));
@@ -384,6 +405,7 @@ void XBQoSService::setupConnections()
 
     if (m_cameraControl && m_abrFactory) {
         connect(m_cameraControl, &CameraControl::bitrateReported, this, [this](int requestedKbps, int achievedKbps) {
+            if (m_abrDisabled || m_awaitingAbrInput) return;
             m_cameraNeedsSync = false;
             if (m_currentBitrate > 0) m_c2ResumePending = false;
             if (achievedKbps > 0) {
@@ -401,6 +423,7 @@ void XBQoSService::setupConnections()
             }
         });
         connect(m_cameraControl, &CameraControl::bitrateRejected, this, [this](int requestedKbps, const QString &reason) {
+            if (m_abrDisabled || m_awaitingAbrInput) return;
             qWarning().noquote() << QString(">>> [QoS] ⚠️ Camera REJECTED command %1 kbps: %2 — ABR will resync upon connection <<<")
                                         .arg(requestedKbps)
                                         .arg(reason);
@@ -411,7 +434,7 @@ void XBQoSService::setupConnections()
 
 void XBQoSService::dispatchToCameraServer(int bitrate)
 {
-    if (m_cameraControl) {
+    if (!m_abrDisabled && !m_awaitingAbrInput && m_cameraControl) {
         m_cameraControl->sendAdaptBitrate(bitrate);
     }
 }

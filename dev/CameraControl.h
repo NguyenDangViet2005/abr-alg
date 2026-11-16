@@ -16,6 +16,7 @@ public:
 
     void sendAdaptBitrate(int bitrate);
     void setVideoPendingForC2(bool pending);
+    void suspendVideoPendingForC2();
     void requestStreamRefresh(int currentBitrateKbps);
 
 signals:
@@ -31,6 +32,7 @@ private:
     QTimer m_c2PendingRetry;
     bool m_videoPendingForC2 = false;
     bool m_c2PendingNeedsSync = false;
+    bool m_c2PendingSuspended = false;
 };
 
 #endif // CAMERACONTROL_H
