@@ -51,6 +51,7 @@ public:
     void stop();
 
 private:
+    unsigned int configuredMaxBitrateKbps() const;
     void printStartupBanner();
     void setupConnections();
     void dispatchToCameraServer(int bitrate);
@@ -85,7 +86,7 @@ private:
     QTimer *m_c2GuardTimer = nullptr;
     QNetworkReply *m_serialStatusReply = nullptr;
     bool m_serialConnected = false;
-    C2BitrateGuard m_c2Guard{ABR_DEFAULT_MAX_ABR_BITRATE, 250};
+    C2BitrateGuard m_c2Guard{SRTTuning::DEFAULT_MAX_BITRATE_KBPS, SRTTuning::C2_SURVIVAL_FLOOR_KBPS};
     unsigned int m_requestedBitrate = 0;
     QElapsedTimer m_c2Clock;
     qint64 m_lastValidSiyiMs = -1;

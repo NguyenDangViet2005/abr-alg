@@ -20,6 +20,8 @@ HEADERS += \
     NetworkReference.h \
     RouterInterfaceStat.h \
     SRTAdaptiveBitrateStreaming.h \
+    SRTRecoveryState.h \
+    SRTTuning.h \
     SRTPeerStat.h \
     SiyiLinkStat.h \
     VideoResolutionAdapter.h \

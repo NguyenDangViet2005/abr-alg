@@ -32,7 +32,7 @@ void ABRFactory::startCameraSocketAbr()
 
     if (_srtAdaptiveBitrateStreaming == nullptr) {
         _srtAdaptiveBitrateStreaming = new SRTAdaptiveBitrateStreaming(this);
-        _srtAdaptiveBitrateStreaming->setMaxAbrBitrate(ABR_DEFAULT_MAX_ABR_BITRATE);
+        _srtAdaptiveBitrateStreaming->setMaxAbrBitrate(SRTTuning::DEFAULT_MAX_BITRATE_KBPS);
     }
 
     this->disconnect(this, &ABRFactory::onSrtCameraConnection, _srtAdaptiveBitrateStreaming, &SRTAdaptiveBitrateStreaming::handleQosCameraConnection);

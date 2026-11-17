@@ -42,6 +42,12 @@ void XBQoSService::setRouterAbrInterfaces(const QStringList &ifaces, bool isC2Co
     m_isC2Configured = isC2Configured;
 }
 
+unsigned int XBQoSService::configuredMaxBitrateKbps() const
+{
+    return m_protocolMode == ProtocolMode::Srt
+        ? SRTTuning::DEFAULT_MAX_BITRATE_KBPS : ABR_DEFAULT_MAX_ABR_BITRATE;
+}
+
 void XBQoSService::setProtocolMode(ProtocolMode mode)
 {
     m_protocolMode = mode;
@@ -272,7 +278,7 @@ void XBQoSService::setupConnections()
             m_serialConnected = serial.toBool();
             qInfo() << "[QoS Engine] serialConnected =" << m_serialConnected;
             if (!m_serialConnected) {
-                m_c2Guard = C2BitrateGuard(ABR_DEFAULT_MAX_ABR_BITRATE, 250);
+                m_c2Guard = C2BitrateGuard(configuredMaxBitrateKbps(), SRTTuning::C2_SURVIVAL_FLOOR_KBPS);
             }
             if (m_abrFactory && m_abrFactory->srtAbr()) {
                 m_abrFactory->srtAbr()->setSerialConnected(m_serialConnected);
@@ -441,7 +447,7 @@ void XBQoSService::dispatchToCameraServer(int bitrate)
 
 void XBQoSService::start()
 {
-    m_c2Guard = C2BitrateGuard(ABR_DEFAULT_MAX_ABR_BITRATE, 250);
+    m_c2Guard = C2BitrateGuard(configuredMaxBitrateKbps(), SRTTuning::C2_SURVIVAL_FLOOR_KBPS);
     m_serialConnected = false;
     m_requestedBitrate = 0;
     m_c2ResumePending = false;

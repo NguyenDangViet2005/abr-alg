@@ -7,7 +7,7 @@ private slots:
         QTest::addColumn<double>("bandwidthMbps");
         QTest::addColumn<double>("rttMs");
         QTest::addColumn<uint>("expectedKbps");
-        QTest::newRow("healthy") << 4.0 << 7.0 << static_cast<uint>(ABR_STARTUP_BITRATE_KBPS);
+        QTest::newRow("healthy") << 4.0 << 7.0 << static_cast<uint>(SRTTuning::STARTUP_BITRATE_KBPS);
         QTest::newRow("bandwidth-limited") << 0.7 << 7.0 << 600u;
         QTest::newRow("missing-bandwidth") << 0.0 << 7.0 << 100u;
         QTest::newRow("high-rtt") << 4.0 << 100.0 << 100u;
@@ -94,7 +94,7 @@ private slots:
         SRTPeerStat peer;
         peer.msRTT = 7;
         peer.mbpsBandwidth = 5;
-        peer.mbpsSendRate = 0.25;
+        peer.mbpsSendRate = 1.0; // Confirm that the startup target is actually carried.
 
         for (int i = 0; i < 25 && changes.size() < 2; ++i) {
             abr.handleSiyiLinkStat(rf);
@@ -103,9 +103,9 @@ private slots:
             if (changes.size() < 2) QTest::qWait(200);
         }
         QCOMPARE(changes.size(), 2);
-        QCOMPARE(changes.at(0).at(0).toUInt(), static_cast<uint>(ABR_STARTUP_BITRATE_KBPS));
+        QCOMPARE(changes.at(0).at(0).toUInt(), static_cast<uint>(SRTTuning::STARTUP_BITRATE_KBPS));
         QCOMPARE(changes.at(1).at(0).toUInt(),
-                 ABR_STARTUP_BITRATE_KBPS + abr.RF_RECOVERY_MAX_STEP_KBPS);
+                 SRTTuning::STARTUP_BITRATE_KBPS + abr.RF_RECOVERY_MAX_STEP_KBPS);
     }
 
     void sparseCameraQosCanStillIncreaseBitrate() {
@@ -133,8 +133,9 @@ private slots:
             }
         }
         QCOMPARE(changes.size(), 2);
-        QCOMPARE(changes.last().at(0).toUInt(),
-                 ABR_STARTUP_BITRATE_KBPS + abr.RF_RECOVERY_MAX_STEP_KBPS);
+        // Three sparse samples permit a normal step, but are not enough to
+        // finish the five-sample RTT baseline required by fast recovery.
+        QCOMPARE(changes.last().at(0).toUInt(), SRTTuning::STARTUP_BITRATE_KBPS + 200u);
     }
 
     void strongerRfAcceleratesOnlyWithCleanQos_data() {
@@ -143,7 +144,7 @@ private slots:
         QTest::addColumn<uint>("expectedFirstIncrease");
         QTest::newRow("healthy") << 5.0 << false
                                 << 250u + SRTAdaptiveBitrateStreaming::RF_RECOVERY_MAX_STEP_KBPS;
-        QTest::newRow("bandwidth-limited") << 1.0 << false << 500u;
+        QTest::newRow("bandwidth-limited") << 1.0 << false << 550u;
         QTest::newRow("loss-after-rf-recovery") << 5.0 << true << 450u;
     }
 

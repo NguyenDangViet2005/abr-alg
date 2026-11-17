@@ -2,8 +2,9 @@
 #define ABRCONFIGS_H
 
 // Hạ tầng (infrastructure) cho XBQoSService: port / host / path / debug.
-// Các tham số THUẬT TOÁN ABR (ngưỡng, hệ số, tick) nằm ở ABRTuning.h.
+// Router tuning: ABRTuning.h. SRT tuning: SRTTuning.h.
 #include "ABRTuning.h"
+#include "SRTTuning.h"
 
 // ── SRT QoS UDP listener ──
 // UDP port for receiving QoS connection stats from an external XBSRTFactory.
@@ -31,14 +32,7 @@
 #define CAMERA_VIDEO_RESTART_PATH "/connections/video/restart"
 
 // ── ABR aliases / SRT plumbing ──
-// Router-ABR TUNING lives in ABRTuning.h (included above). These four are NOT
-// router-ABR tunables: they are shared by the SRT engine + the service. Kept here
-// so no SRT/dev code has to change.
-//
-// ABR_DEFAULT_MAX_ABR_BITRATE is now an ALIAS of the single source
-// ABR_MAX_BITRATE_KBPS (ABRTuning.h) — the ceiling SHARED by both ABR engines
-// (SRT/camera socket + router telemetry), so the two cannot drift. (Merging the
-// former duplicate 2000 here.)
+// Router default only. SRT has an independent ceiling in SRTTuning.h.
 #define ABR_DEFAULT_MAX_ABR_BITRATE           ABR_MAX_BITRATE_KBPS
 #define ABR_DEFAULT_ENABLE_MULTILINK          true
 #define ABR_DEFAULT_C2_STRICT_VIDEO_CUTOFF    false
@@ -59,29 +53,5 @@
 #define SIYI_LOCAL_DEFAULT_PORT               19857
 #define SIYI_POLL_INTERVAL_MS                 500
 #define SIYI_LINK_TIMEOUT_MS                  2500
-
-// ── Bảng môi trường RF động (Duyệt động theo mảng duy nhất) ──
-struct RfEnvironment {
-    int minRssi;              // Ngưỡng RSSI (dBm)
-    unsigned int ceilingKbps; // Trần bitrate cố định (kbps)
-    const char *name;         // Tên môi trường
-};
-
-// RSSI ceilings are conservative starting points; measure on the actual link.
-// Entries must remain ordered strongest to weakest with distinct ceilings.
-static const RfEnvironment RF_ENVIRONMENTS[] = {
-    { -62, ABR_DEFAULT_MAX_ABR_BITRATE, "Ultra" }, // >= -62 dBm
-    { -69, 2500, "Strong" },                       // -69..-63 dBm
-    { -74, 1500, "Mid-Range Weak" },              // -74..-70
-    { -77,  800, "Far-Range" },                   // -77..-75
-    { -79,  400, "Weak-Link" },                   // -79..-78
-    { -86,  250, "Edge-Link" },                   // -86..-80
-    { -99,  150, "Critical" }                     // <= -87
-};
-
-static const int RF_ENVIRONMENT_COUNT = sizeof(RF_ENVIRONMENTS) / sizeof(RF_ENVIRONMENTS[0]);
-
-// Hysteresis: hạ vùng khi dưới biên; chỉ nâng vùng khi RSSI >= biên + 2 dBm.
-#define RF_ENV_HYSTERESIS_DBM                 2
 
 #endif // ABRCONFIGS_H
