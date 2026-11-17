@@ -339,7 +339,7 @@ private slots:
     {
         SRTAdaptiveBitrateStreaming abr;
         auto peer = prepare(abr);
-        abr.m_lastBitrateIncrTime = now() - 500;
+        abr.m_lastBitrateIncrTime = now() - 100;
         sample(abr, peer);
         QCOMPARE(abr.currentBitrate(), 1000u);
         abr.m_lastBitrateIncrTime = now() - 1100;
@@ -347,7 +347,7 @@ private slots:
         QCOMPARE(abr.currentBitrate(), 1800u);
         SRTAdaptiveBitrateStreaming nearCap;
         auto nearPeer = prepare(nearCap);
-        nearCap.m_lastCongestedBitrate = 1300;
+        nearCap.m_lastCongestedBitrate = 1150;
         nearCap.m_lastBitrateIncrTime = now() - 1100;
         sample(nearCap, nearPeer);
         QCOMPARE(nearCap.currentBitrate(), 1000u); // Near target keeps 2 s cadence.
