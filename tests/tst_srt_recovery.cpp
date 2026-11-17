@@ -53,6 +53,30 @@ class SrtRecoveryTest : public QObject
     }
 
 private slots:
+    void reportedCeilingTracksDecisionLimits()
+    {
+        SRTAdaptiveBitrateStreaming abr;
+        auto peer = prepare(abr);
+        // Strong RF must not hide the bandwidth cap computed by real QoS processing.
+        abr.m_bwHistory = {1.0};
+        peer.mbpsBandwidth = 1.0;
+        sample(abr, peer);
+        const auto bandwidthCap = abr.calculateNetworkPartitionCeiling(
+            1.0, 0.0, SRTAdaptiveBitrateStreaming::CongestionState::Clear);
+        QCOMPARE(abr.effectiveAbrCeiling(6000), bandwidthCap);
+        QVERIFY(bandwidthCap < 6000u);
+        abr.m_lastCongestedBitrate = 400;
+        QCOMPARE(abr.effectiveAbrCeiling(6000), 400u);
+        // A bounded probe raises the learned ceiling; rollback restores it immediately.
+        abr.m_lastCongestedBitrate = 450;
+        QCOMPARE(abr.effectiveAbrCeiling(6000), 450u);
+        abr.m_lastCongestedBitrate = 400;
+        QCOMPARE(abr.effectiveAbrCeiling(6000), 400u);
+        QCOMPARE(abr.effectiveAbrCeiling(50), 50u);
+        abr.reset(0);
+        QCOMPARE(abr.m_bandwidthCapKbps, abr.m_maxBitrateKbps);
+    }
+
     void factoryUsesSrtCeiling()
     {
         ABRFactory factory;

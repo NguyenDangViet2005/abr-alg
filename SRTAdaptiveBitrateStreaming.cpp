@@ -89,6 +89,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_cameraPeerSet.clear();
     m_rttHistory.clear();
     m_bwHistory.clear();
+    m_bandwidthCapKbps = m_maxBitrateKbps;
     m_rttWarmupHistory.clear();
     m_siyiRssiHistory.clear();
 
@@ -186,6 +187,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_cameraPeerSet.clear();
     m_rttHistory.clear();
     m_bwHistory.clear();
+    m_bandwidthCapKbps = m_maxBitrateKbps;
     m_rttWarmupHistory.clear();
 
     m_rttAvg = 0.0;
@@ -488,13 +490,12 @@ void SRTAdaptiveBitrateStreaming::onHeartbeatTimeout()
             .arg(rate(m_c2Retransmits))
             .arg(rate(m_c2Unacked))
         : QString();
-    unsigned int abrCeiling = m_maxBitrateKbps;
-    if (m_hasSiyiTelemetry && m_siyiStat.isAlive) {
-        abrCeiling = qMin(abrCeiling, m_currentEnvCeiling);
-    }
-    if (m_lastCongestedBitrate > 0) {
-        abrCeiling = qMin(abrCeiling, m_lastCongestedBitrate);
-    }
+    unsigned int abrCeiling = effectiveAbrCeiling(m_maxBitrateKbps);
+    if (!m_hasSiyiTelemetry)
+        abrCeiling = qMin(abrCeiling, m_currentBitrateKbps > 0 ? m_currentBitrateKbps : 100u);
+    if (m_isExplicitC2Only)
+        abrCeiling = qMin(abrCeiling, m_isStrictVideoCutoff
+            ? VIDEO_DISABLED_BITRATE_KBPS : MIN_ACTIVE_VIDEO_BITRATE_KBPS);
     qInfo().noquote() << QString("[%1] RTT: %2ms, BW: %3 Mbps, Loss: %4%, SIYI: %5 | "
                                  "serialConnected: %6, ABR ceiling: %7 kbps, %8State: %9 --> Video: %10 | %11 kbps")
         .arg(QDateTime::currentDateTime().toString("MM-dd HH:mm:ss"))
@@ -714,6 +715,16 @@ void SRTAdaptiveBitrateStreaming::handleQosCameraConnection(const QVector<SRTPee
                   totalDropSnd, totalDropRcv, totalRetrans);
 }
 
+unsigned int SRTAdaptiveBitrateStreaming::effectiveAbrCeiling(unsigned int profileCeiling) const
+{
+    unsigned int ceiling = qMin(profileCeiling, m_bandwidthCapKbps);
+    if (m_lastCongestedBitrate > 0) ceiling = qMin(ceiling, m_lastCongestedBitrate);
+    if (m_hasSiyiTelemetry && m_siyiStat.isAlive && m_currentEnvCeiling > 0)
+        ceiling = qMin(ceiling, m_currentEnvCeiling);
+    ceiling = (ceiling / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
+    return qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, ceiling, m_maxBitrateKbps);
+}
+
 unsigned int SRTAdaptiveBitrateStreaming::calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const
 {
     Q_UNUSED(lossPercent);
@@ -809,6 +820,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
         m_rttHistory.clear();
         m_bwHistory.clear();
+        m_bandwidthCapKbps = m_maxBitrateKbps;
         m_rttWarmupHistory.clear();
 
         m_hasLastLoss = false;
@@ -1141,6 +1153,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     bandwidthCapKbps = (bandwidthCapKbps / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
     bandwidthCapKbps = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, bandwidthCapKbps, m_maxBitrateKbps);
 
+    m_bandwidthCapKbps = bandwidthCapKbps;
+
     const bool clearAboveBandwidthCap = state == CongestionState::Clear
         && rawBandwidthMbps > 0.1 && rawBandwidthMbps < 150.0
         && rawBandwidthMbps * 1000.0 * BW_UTILIZATION_RATIO < m_currentBitrateKbps
@@ -1347,15 +1361,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
             // A learned ceiling can only be lifted by the single bounded probe
             // above, or an RF upgrade. Recovery memory cannot bypass it.
-            unsigned int effectiveMax = qMin(targetProfileBitrate, bandwidthCapKbps);
-            if (m_lastCongestedBitrate > 0) {
-                effectiveMax = qMin(effectiveMax, m_lastCongestedBitrate);
-            }
-            if (m_hasSiyiTelemetry && m_siyiStat.isAlive && m_currentEnvCeiling > 0) {
-                effectiveMax = qMin(effectiveMax, m_currentEnvCeiling);
-            }
-            effectiveMax = (effectiveMax / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
-            effectiveMax = qBound(MIN_ACTIVE_VIDEO_BITRATE_KBPS, effectiveMax, m_maxBitrateKbps);
+            const unsigned int effectiveMax = effectiveAbrCeiling(targetProfileBitrate);
 
             if (m_currentBitrateKbps >= effectiveMax) {
                 m_rfRecoveryRampActive = false;

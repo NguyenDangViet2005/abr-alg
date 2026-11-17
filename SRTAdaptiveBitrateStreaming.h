@@ -108,6 +108,10 @@ private:
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
     unsigned int calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const;
 
+    unsigned int effectiveAbrCeiling(unsigned int profileCeiling) const;
+    // Exact bandwidth/goodput cap from the latest QoS decision, before learned limits.
+    unsigned int m_bandwidthCapKbps = DEFAULT_MAX_BITRATE_KBPS;
+
     // SIYI RF Environment helper
     const RfEnvironment& getRfEnvironment(double rssi) const;
 
