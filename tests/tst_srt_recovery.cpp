@@ -332,9 +332,21 @@ private slots:
         SRTAdaptiveBitrateStreaming abr;
         auto peer = prepare(abr);
         abr.m_previousRawRecoveryRtt = 7;
-        peer.msRTT = 11;
+        peer.msRTT = 16;
         sample(abr, peer);
         QCOMPARE(abr.currentBitrate(), 1000u);
+    }
+
+    void lowRawRttRiseStillAllowsIncrease()
+    {
+        SRTAdaptiveBitrateStreaming abr;
+        auto peer = prepare(abr);
+        abr.m_rttMin = 5.0;
+        abr.m_previousRawRecoveryRtt = 7.0;
+        peer.msRTT = 13.68;
+        sample(abr, peer);
+        QVERIFY(abr.currentBitrate() > 1000u);
+        QCOMPARE(abr.m_lastCongestedBitrate, 0u);
     }
 
     void unconfirmedIncreaseRollsBackOnLoss()
@@ -376,6 +388,26 @@ private slots:
         QCOMPARE(probing.m_probePreviousCeiling, 0u);
     }
 
+    void restoredRfCanProbeLearnedCeilingBeforeNormalRetention()
+    {
+        SRTAdaptiveBitrateStreaming abr;
+        auto peer = prepare(abr);
+        abr.m_lastCongestedBitrate = 1000;
+        abr.handleSiyiLinkLost();
+        abr.handleSiyiLinkStat(rf());
+        sample(abr, peer);
+        QVERIFY(abr.m_rfRecoveryRampActive);
+        QCOMPARE(abr.m_lastCongestedBitrate, 1000u);
+
+        ready(abr);
+        abr.m_rttMinSeeded = true;
+        abr.m_probeHealthySince = now() - 2000;
+        abr.m_lastProbeTime = now() - 2000;
+        sample(abr, peer);
+        QCOMPARE(abr.m_probePreviousCeiling, 1000u);
+        QCOMPARE(abr.currentBitrate(), 1400u);
+    }
+
     void probeLiftsOnlyOneStepThenRollsBackAndBacksOff()
     {
         SRTAdaptiveBitrateStreaming abr;
@@ -384,15 +416,50 @@ private slots:
         abr.m_probeHealthySince = now() - 6000;
         abr.m_lastProbeTime = now() - 6000;
         sample(abr, peer);
-        QCOMPARE(abr.currentBitrate(), 1500u);
+        QCOMPARE(abr.currentBitrate(), 1400u);
         QCOMPARE(abr.m_probePreviousCeiling, 1000u);
-        QCOMPARE(abr.m_lastCongestedBitrate, 1500u);
+        QCOMPARE(abr.m_lastCongestedBitrate, 1400u);
         ++peer.pktSndLossTotal;
         sample(abr, peer);
         QVERIFY(abr.currentBitrate() <= 1000u);
         QCOMPARE(abr.m_lastCongestedBitrate, 1000u);
         QCOMPARE(abr.m_probeRetryDelayMs, 10000);
         QCOMPARE(abr.m_probePreviousCeiling, 0u);
+    }
+
+    void rttCancelledProbeWaitsAndRetriesWithSmallerStep()
+    {
+        SRTAdaptiveBitrateStreaming abr;
+        auto peer = prepare(abr);
+        abr.m_currentBitrateKbps = 3800;
+        abr.m_lastCongestedBitrate = 3800;
+        abr.m_rfRecoveryRampActive = false;
+        peer.mbpsBandwidth = 7;
+        peer.mbpsSendRate = 4;
+        abr.m_probeHealthySince = now() - 6000;
+        abr.m_lastProbeTime = now() - 6000;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 4200u);
+
+        abr.m_rttMin = 10;
+        abr.m_previousRawRecoveryRtt = 13;
+        peer.msRTT = 17;
+        peer.mbpsSendRate = 4.4;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 3800u);
+        QCOMPARE(abr.m_probeRetryDelayMs, 10000);
+
+        peer.msRTT = 7;
+        peer.mbpsSendRate = 4;
+        ready(abr);
+        abr.m_probeHealthySince = now() - 6000;
+        abr.m_lastProbeTime = now() - 6000;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 3800u);
+
+        abr.m_lastProbeTime = now() - 11000;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 4000u);
     }
 
     void probeConfirmsOnlyAfterCarryingNewRate()
@@ -403,20 +470,20 @@ private slots:
         abr.m_probeHealthySince = now() - 6000;
         abr.m_lastProbeTime = now() - 6000;
         sample(abr, peer);
-        abr.m_recovery.bitrateChanged(now() - 3000, 1000, 1500);
+        abr.m_recovery.bitrateChanged(now() - 3000, 1000, 1400);
         abr.m_probeStartedAt = now() - 3000;
         ready(abr);
         peer.mbpsSendRate = 0.5;
         sample(abr, peer);
         QCOMPARE(abr.m_probePreviousCeiling, 1000u);
-        peer.mbpsSendRate = 1.5;
+        peer.mbpsSendRate = 1.4;
         sample(abr, peer);
         QCOMPARE(abr.m_probePreviousCeiling, 1000u);
         // Only time spent actually carrying the probe counts as confirmation.
         abr.m_probeStartedAt = now() - 2100;
         sample(abr, peer);
         QCOMPARE(abr.m_probePreviousCeiling, 0u);
-        QCOMPARE(abr.m_lastCongestedBitrate, 1500u);
+        QCOMPARE(abr.m_lastCongestedBitrate, 1400u);
     }
 
     void resetAndPeerChangeInvalidateRecoveryMemory()
@@ -487,8 +554,18 @@ private slots:
         QCOMPARE(abr.m_lastCongestedBitrate, 350u);
     }
 
+    void learnedCeilingRequiresIncreasedLoadAndRoundsDown_data()
+    {
+        QTest::addColumn<int>("failures");
+        QTest::addColumn<unsigned int>("learnedCeiling");
+        QTest::newRow("isolated-loss") << 1 << 0u;
+        QTest::newRow("multiple-failures") << 2 << 1250u;
+    }
+
     void learnedCeilingRequiresIncreasedLoadAndRoundsDown()
     {
+        QFETCH(int, failures);
+        QFETCH(unsigned int, learnedCeiling);
         SRTAdaptiveBitrateStreaming abr;
         auto peer = prepare(abr);
         abr.m_cameraQosRecoverySamplesRemaining = 0;
@@ -506,9 +583,9 @@ private slots:
         QCOMPARE(abr.m_lastCongestedBitrate, 0u);
 
         peer.mbpsSendRate = 1.5;
-        ++peer.pktSndLossTotal;
+        peer.pktSndLossTotal += failures;
         sample(abr, peer);
-        QCOMPARE(abr.m_lastCongestedBitrate, 1250u);
+        QCOMPARE(abr.m_lastCongestedBitrate, learnedCeiling);
         QVERIFY(abr.currentBitrate() <= 1250u);
     }
 
@@ -570,11 +647,13 @@ private slots:
         abr.m_probeRetryDelayMs = 10000;
         sample(abr, peer);
         QCOMPARE(abr.currentBitrate(), 1000u);
-        abr.m_lastProbeTime = now() - 11000;
+        const auto lastProbeTime = now() - 11000;
+        abr.m_lastProbeTime = lastProbeTime;
         abr.m_previousRawRecoveryRtt = 7;
-        peer.msRTT = 11;
+        peer.msRTT = 16;
         sample(abr, peer);
         QCOMPARE(abr.m_probeHealthySince, 0);
+        QCOMPARE(abr.m_lastProbeTime, lastProbeTime);
         QCOMPARE(abr.currentBitrate(), 1000u);
         peer.msRTT = 7;
         sample(abr, peer);

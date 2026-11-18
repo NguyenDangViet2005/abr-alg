@@ -33,7 +33,8 @@ inline constexpr double BW_UTILIZATION_RATIO = 0.90;
 
 // Learned-ceiling probes.
 inline constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS = 100;
-inline constexpr unsigned int FAILURE_MEMORY_PROBE_MAX_STEP_KBPS = 800;
+inline constexpr unsigned int FAILURE_MEMORY_PROBE_MAX_STEP_KBPS = 400;
+inline constexpr unsigned int FAILURE_MEMORY_PROBE_RETRY_MAX_STEP_KBPS = 200;
 inline constexpr std::int64_t FAILURE_MEMORY_PROBE_INTERVAL_MS = 5000;
 inline constexpr std::int64_t FAILURE_MEMORY_RETENTION_MS = 5000;
 inline constexpr std::int64_t FAILURE_MEMORY_PROBE_CONFIRM_MS = 2000;
@@ -70,6 +71,7 @@ inline constexpr double RECOVERY_TARGET_LOAD_FACTOR = 0.80;
 inline constexpr double RECOVERY_INCREASE_PROGRESS_FACTOR = 0.50;
 inline constexpr unsigned int C2_SURVIVAL_FLOOR_KBPS = 250;
 // Recovery signal gates and discovery steps.
+inline constexpr double RECOVERY_LOW_RTT_MS = 15.0;
 inline constexpr double RECOVERY_MAX_RTT_RISE_MS = 2.0;
 inline constexpr double RECOVERY_MAX_RAW_RTT_INFLATION_MS = 8.0;
 inline constexpr double RECOVERY_MAX_SMOOTHED_RTT_INFLATION_MS = 3.0;
