@@ -95,7 +95,8 @@ public slots:
     void handleSiyiLinkStat(const SiyiLinkStat &stat);
     void handleSiyiLinkLost();
     void onHeartbeatTimeout();
-    void handleCameraReportedBitrate(int achievedKbps);
+    void handleCameraReportedBitrate(int achievedKbps, int requestedKbps = 0);
+    void setCameraControlEnabled(bool enabled);
 
 private:
     friend class SrtRecoveryTest;
@@ -207,6 +208,15 @@ private:
     int m_cameraQosRecoverySamplesRemaining = 0;
     qint64 m_lastCollapseLogTime;
     unsigned int m_lastAchievedBitrateKbps;
+    bool m_cameraControlEnabled = true;
+    qint64 m_appliedIncreaseSince = 0;
+    unsigned int m_appliedPreviousKbps = 0;
+    unsigned int m_appliedTargetKbps = 0;
+    bool m_appliedIncreaseCarriedLoad = false;
+    unsigned int m_lastAppliedRequestKbps = 0;
+    qint64 m_stalledSinceMs = 0;
+    int m_risingLossSamples = 0;
+    qint64 m_lastDecisionLogMs = 0;
 
     // SIYI HM30 RF Telemetry & Environment State
     SiyiLinkStat m_siyiStat;

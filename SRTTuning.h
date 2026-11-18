@@ -6,6 +6,9 @@
 // SRT algorithm tuning (compile-time; rebuild after editing). Router tuning
 // remains in ABRTuning.h. Units are included in names: kbps, ms, percent.
 namespace SRTTuning {
+inline constexpr std::int64_t STREAM_STALL_CONFIRM_MS = 3000;
+inline constexpr std::int64_t STREAM_RESTART_INTERVAL_MS = 30000;
+inline constexpr std::int64_t INCREASE_EVALUATION_MS = 5000;
 // Startup stays conservative even when the quality ceiling is raised.
 inline constexpr unsigned int STARTUP_BITRATE_KBPS = 1000;
 inline constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS = 0;
@@ -30,9 +33,11 @@ inline constexpr double BW_UTILIZATION_RATIO = 0.90;
 
 // Learned-ceiling probes.
 inline constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS = 100;
+inline constexpr unsigned int FAILURE_MEMORY_PROBE_MAX_STEP_KBPS = 800;
 inline constexpr std::int64_t FAILURE_MEMORY_PROBE_INTERVAL_MS = 5000;
 inline constexpr std::int64_t FAILURE_MEMORY_RETENTION_MS = 5000;
 inline constexpr std::int64_t FAILURE_MEMORY_PROBE_CONFIRM_MS = 2000;
+inline constexpr std::int64_t FAILURE_MEMORY_PROBE_TIMEOUT_MS = 10000;
 
 // RTT baseline and keyframes.
 inline constexpr int RTT_BASELINE_WARMUP_SAMPLES = 5;
@@ -58,6 +63,7 @@ inline constexpr std::int64_t TRANSIENT_OCCLUSION_DEBOUNCE_MS = 1000;
 
 // Recovery feedback and recent demonstrated-capacity memory.
 inline constexpr std::int64_t RECOVERY_STABLE_DURATION_MS = 1500;
+inline constexpr std::int64_t RECOVERY_FEEDBACK_TIMEOUT_MS = 5000;
 inline constexpr std::int64_t RECOVERY_MEMORY_LIFETIME_MS = 30000;
 inline constexpr unsigned int RF_RECOVERY_MIN_STEP_KBPS = 200;
 inline constexpr double RECOVERY_TARGET_LOAD_FACTOR = 0.80;
@@ -88,9 +94,9 @@ struct RfEnvironment {
 // RSSI ceilings are conservative starting points; measure on the actual link.
 // Entries must remain ordered strongest to weakest with distinct ceilings.
 static const RfEnvironment RF_ENVIRONMENTS[] = {
-    { -62, SRTTuning::DEFAULT_MAX_BITRATE_KBPS, "Ultra" }, // >= -62 dBm
-    { -69, 2500, "Strong" },                       // -69..-63 dBm
-    { -74, 1500, "Mid-Range Weak" },              // -74..-70
+    { -62, 5000, "Ultra" },                       // >= -62 dBm
+    { -69, 3000, "Strong" },                       // -69..-63 dBm
+    { -74, 2000, "Mid-Range Weak" },              // -74..-70
     { -77,  800, "Far-Range" },                   // -77..-75
     { -79,  400, "Weak-Link" },                   // -79..-78
     { -86,  250, "Edge-Link" },                   // -86..-80

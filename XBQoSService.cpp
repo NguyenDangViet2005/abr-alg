@@ -71,6 +71,8 @@ void XBQoSService::setAbrDisabled(bool disabled)
 {
     if (m_abrDisabled == disabled) return;
     m_abrDisabled = disabled;
+    if (m_abrFactory && m_abrFactory->srtAbr())
+        m_abrFactory->srtAbr()->setCameraControlEnabled(!disabled);
     m_awaitingAbrInput = !disabled;
     m_cameraNeedsSync = !disabled;
     if (disabled) {
@@ -420,7 +422,7 @@ void XBQoSService::setupConnections()
                                                 .arg(achievedKbps).arg(requestedKbps);
                 }
                 if (m_protocolMode == ProtocolMode::Srt && m_abrFactory->srtAbr()) {
-                    m_abrFactory->srtAbr()->handleCameraReportedBitrate(achievedKbps);
+                    m_abrFactory->srtAbr()->handleCameraReportedBitrate(achievedKbps, requestedKbps);
                 } else {
                     // TCP/router mode closes the loop through the primary
                     // interface instance that currently owns the camera.
@@ -462,6 +464,7 @@ void XBQoSService::start()
     m_abrFactory->setHeadroomPct(m_abrHeadroomPct);
     if (m_protocolMode == ProtocolMode::Srt) {
         m_abrFactory->startCameraSocketAbr();
+        m_abrFactory->srtAbr()->setCameraControlEnabled(!m_abrDisabled);
     }
 
     // Per-interface router ABR. Declared list comes from main.cpp (see

@@ -7,6 +7,7 @@
 #include <QPointer>
 #include <QNetworkReply>
 #include <QTimer>
+#include <QElapsedTimer>
 
 class CameraControl : public QObject
 {
@@ -33,6 +34,7 @@ private:
     bool m_videoPendingForC2 = false;
     bool m_c2PendingNeedsSync = false;
     bool m_c2PendingSuspended = false;
+    QElapsedTimer m_lastStreamRestart;
 };
 
 #endif // CAMERACONTROL_H

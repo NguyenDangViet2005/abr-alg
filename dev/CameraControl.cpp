@@ -173,6 +173,11 @@ void CameraControl::syncVideoPendingForC2()
 
 void CameraControl::requestStreamRefresh(int currentBitrateKbps)
 {
+    if (m_lastStreamRestart.isValid() && m_lastStreamRestart.elapsed() < 30000) {
+        qInfo() << "[Video restart] suppressed reason=cooldown";
+        return;
+    }
+    m_lastStreamRestart.start();
     // Phase 12 (PORT DEVIATION): a stream "refresh" is now a HARD TCP socket
     // restart, not an adapt-bitrate re-apply. Restarting the socket aborts the old
     // connection (RST) and discards its retransmit queue — the only userspace fix

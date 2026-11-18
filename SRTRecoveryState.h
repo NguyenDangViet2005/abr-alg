@@ -83,6 +83,18 @@ public:
     }
 
     bool awaitingFeedback() const { return m_pendingTarget > 0; }
+    bool feedbackTimedOut(std::int64_t now) const
+    {
+        return awaitingFeedback() && now - m_pendingSince >= SRTTuning::RECOVERY_FEEDBACK_TIMEOUT_MS;
+    }
+
+    void clearPending()
+    {
+        m_pendingTarget = 0;
+        m_pendingPrevious = 0;
+        m_candidate = 0;
+        m_candidateSince = 0;
+    }
     unsigned int rollbackTarget() const { return m_pendingPrevious; }
 
 private:
