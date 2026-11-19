@@ -89,6 +89,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_lastAchievedBitrateKbps = 0;
     m_stalledSinceMs = 0;
     m_risingLossSamples = 0;
+    m_previousRecoverySampleHadLoss = false;
     m_previousRawRecoveryRtt = 0.0;
     m_cameraPeerSet.clear();
     m_rttHistory.clear();
@@ -104,6 +105,7 @@ void SRTAdaptiveBitrateStreaming::start()
     m_currentEnvName = RF_ENVIRONMENTS[0].name;
     m_hasSiyiTelemetry = false;
     m_rfRecoveryRampActive = false;
+    m_rfUpgradeFirstStepPending = false;
 
     m_isVideoEnabled = true;
     m_isExplicitC2Only = false;
@@ -191,6 +193,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_lastAchievedBitrateKbps = 0;
     m_stalledSinceMs = 0;
     m_risingLossSamples = 0;
+    m_previousRecoverySampleHadLoss = false;
     m_previousRawRecoveryRtt = 0.0;
     m_cameraPeerSet.clear();
     m_rttHistory.clear();
@@ -234,6 +237,7 @@ void SRTAdaptiveBitrateStreaming::reset(int bitrateKbps)
     m_consecutiveCongestedSamples = 0;
     m_clearBandwidthOverCapSamples = 0;
     m_rfRecoveryRampActive = false;
+    m_rfUpgradeFirstStepPending = false;
     m_lastCameraQosTime = 0;
     m_lastActiveTrafficTime = 0;
     m_isTrafficIdle = true;
@@ -534,6 +538,7 @@ void SRTAdaptiveBitrateStreaming::setCameraControlEnabled(bool enabled)
     m_lastAchievedBitrateKbps = 0;
     m_stalledSinceMs = 0;
     m_risingLossSamples = 0;
+    m_previousRecoverySampleHadLoss = false;
     m_previousStableBitrate = 0;
     m_wasCongested = false;
 }
@@ -629,6 +634,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
     // Valid RF returning can accelerate recovery even within the same tier.
     if (recoveringRf && (!firstRfSample || env.ceilingKbps == RF_ENVIRONMENTS[0].ceilingKbps)) {
         m_rfRecoveryRampActive = true;
+        m_rfUpgradeFirstStepPending = false;
     }
 
     // Reconnecting in the same region must preserve the learned safe ceiling.
@@ -643,6 +649,7 @@ void SRTAdaptiveBitrateStreaming::handleSiyiLinkStat(const SiyiLinkStat &stat)
         unsigned int oldCeiling = m_currentEnvCeiling;
         m_currentEnvCeiling = env.ceilingKbps;
         m_currentEnvName = env.name;
+        m_rfUpgradeFirstStepPending = m_currentEnvCeiling > oldCeiling;
 
         if (m_currentEnvCeiling > oldCeiling) {
             // Môi trường mạng MẠNH HƠN (bay lại gần GCS): Nâng trần ngay lập tức, không đợi 30s dò dẫm!
@@ -869,6 +876,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
     const bool isStreamRecovering = m_needRecoveryRefresh || cameraQosInterrupted;
     if (isStreamRecovering) {
+        m_previousRecoverySampleHadLoss = false;
         m_recovery.clearPending();
         m_appliedIncreaseSince = 0;
         m_lastAchievedBitrateKbps = 0;
@@ -1045,6 +1053,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
     }
 
     if (m_isTrafficIdle) {
+        m_previousRecoverySampleHadLoss = false;
         m_recovery = SRTRecoveryState();
         m_appliedIncreaseSince = 0;
         m_lastAchievedBitrateKbps = 0;
@@ -1140,9 +1149,11 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
 
     // Only advancing packet counters can acknowledge a bitrate command.
     // An old send-rate field repeated by the publisher is not fresh feedback.
-    const bool freshFeedback = deltaSent > 0 && !sentReset && !lossReset &&
+    const bool feedbackCountersValid = !sentReset && !lossReset &&
         !dropSndReset && !dropRcvReset && !retransReset && !isStreamRecovering;
+    const bool freshFeedback = feedbackCountersValid && deltaSent > 0;
     if (sentReset || lossReset || dropSndReset || dropRcvReset || retransReset) {
+        m_previousRecoverySampleHadLoss = false;
         m_recovery = SRTRecoveryState();
         m_appliedIncreaseSince = 0;
         m_lastAchievedBitrateKbps = 0;
@@ -1162,23 +1173,29 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_rttMin + SRTTuning::RECOVERY_MAX_RAW_RTT_INFLATION_MS);
     const bool rawRttRising = rawRtt > SRTTuning::RECOVERY_LOW_RTT_MS && m_previousRawRecoveryRtt > 0.0 &&
         rawRtt > m_previousRawRecoveryRtt + SRTTuning::RECOVERY_MAX_RTT_RISE_MS;
-    const bool feedbackHealthy = freshFeedback &&
-        state == CongestionState::Clear && deltaFailures == 0 && m_lossPercentAvg == 0.0 &&
+    const bool congestionEvidence = state != CongestionState::Clear ||
+        (freshFeedback && rawRttInflated);
+    const bool repeatedLoss = freshFeedback && deltaFailures > 0 && m_previousRecoverySampleHadLoss;
+    if (freshFeedback) m_previousRecoverySampleHadLoss = deltaFailures > 0;
+    const bool failedIncrease = congestionEvidence || hasLatencyDrops || repeatedLoss ||
+        instantLossPercent > SRTTuning::RECOVERY_TOLERATED_LOSS_PERCENT;
+    const bool lossWithinBudget = !failedIncrease &&
+        m_lossPercentAvg <= SRTTuning::RECOVERY_TOLERATED_LOSS_PERCENT;
+    const bool recoveryLinkHealthy = lossWithinBudget &&
         m_hasSiyiTelemetry && c2Healthy && !m_isExplicitC2Only && !m_isVideoCollapsed &&
         rawRtt > 0.0 && !rawRttInflated && !rawRttRising && (lowRecoveryRtt || rttInflation < 8.0) &&
         rawBandwidthMbps > 0.1 && rawBandwidthMbps < 150.0;
-    const bool recoveryHealthy = feedbackHealthy && m_rttMinSeeded &&
+    const bool feedbackHealthy = freshFeedback && recoveryLinkHealthy && deltaFailures == 0;
+    const bool recoverySignalsHealthy = recoveryLinkHealthy && m_rttMinSeeded &&
         (lowRecoveryRtt || (rttInflation < SRTTuning::RECOVERY_MAX_SMOOTHED_RTT_INFLATION_MS &&
          m_rttAvgDelta < SRTTuning::RECOVERY_MAX_RTT_TREND_MS));
+    const bool recoveryHealthy = feedbackHealthy && recoverySignalsHealthy;
     m_risingLossSamples = freshFeedback && rawRttRising && deltaFailures > 0
         ? m_risingLossSamples + 1 : 0;
     if (freshFeedback && rawRtt > 0.0) m_previousRawRecoveryRtt = rawRtt;
 
-    // A failed unconfirmed increase is rolled back on the fresh bad sample;
-    // do not wait for the ordinary congestion debounce to acknowledge it.
-    const bool congestionEvidence = state != CongestionState::Clear ||
-        (freshFeedback && rawRttInflated);
-    const bool failedIncrease = deltaFailures > 0 || congestionEvidence;
+    // A mild isolated loss pauses the increase. Congestion, drops, and
+    // meaningful or repeated loss roll back without the normal debounce.
     const bool evaluatingAppliedIncrease = m_cameraControlEnabled &&
         m_appliedIncreaseSince > 0 && ctime - m_appliedIncreaseSince <= SRTTuning::INCREASE_EVALUATION_MS &&
         m_hasSiyiTelemetry && freshFeedback && m_probePreviousCeiling == 0;
@@ -1196,8 +1213,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             (m_appliedPreviousKbps / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS,
             m_maxBitrateKbps);
         unsigned int rollbackCeiling = safe;
-        // Isolated packet loss can justify a rollback without establishing a capacity limit.
-        if (congestionEvidence || deltaFailures > 1) {
+        // Require congestion, drops, or multiple failures to learn a ceiling.
+        if (congestionEvidence || hasLatencyDrops || repeatedLoss || deltaFailures > 1) {
             m_lastCongestedBitrate = m_lastCongestedBitrate > 0
                 ? qMin(m_lastCongestedBitrate, safe) : safe;
             rollbackCeiling = m_lastCongestedBitrate;
@@ -1229,13 +1246,18 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         m_lastBitrateIncrTime = ctime;
     }
 
-    // Probe health is checked on EVERY sample, including between decisions.
-    const bool probeHealthy = recoveryHealthy &&
+    // An isolated mild loss or unchanged counters can preserve an existing
+    // probe, but only fresh, clean feedback carrying load can advance it.
+    const bool probeCarriesLoad =
         SRTRecoveryState::carriesTarget(m_currentBitrateKbps, rawSendRateMbps * 1000.0) &&
         (m_probePreviousCeiling == 0 || SRTRecoveryState::carriesIncrease(
             m_probePreviousCeiling, m_lastCongestedBitrate, rawSendRateMbps * 1000.0));
-    if (m_probePreviousCeiling > 0 && !probeHealthy) m_probeStartedAt = 0;
-    if (!recoveryHealthy || (!probeHealthy && m_probePreviousCeiling == 0)) {
+    const bool probeHealthy = recoveryHealthy && probeCarriesLoad;
+    const bool probeSignalsHealthy = feedbackCountersValid && recoverySignalsHealthy;
+    const bool duplicateFeedback = deltaSent == 0 && deltaFailures == 0;
+    if (m_probePreviousCeiling > 0 && freshFeedback && !probeCarriesLoad) m_probeStartedAt = 0;
+    if (!probeSignalsHealthy || (!freshFeedback && !duplicateFeedback) ||
+        (freshFeedback && !probeCarriesLoad && m_probePreviousCeiling == 0)) {
         const bool probing = m_probePreviousCeiling > 0;
         if (probing) {
             qInfo() << "[SRT Probe] unhealthy feedback; fresh=" << freshFeedback
@@ -1248,7 +1270,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                ctime - m_lastProbeTime >= SRTTuning::FAILURE_MEMORY_PROBE_TIMEOUT_MS) {
         qInfo() << "[SRT Ceiling] probe timed out without confirmation";
         cancelQosProbe(ctime, false);
-    } else if (m_probeHealthySince == 0) {
+    } else if (probeHealthy && m_probeHealthySince == 0) {
         m_probeHealthySince = ctime;
     }
 
@@ -1273,11 +1295,8 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
         }
     }
 
-    // Do not wait for the next increase decision to abandon a probe when a
-    // fresh sample shows loss or congestion.
-    if (deltaFailures > 0 || state != CongestionState::Clear) {
+    if (failedIncrease) {
         m_rfRecoveryRampActive = false;
-        cancelQosProbe(ctime, m_probePreviousCeiling > 0);
     }
     if (cameraQosInterrupted) {
         m_rfRecoveryRampActive = false;
@@ -1401,6 +1420,7 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
             m_wasCongested = false;
             m_rfRecoveryRampActive = m_hasSiyiTelemetry &&
                 m_currentEnvCeiling == RF_ENVIRONMENTS[0].ceilingKbps;
+            m_rfUpgradeFirstStepPending = false;
             applyNewBitrate(target, smoothedRtt, smoothedBw, deltaLoss);
         }
         return;
@@ -1542,9 +1562,9 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                                            .arg(effectiveMax);
                 return;
             } else {
-                // Strictly require ZERO loss before incrementing:
-                // If there is ANY loss (even 0.5%), HOLD current bitrate!
-                if (m_lossPercentAvg > 0.0) {
+                // Wait for a clean current sample. Residual mild loss in the
+                // moving average does not block recovery.
+                if (deltaFailures > 0 || !lossWithinBudget) {
                     m_latestStatusReason = QString("CLEAR (Holding - Loss %1%)").arg(m_lossPercentAvg, 0, 'f', 1);
                     return;
                 }
@@ -1565,10 +1585,13 @@ void SRTAdaptiveBitrateStreaming::processSrtQos(double rawRtt, double rawBandwid
                     const unsigned int recoveryCap = qMin(effectiveMax, recoveryTarget);
                     targetBitrate = m_currentBitrateKbps;
                     if (recoveryCap > m_currentBitrateKbps) {
+                        const bool firstRfUpgradeStep = m_rfRecoveryRampActive && m_rfUpgradeFirstStepPending &&
+                            (!m_serialConnected || m_c2RateTracker.state == C2BitrateGuard::State::Healthy);
                         targetBitrate = m_currentBitrateKbps +
-                            SRTRecoveryState::step(m_currentBitrateKbps, recoveryCap);
+                            SRTRecoveryState::step(m_currentBitrateKbps, recoveryCap, firstRfUpgradeStep);
                         qInfo() << "[QoS Engine] Fast recovery:" << m_currentBitrateKbps
-                                << "->" << targetBitrate << "kbps; target" << recoveryCap;
+                                << "->" << targetBitrate << "kbps; target" << recoveryCap
+                                << "first_rf_upgrade_step=" << firstRfUpgradeStep;
                     }
                 }
                 targetBitrate = (targetBitrate / BITRATE_ROUNDING_STEP_KBPS) * BITRATE_ROUNDING_STEP_KBPS;
@@ -1723,6 +1746,7 @@ void SRTAdaptiveBitrateStreaming::applyNewBitrate(unsigned int targetBitrateKbps
 
     if (targetBitrateKbps == 0) {
         if (m_currentBitrateKbps != 0) {
+            m_rfUpgradeFirstStepPending = false;
             m_recovery = SRTRecoveryState();
             m_appliedIncreaseSince = 0;
             m_lastAchievedBitrateKbps = 0;
@@ -1743,6 +1767,7 @@ void SRTAdaptiveBitrateStreaming::applyNewBitrate(unsigned int targetBitrateKbps
     }
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    m_rfUpgradeFirstStepPending = false;
     if (m_cameraControlEnabled)
         m_recovery.bitrateChanged(now, m_currentBitrateKbps, targetBitrateKbps);
     m_lastBitrateChangeTime = now;

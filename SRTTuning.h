@@ -24,6 +24,8 @@ inline constexpr std::int64_t RECOVERY_COOLDOWN_MS = 3000;
 inline constexpr std::int64_t CLEAR_STABLE_DURATION_MS = 1500;
 inline constexpr unsigned int RF_RECOVERY_STEP_PERCENT = 50;
 inline constexpr unsigned int RF_RECOVERY_MAX_STEP_KBPS = 800;
+inline constexpr unsigned int RF_UPGRADE_FIRST_STEP_PERCENT = 75;
+inline constexpr unsigned int RF_UPGRADE_FIRST_MAX_STEP_KBPS = 1200;
 inline constexpr std::int64_t RF_RECOVERY_INTERVAL_MS = 500;
 
 // Measurement smoothing and bandwidth reservation.
@@ -76,6 +78,7 @@ inline constexpr double RECOVERY_MAX_RTT_RISE_MS = 2.0;
 inline constexpr double RECOVERY_MAX_RAW_RTT_INFLATION_MS = 8.0;
 inline constexpr double RECOVERY_MAX_SMOOTHED_RTT_INFLATION_MS = 3.0;
 inline constexpr double RECOVERY_MAX_RTT_TREND_MS = 0.5;
+inline constexpr double RECOVERY_TOLERATED_LOSS_PERCENT = 1.0;
 inline constexpr unsigned int RECOVERY_FAST_HEADROOM_KBPS = 200;
 inline constexpr unsigned int DISCOVERY_LARGE_HEADROOM_KBPS = 500;
 inline constexpr unsigned int DISCOVERY_MEDIUM_HEADROOM_KBPS = 250;

@@ -140,17 +140,17 @@ private slots:
 
     void strongerRfAcceleratesOnlyWithCleanQos_data() {
         QTest::addColumn<double>("bandwidthMbps");
-        QTest::addColumn<bool>("packetLoss");
+        QTest::addColumn<int>("packetLoss");
         QTest::addColumn<uint>("expectedFirstIncrease");
-        QTest::newRow("healthy") << 5.0 << false
-                                << 250u + SRTAdaptiveBitrateStreaming::RF_RECOVERY_MAX_STEP_KBPS;
-        QTest::newRow("bandwidth-limited") << 1.0 << false << 550u;
-        QTest::newRow("loss-after-rf-recovery") << 5.0 << true << 450u;
+        QTest::newRow("healthy") << 5.0 << 0 << 1450u;
+        QTest::newRow("bandwidth-limited") << 1.0 << 0 << 700u;
+        QTest::newRow("isolated-loss-after-rf-recovery") << 5.0 << 1 << 1450u;
+        QTest::newRow("burst-loss-after-rf-recovery") << 5.0 << 2 << 450u;
     }
 
     void strongerRfAcceleratesOnlyWithCleanQos() {
         QFETCH(double, bandwidthMbps);
-        QFETCH(bool, packetLoss);
+        QFETCH(int, packetLoss);
         QFETCH(uint, expectedFirstIncrease);
         SRTAdaptiveBitrateStreaming abr;
         QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
@@ -177,7 +177,7 @@ private slots:
         rf.rssi = -55;
         for (int i = 0; i < 3; ++i) abr.handleSiyiLinkStat(rf);
         QCOMPARE(changes.size(), 1);
-        if (packetLoss) ++peer.pktSndLossTotal;
+        peer.pktSndLossTotal += packetLoss;
 
         for (int i = 0; i < 28 && changes.size() == 1; ++i) {
             sample();

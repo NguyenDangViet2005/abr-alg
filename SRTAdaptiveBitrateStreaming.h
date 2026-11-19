@@ -196,6 +196,7 @@ private:
     int m_consecutiveCongestedSamples;
     int m_clearBandwidthOverCapSamples = 0;
     bool m_rfRecoveryRampActive;
+    bool m_rfUpgradeFirstStepPending = false;
     SRTRecoveryState m_recovery;
     double m_previousRawRecoveryRtt = 0.0;
     QString m_cameraPeerSet;
@@ -216,6 +217,7 @@ private:
     unsigned int m_lastAppliedRequestKbps = 0;
     qint64 m_stalledSinceMs = 0;
     int m_risingLossSamples = 0;
+    bool m_previousRecoverySampleHadLoss = false;
     qint64 m_lastDecisionLogMs = 0;
 
     // SIYI HM30 RF Telemetry & Environment State

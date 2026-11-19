@@ -15,13 +15,15 @@ public:
     static constexpr unsigned int MaxStepKbps = SRTTuning::RF_RECOVERY_MAX_STEP_KBPS;
     static constexpr unsigned int StepPercent = SRTTuning::RF_RECOVERY_STEP_PERCENT;
 
-    static unsigned int step(unsigned int current, unsigned int target)
+    static unsigned int step(unsigned int current, unsigned int target, bool firstRfUpgradeStep = false)
     {
         if (target <= current) return 0;
         const unsigned int gap = target - current;
+        const auto percent = firstRfUpgradeStep ? SRTTuning::RF_UPGRADE_FIRST_STEP_PERCENT : StepPercent;
+        const auto maxStep = firstRfUpgradeStep ? SRTTuning::RF_UPGRADE_FIRST_MAX_STEP_KBPS : MaxStepKbps;
         const auto proportional = static_cast<unsigned int>(
-            static_cast<std::uint64_t>(gap) * StepPercent / 100);
-        return std::min(gap, std::min(MaxStepKbps, std::max(SRTTuning::RF_RECOVERY_MIN_STEP_KBPS, proportional)));
+            static_cast<std::uint64_t>(gap) * percent / 100);
+        return std::min(gap, std::min(maxStep, std::max(SRTTuning::RF_RECOVERY_MIN_STEP_KBPS, proportional)));
     }
 
     static bool carriesTarget(unsigned int current, double sendKbps)

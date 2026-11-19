@@ -349,12 +349,18 @@ private slots:
         QCOMPARE(abr.m_lastCongestedBitrate, 0u);
     }
 
-    void unconfirmedIncreaseRollsBackOnLoss()
+    void unconfirmedIncreaseToleratesIsolatedLossAndRollsBackOnRepeatedLoss()
     {
         SRTAdaptiveBitrateStreaming abr;
         auto peer = prepare(abr);
         sample(abr, peer);
         QCOMPARE(abr.currentBitrate(), 1800u);
+        ++peer.pktSndLossTotal;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 1800u);
+        QVERIFY(abr.m_recovery.awaitingFeedback());
+        QVERIFY(abr.m_rfRecoveryRampActive);
+        abr.handleQosCameraConnection({peer}); // Duplicate does not clear the loss streak.
         ++peer.pktSndLossTotal;
         sample(abr, peer);
         QVERIFY(abr.currentBitrate() <= 1000u);
@@ -419,12 +425,50 @@ private slots:
         QCOMPARE(abr.currentBitrate(), 1400u);
         QCOMPARE(abr.m_probePreviousCeiling, 1000u);
         QCOMPARE(abr.m_lastCongestedBitrate, 1400u);
-        ++peer.pktSndLossTotal;
+        ++peer.pktSndDropTotal;
         sample(abr, peer);
         QVERIFY(abr.currentBitrate() <= 1000u);
         QCOMPARE(abr.m_lastCongestedBitrate, 1000u);
         QCOMPARE(abr.m_probeRetryDelayMs, 10000);
         QCOMPARE(abr.m_probePreviousCeiling, 0u);
+    }
+
+    void probeCanStartAndConfirmWithIntermittentLightLoss()
+    {
+        SRTAdaptiveBitrateStreaming abr;
+        auto peer = prepare(abr);
+        abr.m_hasLastLoss = true;
+        abr.m_lastLossTotal = peer.pktSndLossTotal;
+        abr.m_lastCongestedBitrate = 1000;
+        const auto healthySince = now() - 6000;
+        abr.m_probeHealthySince = healthySince;
+        abr.m_lastProbeTime = now() - 6000;
+        ++peer.pktSndLossTotal;
+        sample(abr, peer);
+        QVERIFY(abr.m_lossPercentAvg > 0.0);
+        QCOMPARE(abr.currentBitrate(), 1000u);
+        QCOMPARE(abr.m_probeHealthySince, healthySince);
+
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 1400u);
+        QCOMPARE(abr.m_probePreviousCeiling, 1000u);
+
+        abr.m_recovery.bitrateChanged(now() - 3000, 1000, 1400);
+        ready(abr);
+        peer.mbpsSendRate = 1.4;
+        sample(abr, peer);
+        const auto startedAt = now() - 2100;
+        abr.m_probeStartedAt = startedAt;
+        ++peer.pktSndLossTotal;
+        sample(abr, peer);
+        abr.handleQosCameraConnection({peer});
+        QCOMPARE(abr.currentBitrate(), 1400u);
+        QCOMPARE(abr.m_probePreviousCeiling, 1000u);
+        QCOMPARE(abr.m_probeStartedAt, startedAt);
+
+        sample(abr, peer);
+        QCOMPARE(abr.m_probePreviousCeiling, 0u);
+        QCOMPARE(abr.m_lastCongestedBitrate, 1400u);
     }
 
     void rttCancelledProbeWaitsAndRetriesWithSmallerStep()
@@ -582,11 +626,12 @@ private slots:
         sample(abr, peer);
         QCOMPARE(abr.m_lastCongestedBitrate, 0u);
 
+        sample(abr, peer); // Separate the first loss from the loaded sample.
         peer.mbpsSendRate = 1.5;
         peer.pktSndLossTotal += failures;
         sample(abr, peer);
         QCOMPARE(abr.m_lastCongestedBitrate, learnedCeiling);
-        QVERIFY(abr.currentBitrate() <= 1250u);
+        QCOMPARE(abr.currentBitrate(), learnedCeiling > 0 ? learnedCeiling : 1500u);
     }
 
     void cleanLowLoadTimesOutWithoutLearningCeiling()
@@ -621,7 +666,7 @@ private slots:
         QCOMPARE(abr.m_probeRetryDelayMs, SRTTuning::FAILURE_MEMORY_PROBE_INTERVAL_MS);
     }
 
-    void rfUpgradeUsesExistingClearInterval()
+    void rfUpgradeUsesLargerFirstStepThenWaitsForFeedback()
     {
         SRTAdaptiveBitrateStreaming abr;
         auto peer = prepare(abr);
@@ -634,7 +679,17 @@ private slots:
         QCOMPARE(abr.m_currentEnvCeiling, 5000u);
         QCOMPARE(abr.currentBitrate(), 1000u);
         sample(abr, peer);
-        QCOMPARE(abr.currentBitrate(), 1800u);
+        QCOMPARE(abr.currentBitrate(), 2200u);
+        QVERIFY(abr.m_recovery.awaitingFeedback());
+
+        ready(abr);
+        abr.m_recovery.bitrateChanged(now() - 100, 1000, 2200);
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 2200u);
+
+        peer.mbpsSendRate = 2.2;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 3000u);
     }
 
     void probeRequiresContinuousHealthAndHonorsBackoff()
