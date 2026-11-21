@@ -196,7 +196,9 @@ private:
     int m_consecutiveCongestedSamples;
     int m_clearBandwidthOverCapSamples = 0;
     bool m_rfRecoveryRampActive;
-    bool m_rfUpgradeFirstStepPending = false;
+    bool m_linkRecoveryRampActive = false;
+    bool m_c2RecoveryRampPending = false;
+    void applyC2OutageCeiling();
     SRTRecoveryState m_recovery;
     double m_previousRawRecoveryRtt = 0.0;
     QString m_cameraPeerSet;

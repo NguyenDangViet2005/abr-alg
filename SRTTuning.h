@@ -24,8 +24,9 @@ inline constexpr std::int64_t RECOVERY_COOLDOWN_MS = 3000;
 inline constexpr std::int64_t CLEAR_STABLE_DURATION_MS = 1500;
 inline constexpr unsigned int RF_RECOVERY_STEP_PERCENT = 50;
 inline constexpr unsigned int RF_RECOVERY_MAX_STEP_KBPS = 800;
-inline constexpr unsigned int RF_UPGRADE_FIRST_STEP_PERCENT = 75;
-inline constexpr unsigned int RF_UPGRADE_FIRST_MAX_STEP_KBPS = 1200;
+inline constexpr unsigned int LINK_RECOVERY_STEP_PERCENT = 75;
+inline constexpr unsigned int LINK_RECOVERY_MAX_STEP_KBPS = 1200;
+inline constexpr unsigned int LINK_RECOVERY_FINISH_GAP_KBPS = 400;
 inline constexpr std::int64_t RF_RECOVERY_INTERVAL_MS = 500;
 
 // Measurement smoothing and bandwidth reservation.

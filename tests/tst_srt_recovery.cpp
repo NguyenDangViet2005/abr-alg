@@ -394,6 +394,63 @@ private slots:
         QCOMPARE(probing.m_probePreviousCeiling, 0u);
     }
 
+    void restoredC2StartsFastRecoveryAfterCameraWarmupInStrongRf()
+    {
+        SRTAdaptiveBitrateStreaming abr;
+        auto peer = prepare(abr);
+        auto strongRf = rf();
+        strongRf.rssi = -65;
+        for (int i = 0; i < 5; ++i) abr.handleSiyiLinkStat(strongRf);
+        QCOMPARE(abr.m_currentEnvCeiling, 3000u);
+        abr.setSerialConnected(true);
+        const auto nowMs = abr.m_c2RateClock.elapsed();
+        abr.m_c2RateTracker.receive({{"control:1235", 8, 0, 0}},
+                                    nowMs - C2BitrateGuard::outageMs - 1, 1000);
+        abr.onHeartbeatTimeout();
+        QCOMPARE(abr.currentBitrate(), 250u);
+        QCOMPARE(abr.effectiveAbrCeiling(6000), 250u);
+
+        SRTPeerStat c2;
+        c2.peerAddress = "control";
+        c2.peerPort = 1235;
+        c2.msRTT = 8;
+        abr.handleC2ConnectionStats({c2});
+        QVERIFY(abr.m_c2RecoveryRampPending);
+        abr.m_cameraQosRecoverySamplesRemaining = SRTTuning::CAMERA_QOS_RECOVERY_SAMPLES;
+        abr.m_clearSinceMs = 0;
+        abr.handleQosCameraConnection({peer});
+        QCOMPARE(abr.m_cameraQosRecoverySamplesRemaining, SRTTuning::CAMERA_QOS_RECOVERY_SAMPLES);
+        peer.mbpsSendRate = 0.25;
+        sample(abr, peer);
+        QVERIFY(abr.m_clearSinceMs > 0);
+        const auto clearSince = now() - 2000;
+        abr.m_clearSinceMs = clearSince;
+        for (int i = 1; i < SRTTuning::CAMERA_QOS_RECOVERY_SAMPLES; ++i) sample(abr, peer);
+        QCOMPARE(abr.m_cameraQosRecoverySamplesRemaining, 0);
+        QCOMPARE(abr.m_clearSinceMs, clearSince);
+        abr.m_lastBitrateIncrTime = now() - 2100;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 250u);
+        QVERIFY(abr.m_c2RecoveryRampPending);
+
+        QTest::qWait(20); // Give the next report a distinct monotonic timestamp.
+        abr.handleC2ConnectionStats({c2});
+        QCOMPARE(abr.m_c2RateTracker.ceiling, 1450);
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 1150u);
+        QVERIFY(abr.m_recovery.awaitingFeedback());
+        QVERIFY(!abr.m_c2RecoveryRampPending);
+
+        QTest::qWait(1000);
+        abr.handleC2ConnectionStats({c2});
+        QCOMPARE(abr.m_c2RateTracker.ceiling, 2650);
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 1150u);
+        peer.mbpsSendRate = 1.15;
+        sample(abr, peer);
+        QCOMPARE(abr.currentBitrate(), 2250u);
+    }
+
     void restoredRfCanProbeLearnedCeilingBeforeNormalRetention()
     {
         SRTAdaptiveBitrateStreaming abr;
@@ -666,7 +723,7 @@ private slots:
         QCOMPARE(abr.m_probeRetryDelayMs, SRTTuning::FAILURE_MEMORY_PROBE_INTERVAL_MS);
     }
 
-    void rfUpgradeUsesLargerFirstStepThenWaitsForFeedback()
+    void consecutiveRfUpgradesKeepFeedbackAndRampToCeiling()
     {
         SRTAdaptiveBitrateStreaming abr;
         auto peer = prepare(abr);
@@ -674,22 +731,34 @@ private slots:
         weaker.rssi = -70;
         for (int i = 0; i < 5; ++i) abr.handleSiyiLinkStat(weaker);
         QCOMPARE(abr.m_currentEnvCeiling, 2000u);
+        auto strong = rf();
+        strong.rssi = -65;
+        for (int i = 0; i < 5; ++i) abr.handleSiyiLinkStat(strong);
+        QCOMPARE(abr.m_currentEnvCeiling, 3000u);
         ready(abr);
-        for (int i = 0; i < 3; ++i) abr.handleSiyiLinkStat(rf());
-        QCOMPARE(abr.m_currentEnvCeiling, 5000u);
+        peer.mbpsBandwidth = 8.0;
         QCOMPARE(abr.currentBitrate(), 1000u);
         sample(abr, peer);
         QCOMPARE(abr.currentBitrate(), 2200u);
         QVERIFY(abr.m_recovery.awaitingFeedback());
 
         ready(abr);
-        abr.m_recovery.bitrateChanged(now() - 100, 1000, 2200);
+        for (int i = 0; i < 3; ++i) abr.handleSiyiLinkStat(rf());
+        QCOMPARE(abr.m_currentEnvCeiling, 5000u);
+        QVERIFY(abr.m_recovery.awaitingFeedback());
         sample(abr, peer);
         QCOMPARE(abr.currentBitrate(), 2200u);
 
-        peer.mbpsSendRate = 2.2;
-        sample(abr, peer);
-        QCOMPARE(abr.currentBitrate(), 3000u);
+        unsigned int previous = 1000u;
+        for (const unsigned int target : {3400u, 4600u, 5000u}) {
+            const auto current = abr.currentBitrate();
+            abr.m_recovery.bitrateChanged(now() - 600, previous, current);
+            abr.m_lastBitrateIncrTime = now() - SRTTuning::RF_RECOVERY_INTERVAL_MS;
+            peer.mbpsSendRate = current / 1000.0;
+            sample(abr, peer);
+            QCOMPARE(abr.currentBitrate(), target);
+            previous = current;
+        }
     }
 
     void probeRequiresContinuousHealthAndHonorsBackoff()

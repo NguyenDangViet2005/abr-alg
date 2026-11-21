@@ -15,12 +15,13 @@ public:
     static constexpr unsigned int MaxStepKbps = SRTTuning::RF_RECOVERY_MAX_STEP_KBPS;
     static constexpr unsigned int StepPercent = SRTTuning::RF_RECOVERY_STEP_PERCENT;
 
-    static unsigned int step(unsigned int current, unsigned int target, bool firstRfUpgradeStep = false)
+    static unsigned int step(unsigned int current, unsigned int target, bool linkRecovery = false)
     {
         if (target <= current) return 0;
         const unsigned int gap = target - current;
-        const auto percent = firstRfUpgradeStep ? SRTTuning::RF_UPGRADE_FIRST_STEP_PERCENT : StepPercent;
-        const auto maxStep = firstRfUpgradeStep ? SRTTuning::RF_UPGRADE_FIRST_MAX_STEP_KBPS : MaxStepKbps;
+        if (linkRecovery && gap <= SRTTuning::LINK_RECOVERY_FINISH_GAP_KBPS) return gap;
+        const auto percent = linkRecovery ? SRTTuning::LINK_RECOVERY_STEP_PERCENT : StepPercent;
+        const auto maxStep = linkRecovery ? SRTTuning::LINK_RECOVERY_MAX_STEP_KBPS : MaxStepKbps;
         const auto proportional = static_cast<unsigned int>(
             static_cast<std::uint64_t>(gap) * percent / 100);
         return std::min(gap, std::min(maxStep, std::max(SRTTuning::RF_RECOVERY_MIN_STEP_KBPS, proportional)));
