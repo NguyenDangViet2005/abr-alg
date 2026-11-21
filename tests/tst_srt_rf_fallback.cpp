@@ -7,7 +7,7 @@ private slots:
         QTest::addColumn<double>("bandwidthMbps");
         QTest::addColumn<double>("rttMs");
         QTest::addColumn<uint>("expectedKbps");
-        QTest::newRow("healthy") << 4.0 << 7.0 << 1000u;
+        QTest::newRow("healthy") << 4.0 << 7.0 << static_cast<uint>(SRTTuning::STARTUP_BITRATE_KBPS);
         QTest::newRow("bandwidth-limited") << 0.7 << 7.0 << 600u;
         QTest::newRow("missing-bandwidth") << 0.0 << 7.0 << 100u;
         QTest::newRow("high-rtt") << 4.0 << 100.0 << 100u;
@@ -80,6 +80,111 @@ private slots:
         QCOMPARE(bitrate(), 200u);
         for (int i = 0; i < 10; ++i) sample(0.25);
         QCOMPARE(bitrate(), 200u);
+    }
+
+    void strongRfAtStartupAcceleratesWithCleanQos() {
+        SRTAdaptiveBitrateStreaming abr;
+        QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
+        abr.start();
+
+        SiyiLinkStat rf;
+        rf.isAlive = true;
+        rf.signal = 100;
+        rf.rssi = -60;
+        SRTPeerStat peer;
+        peer.msRTT = 7;
+        peer.mbpsBandwidth = 5;
+        peer.mbpsSendRate = 1.0; // Confirm that the startup target is actually carried.
+
+        for (int i = 0; i < 25 && changes.size() < 2; ++i) {
+            abr.handleSiyiLinkStat(rf);
+            peer.pktSentTotal += 100;
+            abr.handleQosCameraConnection({peer});
+            if (changes.size() < 2) QTest::qWait(200);
+        }
+        QCOMPARE(changes.size(), 2);
+        QCOMPARE(changes.at(0).at(0).toUInt(), static_cast<uint>(SRTTuning::STARTUP_BITRATE_KBPS));
+        QCOMPARE(changes.at(1).at(0).toUInt(),
+                 SRTTuning::STARTUP_BITRATE_KBPS + abr.RF_RECOVERY_MAX_STEP_KBPS);
+    }
+
+    void sparseCameraQosCanStillIncreaseBitrate() {
+        SRTAdaptiveBitrateStreaming abr;
+        QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
+        abr.start();
+
+        SiyiLinkStat rf;
+        rf.isAlive = true;
+        rf.signal = 100;
+        rf.rssi = -50;
+        SRTPeerStat peer;
+        peer.msRTT = 7;
+        peer.mbpsBandwidth = 6;
+        peer.mbpsSendRate = 1;
+
+        for (int i = 0; i < 3; ++i) {
+            abr.handleSiyiLinkStat(rf);
+            peer.pktSentTotal += 500;
+            abr.handleQosCameraConnection({peer});
+            if (i < 2) {
+                QTest::qWait(1200);
+                abr.handleSiyiLinkStat(rf);
+                QTest::qWait(1200);
+            }
+        }
+        QCOMPARE(changes.size(), 2);
+        // Three sparse samples permit a normal step, but are not enough to
+        // finish the five-sample RTT baseline required by fast recovery.
+        QCOMPARE(changes.last().at(0).toUInt(), SRTTuning::STARTUP_BITRATE_KBPS + 200u);
+    }
+
+    void strongerRfAcceleratesOnlyWithCleanQos_data() {
+        QTest::addColumn<double>("bandwidthMbps");
+        QTest::addColumn<int>("packetLoss");
+        QTest::addColumn<uint>("expectedFirstIncrease");
+        QTest::newRow("healthy") << 5.0 << 0 << 1450u;
+        QTest::newRow("bandwidth-limited") << 1.0 << 0 << 700u;
+        QTest::newRow("isolated-loss-after-rf-recovery") << 5.0 << 1 << 1450u;
+        QTest::newRow("burst-loss-after-rf-recovery") << 5.0 << 2 << 450u;
+    }
+
+    void strongerRfAcceleratesOnlyWithCleanQos() {
+        QFETCH(double, bandwidthMbps);
+        QFETCH(int, packetLoss);
+        QFETCH(uint, expectedFirstIncrease);
+        SRTAdaptiveBitrateStreaming abr;
+        QSignalSpy changes(&abr, &IAdaptiveBitrateStreaming::bitrateChanged);
+        abr.start();
+
+        SiyiLinkStat rf;
+        rf.isAlive = true;
+        rf.signal = 100;
+        rf.rssi = -83;
+        SRTPeerStat peer;
+        peer.msRTT = 7;
+        peer.mbpsBandwidth = bandwidthMbps;
+        peer.mbpsSendRate = 0.25;
+
+        const auto sample = [&]() {
+            abr.handleSiyiLinkStat(rf);
+            peer.pktSentTotal += 100;
+            abr.handleQosCameraConnection({peer});
+        };
+        for (int i = 0; i < 5; ++i) sample();
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(changes.last().at(0).toUInt(), 250u);
+
+        rf.rssi = -55;
+        for (int i = 0; i < 3; ++i) abr.handleSiyiLinkStat(rf);
+        QCOMPARE(changes.size(), 1);
+        peer.pktSndLossTotal += packetLoss;
+
+        for (int i = 0; i < 28 && changes.size() == 1; ++i) {
+            sample();
+            if (changes.size() == 1) QTest::qWait(200);
+        }
+        QVERIFY(changes.size() > 1);
+        QCOMPARE(changes.at(1).at(0).toUInt(), expectedFirstIncrease);
     }
 
     void invalidRfKeepsQosAndWatchdogActive() {

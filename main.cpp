@@ -6,6 +6,10 @@
 #include "RouterInterfaceStat.h"
 #include "dev/LogUploader.h"
 #include "SiyiLinkStat.h"
+#ifdef Q_OS_UNIX
+#include <QSocketNotifier>
+#include <unistd.h>
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -43,14 +47,8 @@ int main(int argc, char *argv[])
         "pct", QString::number(ABR_HEADROOM_FACTOR_PCT));
     cli.addOption(optHeadroom);
 
-    // --disable-abr: freeze the camera bitrate. The ABR instances keep running
-    // and keep logging (shadow mode), and the dashboard keeps receiving their
-    // decisions — only the OUTBOUND commands are muted. For A/B measurement:
-    // compare "ABR in control" against "camera on its own default" with the
-    // decision stream still visible. Socket restarts (loss > 45% / score cliff)
-    // remain enabled on purpose — see XBQoSService::setAbrDisabled.
     const QCommandLineOption optDisableAbr(
-        "disable-abr", "Do not change the camera bitrate. The ABR still runs and logs.");
+        "disable-abr", "Observe QoS and ABR decisions without sending camera commands.");
     cli.addOption(optDisableAbr);
 
     const QCommandLineOption optEnable(
@@ -145,8 +143,8 @@ int main(int argc, char *argv[])
     // Phase 09 (headroom): apply the CLI override (or the #define default).
     qosService.setAbrHeadroomPct(cli.value(optHeadroom).toInt());
 
-    // --disable-abr: mute the outbound bitrate commands (ABR keeps running).
-    qosService.setAbrDisabled(cli.isSet(optDisableAbr));
+    const bool monitorControl = qEnvironmentVariableIntValue("XB_QOS_MONITOR_ABR") == 1;
+    qosService.setAbrDisabled(cli.isSet(optDisableAbr) || monitorControl);
 
     qosService.setQosDebug(cli.isSet(optQosDebug),
                            cli.value(optHost),
@@ -154,6 +152,36 @@ int main(int argc, char *argv[])
                            cli.value(optDir));
 
     qosService.start();
+
+#ifdef Q_OS_UNIX
+    if (monitorControl && isatty(STDIN_FILENO)) {
+        auto *input = new QSocketNotifier(STDIN_FILENO, QSocketNotifier::Read, &qosService);
+        QObject::connect(input, &QSocketNotifier::activated, &qosService,
+                         [input, &qosService, line = QByteArray()]() mutable {
+            char buffer[256];
+            const auto size = read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (size <= 0) {
+                input->setEnabled(false);
+                return;
+            }
+            line.append(buffer, size);
+            qsizetype newline;
+            while ((newline = line.indexOf('\n')) >= 0) {
+                const auto command = line.left(newline).trimmed();
+                line.remove(0, newline + 1);
+                if (command == "# XB_ABR_ENABLE") {
+                    qosService.setAbrDisabled(false);
+                    qInfo().noquote() << "[XB_ABR] active";
+                } else if (command == "# XB_ABR_DISABLE") {
+                    qosService.setAbrDisabled(true);
+                    qInfo().noquote() << "[XB_ABR] observe";
+                }
+            }
+            if (line.size() > 4096) line.clear();
+        });
+        qInfo().noquote() << "[XB_ABR] observe";
+    }
+#endif
 
     return QCoreApplication::exec();
 }

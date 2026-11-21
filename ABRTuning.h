@@ -31,7 +31,7 @@
 // (đổi mấy cái này là thấy khác biệt rõ nhất; sửa cẩn thận)
 // ─────────────────────────────────────────────────────────────────────────
 
-// Bitrate video tối đa (kbps) — trần tuyệt đối của mọi đề xuất bitrate.
+// Bitrate video tối đa ROUTER (kbps). SRT có trần riêng trong SRTTuning.h.
 // Đây là 1 nguồn duy nhất: ABRConfigs.h alias ABR_DEFAULT_MAX_ABR_BITRATE về đây.
 // [xbfirm] = xbfirm MAX_BITRATE_KBPS (2000).
 #define ABR_MAX_BITRATE_KBPS                   4000
@@ -46,6 +46,7 @@
 // start()/reset(). Router ABR được dispatch tới camera ngay tick đầu (switch
 // edge "" -> primary), nên đây CHÍNH LÀ bitrate camera thấy lúc vào, không chờ
 // ramp. 1000 = vào thẳng 1000 thay vì 800 rồi bò lên (+100/2s).
+// SRT có STARTUP_BITRATE_KBPS riêng trong SRTTuning.h (hiện cũng là 1000).
 // [PORT DEVIATION] (xbfirm ctor = 800, start() = 1000 — lệch nhau; đây gộp về 1).
 #define ABR_STARTUP_BITRATE_KBPS               1000
 

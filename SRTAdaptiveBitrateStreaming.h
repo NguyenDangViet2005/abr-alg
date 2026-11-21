@@ -12,58 +12,48 @@
 #include "ABRConfigs.h"
 #include "SiyiLinkStat.h"
 #include "C2BitrateGuard.h"
+#include "SRTRecoveryState.h"
 #include <QElapsedTimer>
 
 class SRTAdaptiveBitrateStreaming : public IAdaptiveBitrateStreaming
 {
     Q_OBJECT
 public:
-    // ── BelaCoder Configuration Constants ──
-    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS          = 0;
-    // Single source of truth: the shared ABR ceiling, so this engine and the
-    // router ABR cannot drift. Was a private 6000 literal.
-    static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS          = ABR_DEFAULT_MAX_ABR_BITRATE;
-    // Start-at-the-ceiling: the SRT ramp begins high and backs off, so the
-    // initial ask must not exceed the max or reset() would hand a value the
-    // ceiling then has to clamp (qBound in reset()). Tied to the max so the two
-    // cannot drift; was a private 6000 literal.
-    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS      = DEFAULT_MAX_BITRATE_KBPS;
-    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS     = 50;
-
-    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS       = 2000;  
-    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS           = 250; 
-    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS         = 400;  
-    static constexpr qint64 RECOVERY_COOLDOWN_MS                    = 3000;
- 
-    static constexpr qint64 CLEAR_STABLE_DURATION_MS                = 1500;
-    static constexpr int SLIDING_WINDOW_SIZE                        = 5;
-    static constexpr double MIN_VALID_RTT_MS                        = 5.0;
-
-    static constexpr double BW_UTILIZATION_RATIO                    = 0.90;
-
-    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS    = 50;
-    static constexpr qint64 FAILURE_MEMORY_PROBE_INTERVAL_MS        = 30000;
-    static constexpr qint64 FAILURE_MEMORY_RETENTION_MS             = 30000;
-
-    static constexpr int RTT_BASELINE_WARMUP_SAMPLES                = 5;
-
-    static constexpr double RTT_BASELINE_DRIFT_PER_SEC              = 0.002;
-
-    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS        = 50;
-    static constexpr qint64 KEYFRAME_REQUEST_COOLDOWN_MS            = 10000;
-    static constexpr qint64 KEYFRAME_IMMUNITY_DURATION_MS           = 800;
-    static constexpr qint64 MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE      = 20;
-
-    static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS             = 5000;
-    static constexpr qint64 CAMERA_QOS_FALLBACK_TIMEOUT_MS          = 15000;
-    static constexpr int CAMERA_QOS_RECOVERY_SAMPLES                = 3;
-    static constexpr unsigned int CAMERA_QOS_WARM_START_MIN_KBPS    = 250;
-    static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS                 = 5000;
-
-    static constexpr double LOSS_THRESHOLD_BOTTLENECK_PERCENT       = 2.5;
-    static constexpr double LOSS_THRESHOLD_SEVERE_PERCENT           = 8.0;
-    static constexpr double LOSS_THRESHOLD_PANIC_PERCENT            = 25.0;
-    static constexpr qint64 TRANSIENT_OCCLUSION_DEBOUNCE_MS         = 1000;
+    // Values live in SRTTuning.h; aliases preserve the existing public API.
+    static constexpr unsigned int DEFAULT_MIN_BITRATE_KBPS = SRTTuning::DEFAULT_MIN_BITRATE_KBPS;
+    static constexpr unsigned int DEFAULT_MAX_BITRATE_KBPS = SRTTuning::DEFAULT_MAX_BITRATE_KBPS;
+    static constexpr unsigned int DEFAULT_INITIAL_BITRATE_KBPS = SRTTuning::DEFAULT_INITIAL_BITRATE_KBPS;
+    static constexpr unsigned int MIN_ACTIVE_VIDEO_BITRATE_KBPS = SRTTuning::MIN_ACTIVE_VIDEO_BITRATE_KBPS;
+    static constexpr qint64 BITRATE_INCR_DECISION_INTERVAL_MS = SRTTuning::BITRATE_INCR_DECISION_INTERVAL_MS;
+    static constexpr qint64 BITRATE_DECR_FAST_INTERVAL_MS = SRTTuning::BITRATE_DECR_FAST_INTERVAL_MS;
+    static constexpr qint64 BITRATE_DECR_NORMAL_INTERVAL_MS = SRTTuning::BITRATE_DECR_NORMAL_INTERVAL_MS;
+    static constexpr qint64 RECOVERY_COOLDOWN_MS = SRTTuning::RECOVERY_COOLDOWN_MS;
+    static constexpr qint64 CLEAR_STABLE_DURATION_MS = SRTTuning::CLEAR_STABLE_DURATION_MS;
+    static constexpr unsigned int RF_RECOVERY_STEP_PERCENT = SRTTuning::RF_RECOVERY_STEP_PERCENT;
+    static constexpr unsigned int RF_RECOVERY_MAX_STEP_KBPS = SRTTuning::RF_RECOVERY_MAX_STEP_KBPS;
+    static constexpr qint64 RF_RECOVERY_INTERVAL_MS = SRTTuning::RF_RECOVERY_INTERVAL_MS;
+    static constexpr int SLIDING_WINDOW_SIZE = SRTTuning::SLIDING_WINDOW_SIZE;
+    static constexpr double MIN_VALID_RTT_MS = SRTTuning::MIN_VALID_RTT_MS;
+    static constexpr double BW_UTILIZATION_RATIO = SRTTuning::BW_UTILIZATION_RATIO;
+    static constexpr unsigned int FAILURE_MEMORY_PROBE_STEP_KBPS = SRTTuning::FAILURE_MEMORY_PROBE_STEP_KBPS;
+    static constexpr qint64 FAILURE_MEMORY_PROBE_INTERVAL_MS = SRTTuning::FAILURE_MEMORY_PROBE_INTERVAL_MS;
+    static constexpr qint64 FAILURE_MEMORY_RETENTION_MS = SRTTuning::FAILURE_MEMORY_RETENTION_MS;
+    static constexpr qint64 FAILURE_MEMORY_PROBE_CONFIRM_MS = SRTTuning::FAILURE_MEMORY_PROBE_CONFIRM_MS;
+    static constexpr int RTT_BASELINE_WARMUP_SAMPLES = SRTTuning::RTT_BASELINE_WARMUP_SAMPLES;
+    static constexpr double RTT_BASELINE_DRIFT_PER_SEC = SRTTuning::RTT_BASELINE_DRIFT_PER_SEC;
+    static constexpr unsigned int BITRATE_ROUNDING_STEP_KBPS = SRTTuning::BITRATE_ROUNDING_STEP_KBPS;
+    static constexpr qint64 KEYFRAME_REQUEST_COOLDOWN_MS = SRTTuning::KEYFRAME_REQUEST_COOLDOWN_MS;
+    static constexpr qint64 KEYFRAME_IMMUNITY_DURATION_MS = SRTTuning::KEYFRAME_IMMUNITY_DURATION_MS;
+    static constexpr qint64 MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE = SRTTuning::MIN_SENT_PACKETS_FOR_LOSS_ESTIMATE;
+    static constexpr qint64 CAMERA_QOS_STALE_TIMEOUT_MS = SRTTuning::CAMERA_QOS_STALE_TIMEOUT_MS;
+    static constexpr qint64 CAMERA_QOS_FALLBACK_TIMEOUT_MS = SRTTuning::CAMERA_QOS_FALLBACK_TIMEOUT_MS;
+    static constexpr int CAMERA_QOS_RECOVERY_SAMPLES = SRTTuning::CAMERA_QOS_RECOVERY_SAMPLES;
+    static constexpr unsigned int CAMERA_QOS_WARM_START_MIN_KBPS = SRTTuning::CAMERA_QOS_WARM_START_MIN_KBPS;
+    static constexpr qint64 TRAFFIC_IDLE_TIMEOUT_MS = SRTTuning::TRAFFIC_IDLE_TIMEOUT_MS;
+    static constexpr double LOSS_THRESHOLD_BOTTLENECK_PERCENT = SRTTuning::LOSS_THRESHOLD_BOTTLENECK_PERCENT;
+    static constexpr double LOSS_THRESHOLD_SEVERE_PERCENT = SRTTuning::LOSS_THRESHOLD_SEVERE_PERCENT;
+    static constexpr double LOSS_THRESHOLD_PANIC_PERCENT = SRTTuning::LOSS_THRESHOLD_PANIC_PERCENT;
+    static constexpr qint64 TRANSIENT_OCCLUSION_DEBOUNCE_MS = SRTTuning::TRANSIENT_OCCLUSION_DEBOUNCE_MS;
 
     enum class CongestionState {
         Clear = 0,     
@@ -96,16 +86,20 @@ public:
     bool isTrafficActive() const override { return !m_isTrafficIdle; }
 
     bool canResyncCameraBitrate() const;
+    unsigned int currentBitrate() const { return m_currentBitrateKbps; }
 
 public slots:
     void handleQosCameraConnection(const QVector<SRTPeerStat> &peers);
     void handleC2ConnectionStats(const QVector<SRTPeerStat> &peers);
+    void setSerialConnected(bool connected);
     void handleSiyiLinkStat(const SiyiLinkStat &stat);
     void handleSiyiLinkLost();
     void onHeartbeatTimeout();
-    void handleCameraReportedBitrate(int achievedKbps);
+    void handleCameraReportedBitrate(int achievedKbps, int requestedKbps = 0);
+    void setCameraControlEnabled(bool enabled);
 
 private:
+    friend class SrtRecoveryTest;
     CongestionState classifyCongestion(double lossPercent, double rtt, double rttInflation, bool useExitThresholds, bool hasLatencyDrops = false, bool isKeyframeBurst = false) const;
 
     void processSrtQos(double rawRtt, double rawBandwidthMbps, double rawSendRateMbps,
@@ -114,6 +108,10 @@ private:
                        int rawRetransTotal = 0);
     void applyNewBitrate(unsigned int targetBitrateKbps, double rtt, double bandwidthMbps, int deltaLoss);
     unsigned int calculateNetworkPartitionCeiling(double smoothedBw, double lossPercent, CongestionState state) const;
+
+    unsigned int effectiveAbrCeiling(unsigned int profileCeiling) const;
+    // Exact bandwidth/goodput cap from the latest QoS decision, before learned limits.
+    unsigned int m_bandwidthCapKbps = DEFAULT_MAX_BITRATE_KBPS;
 
     // SIYI RF Environment helper
     const RfEnvironment& getRfEnvironment(double rssi) const;
@@ -141,6 +139,7 @@ private:
     double m_c2Unacked;
     QElapsedTimer m_c2RateClock;
     C2BitrateGuard m_c2RateTracker;
+    bool m_serialConnected = false;
     qint64 m_lastC2PacketTime;
 
     // Sliding window sample histories
@@ -196,7 +195,13 @@ private:
     qint64 m_congestionStartTimeMs;
     int m_consecutiveCongestedSamples;
     int m_clearBandwidthOverCapSamples = 0;
-    bool m_networkEnvironmentChanged;
+    bool m_rfRecoveryRampActive;
+    bool m_linkRecoveryRampActive = false;
+    bool m_c2RecoveryRampPending = false;
+    void applyC2OutageCeiling();
+    SRTRecoveryState m_recovery;
+    double m_previousRawRecoveryRtt = 0.0;
+    QString m_cameraPeerSet;
 
     qint64 m_lastCameraQosTime;
     qint64 m_lastActiveTrafficTime;
@@ -206,6 +211,16 @@ private:
     int m_cameraQosRecoverySamplesRemaining = 0;
     qint64 m_lastCollapseLogTime;
     unsigned int m_lastAchievedBitrateKbps;
+    bool m_cameraControlEnabled = true;
+    qint64 m_appliedIncreaseSince = 0;
+    unsigned int m_appliedPreviousKbps = 0;
+    unsigned int m_appliedTargetKbps = 0;
+    bool m_appliedIncreaseCarriedLoad = false;
+    unsigned int m_lastAppliedRequestKbps = 0;
+    qint64 m_stalledSinceMs = 0;
+    int m_risingLossSamples = 0;
+    bool m_previousRecoverySampleHadLoss = false;
+    qint64 m_lastDecisionLogMs = 0;
 
     // SIYI HM30 RF Telemetry & Environment State
     SiyiLinkStat m_siyiStat;
